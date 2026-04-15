@@ -15,9 +15,11 @@ Phase 3: Transcript tool + bundle integration
 
 __amplifier_module_type__ = "context"
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,35 @@ logger = logging.getLogger(__name__)
 
 # Format version for transcript.jsonl header
 TRANSCRIPT_FORMAT_VERSION = "1.0.0"
+
+
+@dataclass
+class SummaryResult:
+    """Result of a single LLM summarization call (Phase 2).
+
+    Captures the output text along with the turn range and message range
+    that were summarized, plus how many compression passes were applied.
+    """
+
+    summary_text: str
+    turn_range: tuple[int, int]
+    source_message_range: tuple[int, int]
+    compression_passes: int = 1
+
+
+@dataclass
+class SummaryTier:
+    """A finalized summary tier stored in the context window (Phase 2).
+
+    Represents a committed summary block inserted into the assembled message
+    list, including a token estimate for budget tracking.
+    """
+
+    content: str
+    turn_range: tuple[int, int]
+    source_message_range: tuple[int, int]
+    compression_passes: int
+    token_estimate: int
 
 
 async def mount(coordinator: Any, config: dict[str, Any] | None = None):
@@ -142,11 +173,17 @@ class ManagedContextManager:
         )
 
         # Phase 2 placeholders
-        self._summary_tiers: list[dict[str, Any]] = []
+        self._summary_tiers: list[SummaryTier] = []
         self._is_summarizing: bool = False
-        self._pending_summary: Any = None
+        self._pending_summary: SummaryResult | None = None
         self._summarization_failures: int = 0
         self._cached_provider: Any = None
+
+        # Phase 2 tracking fields
+        self._current_turn: int = 0
+        self._summarized_through_turn: int = 0
+        self._transcript_message_offset: int = 0
+        self._summarization_task: asyncio.Task[None] | None = None
 
     @property
     def transcript_path(self) -> Path | None:
@@ -330,6 +367,11 @@ class ManagedContextManager:
         """
         await self._archive_transcript()
 
+        # Cancel any in-flight summarization task
+        if self._summarization_task is not None and not self._summarization_task.done():
+            self._summarization_task.cancel()
+        self._summarization_task = None
+
         # Reset all in-memory state
         self._messages = []
         self._message_index = 0
@@ -340,6 +382,11 @@ class ManagedContextManager:
         self._is_summarizing = False
         self._pending_summary = None
         self._summarization_failures = 0
+
+        # Reset Phase 2 tracking fields
+        self._current_turn = 0
+        self._summarized_through_turn = 0
+        self._transcript_message_offset = 0
 
         # Write fresh transcript header
         self._write_transcript_header()
