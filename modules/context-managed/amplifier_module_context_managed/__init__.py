@@ -385,16 +385,21 @@ class ManagedContextManager:
 
             self._pending_summary = None
 
-        # Insert summary tiers with cache hints
-        for tier in self._summary_tiers:
+        # Insert summary tiers (Phase 2) — only the last tier gets cache hint
+        for i, tier in enumerate(self._summary_tiers):
+            is_last = i == len(self._summary_tiers) - 1
+            metadata: dict[str, Any] = {
+                "type": "context_managed_summary",
+                "turn_range": list(tier.turn_range),
+                "compression_passes": tier.compression_passes,
+            }
+            if is_last:
+                metadata["cache_hint"] = "breakpoint"
             assembled.append(
                 {
                     "role": "system",
                     "content": tier.content,
-                    "metadata": {
-                        "cache_hint": "breakpoint",
-                        "type": "context_managed_summary",
-                    },
+                    "metadata": metadata,
                 }
             )
 

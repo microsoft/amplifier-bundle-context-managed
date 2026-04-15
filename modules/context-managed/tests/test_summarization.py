@@ -778,3 +778,177 @@ class TestPendingSummarySwap:
         assert len(mgr._summary_tiers) == 0
         # Estimate should be unchanged
         assert mgr._running_token_estimate == initial_estimate
+
+
+class TestTiersInAssembly:
+    """Tests for summary tier insertion in get_messages_for_request() (task-7)."""
+
+    @pytest.mark.asyncio
+    async def test_tiers_inserted_between_system_and_verbatim(self):
+        """Summary tiers appear between system message and verbatim conversation messages."""
+        from amplifier_module_context_managed import ManagedContextManager, SummaryTier
+
+        mgr = ManagedContextManager()
+        # Set up a stored system message at index 0
+        mgr._messages = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+        ]
+        # Add two summary tiers
+        tier1 = SummaryTier(
+            content="Tier 1 summary",
+            turn_range=(1, 2),
+            source_message_range=(0, 4),
+            compression_passes=1,
+            token_estimate=100,
+        )
+        tier2 = SummaryTier(
+            content="Tier 2 summary",
+            turn_range=(3, 4),
+            source_message_range=(4, 8),
+            compression_passes=1,
+            token_estimate=150,
+        )
+        mgr._summary_tiers = [tier1, tier2]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+
+        result = await mgr.get_messages_for_request()
+
+        # Expected order: system msg, tier1, tier2, user msg, assistant msg
+        assert len(result) == 5
+        # First message is the system prompt
+        assert result[0]["role"] == "system"
+        assert result[0]["content"] == "System prompt"
+        # Next two are tiers
+        assert result[1]["role"] == "system"
+        assert result[1]["content"] == "Tier 1 summary"
+        assert result[2]["role"] == "system"
+        assert result[2]["content"] == "Tier 2 summary"
+        # Last two are the verbatim conversation messages
+        assert result[3]["role"] == "user"
+        assert result[4]["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_last_tier_gets_cache_hint(self):
+        """Only the LAST summary tier gets cache_hint='breakpoint' in metadata."""
+        from amplifier_module_context_managed import ManagedContextManager, SummaryTier
+
+        mgr = ManagedContextManager()
+        mgr._messages = [
+            {"role": "user", "content": "Hello"},
+        ]
+        tier1 = SummaryTier(
+            content="First tier summary",
+            turn_range=(1, 2),
+            source_message_range=(0, 4),
+            compression_passes=1,
+            token_estimate=100,
+        )
+        tier2 = SummaryTier(
+            content="Second tier summary",
+            turn_range=(3, 5),
+            source_message_range=(4, 10),
+            compression_passes=2,
+            token_estimate=150,
+        )
+        mgr._summary_tiers = [tier1, tier2]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+
+        result = await mgr.get_messages_for_request()
+
+        # Find the tier messages (role=system with type=context_managed_summary)
+        tier_messages = [
+            m
+            for m in result
+            if m.get("role") == "system"
+            and (m.get("metadata") or {}).get("type") == "context_managed_summary"
+        ]
+        assert len(tier_messages) == 2
+
+        # The FIRST tier should NOT have cache_hint
+        first_tier_meta = tier_messages[0].get("metadata") or {}
+        assert "cache_hint" not in first_tier_meta, (
+            f"First tier should NOT have cache_hint, but got: {first_tier_meta}"
+        )
+
+        # The LAST tier should have cache_hint='breakpoint'
+        last_tier_meta = tier_messages[1].get("metadata") or {}
+        assert last_tier_meta.get("cache_hint") == "breakpoint", (
+            f"Last tier should have cache_hint='breakpoint', but got: {last_tier_meta}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tier_metadata_has_required_fields(self):
+        """Each tier message metadata contains type, turn_range (as list), and compression_passes."""
+        from amplifier_module_context_managed import ManagedContextManager, SummaryTier
+
+        mgr = ManagedContextManager()
+        mgr._messages = [
+            {"role": "user", "content": "Hello"},
+        ]
+        tier = SummaryTier(
+            content="Summary content",
+            turn_range=(3, 7),
+            source_message_range=(0, 10),
+            compression_passes=3,
+            token_estimate=200,
+        )
+        mgr._summary_tiers = [tier]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+
+        result = await mgr.get_messages_for_request()
+
+        # Find the tier message
+        tier_messages = [
+            m
+            for m in result
+            if m.get("role") == "system"
+            and (m.get("metadata") or {}).get("type") == "context_managed_summary"
+        ]
+        assert len(tier_messages) == 1
+
+        meta = tier_messages[0].get("metadata") or {}
+
+        # Must have type field
+        assert meta.get("type") == "context_managed_summary"
+
+        # Must have turn_range as a list
+        assert "turn_range" in meta, f"turn_range missing from metadata: {meta}"
+        assert meta["turn_range"] == [3, 7], (
+            f"turn_range should be [3, 7] (list), got: {meta['turn_range']}"
+        )
+        assert isinstance(meta["turn_range"], list), (
+            f"turn_range must be a list, got: {type(meta['turn_range'])}"
+        )
+
+        # Must have compression_passes
+        assert "compression_passes" in meta, (
+            f"compression_passes missing from metadata: {meta}"
+        )
+        assert meta["compression_passes"] == 3
+
+    @pytest.mark.asyncio
+    async def test_empty_tiers_no_change(self):
+        """When _summary_tiers is empty, no tier messages are inserted."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        mgr._messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+        ]
+        mgr._summary_tiers = []  # No tiers
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+
+        result = await mgr.get_messages_for_request()
+
+        # Should only have the two conversation messages
+        assert len(result) == 2
+        # Verify no tier messages were inserted
+        tier_messages = [
+            m
+            for m in result
+            if (m.get("metadata") or {}).get("type") == "context_managed_summary"
+        ]
+        assert len(tier_messages) == 0
