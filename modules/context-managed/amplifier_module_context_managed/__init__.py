@@ -670,3 +670,75 @@ class ManagedContextManager:
                     "Falling back to DEFAULT_SUMMARIZATION_PROMPT."
                 )
         return DEFAULT_SUMMARIZATION_PROMPT
+
+    def _calculate_segment_boundary(self) -> tuple[int, int] | None:
+        """Calculate the boundary for message segmentation.
+
+        Returns None if _messages is empty or _running_token_estimate <=
+        verbatim_window_tokens.
+
+        Otherwise calculates excess_tokens = _running_token_estimate -
+        verbatim_window_tokens and accumulates message tokens from index 0
+        until accumulated >= excess_tokens. Calls _snap_to_tool_pair_boundary()
+        before returning.
+
+        Returns:
+            Tuple (0, end_idx) as indices into self._messages (end_idx
+            exclusive), or None.
+        """
+        if not self._messages:
+            return None
+
+        if self._running_token_estimate <= self.verbatim_window_tokens:
+            return None
+
+        excess_tokens = self._running_token_estimate - self.verbatim_window_tokens
+
+        accumulated = 0
+        end_idx = 0
+        for i, msg in enumerate(self._messages):
+            accumulated += self._estimate_tokens_single(msg)
+            end_idx = i + 1
+            if accumulated >= excess_tokens:
+                break
+
+        end_idx = self._snap_to_tool_pair_boundary(end_idx)
+
+        return (0, end_idx)
+
+    def _snap_to_tool_pair_boundary(self, end_idx: int) -> int:
+        """Adjust end_idx to avoid splitting tool call/result pairs.
+
+        Case 1: If the last included message (at end_idx - 1) is an assistant
+        message with tool_calls, extend end_idx to include all following tool
+        result messages.
+
+        Case 2: If the first excluded message (at end_idx) is a tool result,
+        extend end_idx past all consecutive tool result messages.
+
+        Args:
+            end_idx: Exclusive end index into self._messages.
+
+        Returns:
+            Adjusted end_idx.
+        """
+        messages = self._messages
+        n = len(messages)
+
+        # Case 1: last included message is an assistant message with tool_calls
+        if (
+            end_idx > 0
+            and end_idx <= n
+            and messages[end_idx - 1].get("role") == "assistant"
+            and messages[end_idx - 1].get("tool_calls")
+        ):
+            while end_idx < n and messages[end_idx].get("role") == "tool":
+                end_idx += 1
+            return end_idx
+
+        # Case 2: first excluded message is a tool result
+        if end_idx < n and messages[end_idx].get("role") == "tool":
+            while end_idx < n and messages[end_idx].get("role") == "tool":
+                end_idx += 1
+
+        return end_idx

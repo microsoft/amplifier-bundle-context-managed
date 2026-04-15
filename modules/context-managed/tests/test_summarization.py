@@ -108,3 +108,145 @@ class TestDefaultSummarizationPrompt:
         missing_path = tmp_path / "nonexistent_prompt.txt"
         mgr = ManagedContextManager(summarization_prompt_path=str(missing_path))
         assert mgr._get_summarization_prompt() == DEFAULT_SUMMARIZATION_PROMPT
+
+
+class TestSegmentBoundary:
+    """Tests for _calculate_segment_boundary()."""
+
+    def test_no_boundary_when_empty(self):
+        """Returns None when _messages is empty."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(verbatim_window_tokens=1000)
+        assert mgr._calculate_segment_boundary() is None
+
+    def test_no_boundary_when_under_verbatim_limit(self):
+        """Returns None when _running_token_estimate <= verbatim_window_tokens."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(verbatim_window_tokens=1000)
+        mgr._messages = [{"role": "user", "content": "hello"}]
+        mgr._running_token_estimate = 500  # under limit
+        assert mgr._calculate_segment_boundary() is None
+
+    def test_boundary_returns_range_when_over_limit(self):
+        """Returns (start, end) tuple when running estimate exceeds verbatim window."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(verbatim_window_tokens=10)
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "world"},
+            {"role": "user", "content": "more content"},
+        ]
+        mgr._messages = messages
+        mgr._running_token_estimate = 200  # much higher than verbatim_window_tokens=10
+
+        result = mgr._calculate_segment_boundary()
+
+        assert result is not None
+        start, end = result
+        assert start == 0
+        assert 0 < end <= len(messages)
+
+    def test_boundary_covers_excess_tokens(self):
+        """Accumulated tokens at boundary are >= excess_tokens."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(verbatim_window_tokens=20)
+        messages = [
+            {"role": "user", "content": "first message content here"},
+            {"role": "assistant", "content": "second message response here"},
+            {"role": "user", "content": "third message goes here"},
+        ]
+
+        # Compute actual token estimates the same way the method does
+        tok1 = len(str(messages[0])) // 4
+        tok2 = len(str(messages[1])) // 4
+        tok3 = len(str(messages[2])) // 4
+        total = tok1 + tok2 + tok3
+
+        mgr._messages = messages
+        mgr._running_token_estimate = total
+
+        # Verify precondition: total > verbatim_window_tokens
+        assert total > 20, (
+            f"Test setup: total={total} must exceed verbatim_window_tokens=20"
+        )
+
+        excess = total - 20
+        result = mgr._calculate_segment_boundary()
+
+        assert result is not None
+        start, end = result
+        assert start == 0
+
+        # Verify accumulated tokens up to boundary >= excess_tokens
+        accumulated = sum(len(str(messages[i])) // 4 for i in range(end))
+        assert accumulated >= excess
+
+
+class TestToolPairSnapping:
+    """Tests for _snap_to_tool_pair_boundary()."""
+
+    def test_extends_past_assistant_with_tool_calls(self):
+        """When last included message is assistant with tool_calls, extends past tool results."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "test"}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "result1"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "result2"},
+            {"role": "user", "content": "next question"},
+        ]
+        mgr._messages = messages
+
+        # end_idx=1: last included is messages[0] (assistant with tool_calls)
+        result = mgr._snap_to_tool_pair_boundary(1)
+
+        # Should extend past both tool results (index 1 and 2), stopping at index 3
+        assert result == 3
+
+    def test_extends_past_orphaned_tool_result(self):
+        """When first excluded message is a tool result, extends past consecutive tool results."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        messages = [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "thinking about it"},
+            {"role": "tool", "tool_call_id": "call_1", "content": "result1"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "result2"},
+            {"role": "user", "content": "follow up"},
+        ]
+        mgr._messages = messages
+
+        # end_idx=2: first excluded is messages[2] (a tool result)
+        result = mgr._snap_to_tool_pair_boundary(2)
+
+        # Should extend past both tool results (index 2 and 3), stopping at index 4
+        assert result == 4
+
+    def test_no_snap_needed_when_boundary_clean(self):
+        """When boundary is between user/assistant messages, end_idx is unchanged."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        messages = [
+            {"role": "user", "content": "question 1"},
+            {"role": "assistant", "content": "answer 1"},
+            {"role": "user", "content": "question 2"},
+            {"role": "assistant", "content": "answer 2"},
+        ]
+        mgr._messages = messages
+
+        # end_idx=2: boundary between two clean turns (no tool calls or results)
+        result = mgr._snap_to_tool_pair_boundary(2)
+
+        assert result == 2  # Unchanged
