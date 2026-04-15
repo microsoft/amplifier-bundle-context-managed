@@ -50,7 +50,6 @@ session:
       extended_thinking: true
   context:
     module: context-managed
-    source: ./modules/context-managed
     config:
       max_tokens: 200000
       verbatim_window_tokens: 40000
@@ -74,7 +73,6 @@ tools:
     source: git+https://github.com/microsoft/amplifier-module-tool-search@main
   # NOTE: delegate tool comes from agents behavior
   - module: tool-transcript
-    source: ./modules/tool-transcript
     config:
       rate_limit_per_turn: 3
 
