@@ -8,8 +8,6 @@ These tests verify the scaffold was created correctly:
 - Configuration constants are correct
 """
 
-import importlib
-import sys
 from pathlib import Path
 
 import pytest
@@ -51,13 +49,17 @@ class TestRequiredFilesExist:
         assert (MODULE_ROOT / "pyproject.toml").exists()
 
     def test_context_managed_init(self):
-        assert (MODULE_ROOT / "amplifier_module_context_managed" / "__init__.py").exists()
+        assert (
+            MODULE_ROOT / "amplifier_module_context_managed" / "__init__.py"
+        ).exists()
 
     def test_tool_transcript_pyproject(self):
         assert (TOOL_MODULE_ROOT / "pyproject.toml").exists()
 
     def test_tool_transcript_init(self):
-        assert (TOOL_MODULE_ROOT / "amplifier_module_tool_transcript" / "__init__.py").exists()
+        assert (
+            TOOL_MODULE_ROOT / "amplifier_module_tool_transcript" / "__init__.py"
+        ).exists()
 
     def test_summary_instructions(self):
         assert (BUNDLE_ROOT / "context" / "summary-instructions.md").exists()
@@ -104,7 +106,10 @@ class TestPyprojectContent:
         assert "amplifier-module-context-managed" in context_pyproject
 
     def test_context_entry_point(self, context_pyproject):
-        assert "context-managed = \"amplifier_module_context_managed:mount\"" in context_pyproject
+        assert (
+            'context-managed = "amplifier_module_context_managed:mount"'
+            in context_pyproject
+        )
 
     def test_context_hatchling(self, context_pyproject):
         assert "hatchling" in context_pyproject
@@ -116,7 +121,10 @@ class TestPyprojectContent:
         assert "amplifier-module-tool-transcript" in transcript_pyproject
 
     def test_transcript_entry_point(self, transcript_pyproject):
-        assert "tool-transcript = \"amplifier_module_tool_transcript:mount\"" in transcript_pyproject
+        assert (
+            'tool-transcript = "amplifier_module_tool_transcript:mount"'
+            in transcript_pyproject
+        )
 
 
 class TestContextManagedModule:
@@ -129,60 +137,73 @@ class TestContextManagedModule:
     def test_module_type_attribute(self):
         """Has __amplifier_module_type__ = 'context'."""
         import amplifier_module_context_managed as m
+
         assert m.__amplifier_module_type__ == "context"
 
     def test_transcript_format_version(self):
         """Has TRANSCRIPT_FORMAT_VERSION = '1.0.0'."""
         from amplifier_module_context_managed import TRANSCRIPT_FORMAT_VERSION
+
         assert TRANSCRIPT_FORMAT_VERSION == "1.0.0"
 
     def test_mount_function_exists(self):
         """Has async mount() function."""
         import amplifier_module_context_managed as m
+
         assert callable(m.mount)
 
     def test_managed_context_manager_class(self):
         """Has ManagedContextManager class."""
         from amplifier_module_context_managed import ManagedContextManager
+
         assert ManagedContextManager is not None
 
     def test_class_has_add_message(self):
         from amplifier_module_context_managed import ManagedContextManager
+
         assert hasattr(ManagedContextManager, "add_message")
 
     def test_class_has_get_messages_for_request(self):
         from amplifier_module_context_managed import ManagedContextManager
+
         assert hasattr(ManagedContextManager, "get_messages_for_request")
 
     def test_class_has_get_messages(self):
         from amplifier_module_context_managed import ManagedContextManager
+
         assert hasattr(ManagedContextManager, "get_messages")
 
     def test_class_has_set_messages(self):
         from amplifier_module_context_managed import ManagedContextManager
+
         assert hasattr(ManagedContextManager, "set_messages")
 
     def test_class_has_set_system_prompt_factory(self):
         from amplifier_module_context_managed import ManagedContextManager
+
         assert hasattr(ManagedContextManager, "set_system_prompt_factory")
 
     def test_class_has_clear(self):
         from amplifier_module_context_managed import ManagedContextManager
+
         assert hasattr(ManagedContextManager, "clear")
 
     def test_class_has_transcript_path_property(self):
         from amplifier_module_context_managed import ManagedContextManager
+
         ctx = ManagedContextManager(session_dir=None)
         assert hasattr(ctx, "transcript_path")
 
     def test_class_has_tool_results_dir_property(self):
         from amplifier_module_context_managed import ManagedContextManager
+
         ctx = ManagedContextManager(session_dir=None)
         assert hasattr(ctx, "tool_results_dir")
 
     def test_default_config_values(self):
         """Constructor has correct default config values."""
         from amplifier_module_context_managed import ManagedContextManager
+
         ctx = ManagedContextManager(session_dir=None)
         assert ctx.max_tokens == 200_000
         assert ctx.verbatim_window_tokens == 40_000
@@ -201,7 +222,9 @@ class TestToolTranscriptModule:
 
     def test_tool_init_content(self):
         """__init__.py has Phase 3 stub content."""
-        content = (TOOL_MODULE_ROOT / "amplifier_module_tool_transcript" / "__init__.py").read_text()
+        content = (
+            TOOL_MODULE_ROOT / "amplifier_module_tool_transcript" / "__init__.py"
+        ).read_text()
         assert "__amplifier_module_type__" in content
         assert "tool" in content
         assert "mount" in content
@@ -209,7 +232,9 @@ class TestToolTranscriptModule:
 
     def test_mount_is_async(self):
         """mount() is defined as async."""
-        content = (TOOL_MODULE_ROOT / "amplifier_module_tool_transcript" / "__init__.py").read_text()
+        content = (
+            TOOL_MODULE_ROOT / "amplifier_module_tool_transcript" / "__init__.py"
+        ).read_text()
         assert "async def mount" in content
 
 
@@ -226,9 +251,12 @@ class TestContextInstructions:
     def test_has_five_numbered_principles(self, instructions):
         """Has at least 5 numbered items."""
         import re
+
         # Match numbered items like "1.", "2.", etc.
         numbered = re.findall(r"^\s*\d+\.", instructions, re.MULTILINE)
-        assert len(numbered) >= 5, f"Expected 5 numbered principles, found {len(numbered)}"
+        assert len(numbered) >= 5, (
+            f"Expected 5 numbered principles, found {len(numbered)}"
+        )
 
     def test_mentions_summaries(self, instructions):
         assert "summar" in instructions.lower()
