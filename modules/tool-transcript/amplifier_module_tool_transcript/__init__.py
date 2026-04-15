@@ -40,6 +40,8 @@ class ReadTranscriptTool:
     may have been compressed by the context manager's summarization engine.
     """
 
+    _MAX_CONTENT_LENGTH: int = 2000
+
     def __init__(self, coordinator: Any, rate_limit_per_turn: int = 3) -> None:
         self._coordinator = coordinator
         self._rate_limit_per_turn = rate_limit_per_turn
@@ -159,3 +161,67 @@ class ReadTranscriptTool:
     def reset_rate_limit(self) -> None:
         """Reset the per-turn call counter to zero."""
         self._calls_this_turn = 0
+
+    def _format_turns(self, turns: list[list[dict]], start_turn: int) -> str:
+        """Format a list of turns into human-readable text.
+
+        Args:
+            turns: A list of turns, each being a list of message dicts.
+            start_turn: The turn number to assign to the first turn in the list.
+
+        Returns:
+            A formatted string with one section per turn, or a message
+            indicating no content when ``turns`` is empty.
+        """
+        if not turns:
+            return "No transcript content found for the requested range."
+
+        sections: list[str] = []
+
+        for turn_offset, turn_messages in enumerate(turns):
+            turn_num = start_turn + turn_offset
+            lines: list[str] = [f"--- Turn {turn_num} ---"]
+
+            for msg in turn_messages:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+
+                if role == "tool":
+                    # Tool result: show the tool_call_id
+                    tc_id = msg.get("tool_call_id", "")
+                    lines.append(f"[tool result: {tc_id}]")
+                elif role == "assistant":
+                    # Show role label + content
+                    tool_calls = msg.get("tool_calls")
+                    if content:
+                        truncated = self._truncate_content(content)
+                        lines.append(f"[assistant] {truncated}")
+                    if tool_calls:
+                        names = ", ".join(
+                            tc.get("function", {}).get("name", "") for tc in tool_calls
+                        )
+                        lines.append(f"(calls: {names})")
+                else:
+                    # user and any other roles
+                    truncated = self._truncate_content(content)
+                    lines.append(f"[{role}] {truncated}")
+
+            sections.append("\n".join(lines))
+
+        return "\n\n".join(sections)
+
+    def _truncate_content(self, content: str) -> str:
+        """Truncate content that exceeds _MAX_CONTENT_LENGTH.
+
+        Args:
+            content: The text to potentially truncate.
+
+        Returns:
+            The original content if it fits within the limit, or a truncated
+            version with a note showing the original character count.
+        """
+        if len(content) <= self._MAX_CONTENT_LENGTH:
+            return content
+        total = len(content)
+        truncated = content[: self._MAX_CONTENT_LENGTH]
+        return f"{truncated}... [truncated \u2014 {total:,} chars total]"
