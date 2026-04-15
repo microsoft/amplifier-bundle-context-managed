@@ -6,7 +6,8 @@ hook message preservation, cache hints, ordering, and empty states.
 """
 
 import pytest
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 
 class TestSystemPromptFactory:
@@ -145,3 +146,34 @@ class TestSystemPromptFactory:
         assert len(messages) == 1
         assert messages[0]["role"] == "system"
         assert messages[0]["content"] == "You are a helpful assistant."
+
+
+class TestProviderCaching:
+    """Verify provider reference caching for Phase 2 summarization."""
+
+    @pytest.mark.asyncio
+    async def test_provider_cached_for_summarization(self, context_no_disk):
+        """Provider is cached in _cached_provider after get_messages_for_request with provider."""
+        model_info = SimpleNamespace(context_window=200000, max_output_tokens=8192)
+        provider = MagicMock()
+        provider.get_model_info.return_value = model_info
+
+        await context_no_disk.add_message({"role": "user", "content": "Hello"})
+        await context_no_disk.get_messages_for_request(provider=provider)
+
+        assert context_no_disk._cached_provider is provider
+
+    @pytest.mark.asyncio
+    async def test_provider_none_does_not_clear_cache(self, context_no_disk):
+        """Calling get_messages_for_request without provider does not clear _cached_provider."""
+        model_info = SimpleNamespace(context_window=200000, max_output_tokens=8192)
+        provider = MagicMock()
+        provider.get_model_info.return_value = model_info
+
+        await context_no_disk.add_message({"role": "user", "content": "Hello"})
+        # First call sets the cache
+        await context_no_disk.get_messages_for_request(provider=provider)
+        # Second call without provider must not clear the cache
+        await context_no_disk.get_messages_for_request()
+
+        assert context_no_disk._cached_provider is provider
