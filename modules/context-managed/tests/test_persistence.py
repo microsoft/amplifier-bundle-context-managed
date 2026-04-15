@@ -179,3 +179,109 @@ class TestMalformedLineHandling:
         assert len(messages) == 2
         assert messages[0]["content"] == "first message"
         assert messages[1]["content"] == "second message"
+
+
+class TestLargeToolResultHandling:
+    """Tests for large tool result pointer file creation and in-memory truncation."""
+
+    @pytest.mark.asyncio
+    async def test_large_tool_result_creates_pointer_file(self, tmp_session_dir: Path):
+        """Large tool result creates pointer file in tool_results/ with full content."""
+        context = ManagedContextManager(
+            session_dir=tmp_session_dir, large_result_threshold=100
+        )
+        large_content = "x" * 200
+        await context.add_message(
+            {
+                "role": "tool",
+                "content": large_content,
+                "tool_call_id": "call_abc",
+            }
+        )
+
+        tool_results_dir = tmp_session_dir / "tool_results"
+        assert tool_results_dir.exists()
+        files = list(tool_results_dir.iterdir())
+        assert len(files) == 1
+        assert "call_abc" in files[0].name
+        assert files[0].read_text() == large_content
+
+    @pytest.mark.asyncio
+    async def test_large_result_truncated_in_memory(self, tmp_session_dir: Path):
+        """Large tool result is truncated in memory with [truncated: marker."""
+        context = ManagedContextManager(
+            session_dir=tmp_session_dir, large_result_threshold=100
+        )
+        large_content = "x" * 200
+        await context.add_message(
+            {
+                "role": "tool",
+                "content": large_content,
+                "tool_call_id": "call_abc",
+            }
+        )
+
+        messages = await context.get_messages()
+        assert len(messages) == 1
+        content = messages[0]["content"]
+        assert len(content) < 200
+        assert "[truncated:" in content
+
+    @pytest.mark.asyncio
+    async def test_large_result_metadata_has_pointer(self, tmp_session_dir: Path):
+        """Large tool result metadata has full_result_path and original_length=200."""
+        context = ManagedContextManager(
+            session_dir=tmp_session_dir, large_result_threshold=100
+        )
+        large_content = "x" * 200
+        await context.add_message(
+            {
+                "role": "tool",
+                "content": large_content,
+                "tool_call_id": "call_abc",
+            }
+        )
+
+        messages = await context.get_messages()
+        meta = messages[0].get("metadata") or {}
+        assert "full_result_path" in meta
+        assert meta["original_length"] == 200
+
+    @pytest.mark.asyncio
+    async def test_small_tool_result_not_truncated(self, tmp_session_dir: Path):
+        """Small tool result is not truncated and has no full_result_path in metadata."""
+        context = ManagedContextManager(
+            session_dir=tmp_session_dir, large_result_threshold=100
+        )
+        await context.add_message(
+            {
+                "role": "tool",
+                "content": "small result",
+                "tool_call_id": "call_small",
+            }
+        )
+
+        messages = await context.get_messages()
+        assert messages[0]["content"] == "small result"
+        meta = messages[0].get("metadata") or {}
+        assert "full_result_path" not in meta
+
+    @pytest.mark.asyncio
+    async def test_non_tool_messages_not_affected_by_large_result(
+        self, tmp_session_dir: Path
+    ):
+        """Non-tool messages with large content are not truncated."""
+        context = ManagedContextManager(
+            session_dir=tmp_session_dir, large_result_threshold=100
+        )
+        large_content = "x" * 200
+        await context.add_message(
+            {
+                "role": "user",
+                "content": large_content,
+            }
+        )
+
+        messages = await context.get_messages()
+        assert messages[0]["content"] == large_content
+        assert len(messages[0]["content"]) == 200
