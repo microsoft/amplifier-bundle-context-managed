@@ -12,6 +12,7 @@ __amplifier_module_type__ = "tool"
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from amplifier_core import ToolResult
@@ -76,11 +77,84 @@ class ReadTranscriptTool:
         }
 
     async def execute(self, input: dict[str, Any]) -> ToolResult:
-        """Execute the transcript read operation.
+        """Execute the transcript read operation."""
+        # Rate limit check
+        if self._calls_this_turn >= self._rate_limit_per_turn:
+            return ToolResult(
+                success=False,
+                output="Rate limit exceeded: too many transcript reads this turn.",
+                error={"message": "rate_limit_exceeded"},
+            )
 
-        Phase 3 implementation pending. Returns a placeholder response.
-        """
-        return ToolResult(success=True, output="(not yet implemented)")
+        # Increment call counter
+        self._calls_this_turn += 1
+
+        # Discover transcript path via coordinator
+        transcript_path = self._coordinator.get_capability("context_transcript_path")
+        if transcript_path is None:
+            return ToolResult(
+                success=False,
+                output="No transcript available.",
+                error={"message": "no_transcript_path"},
+            )
+
+        # Parse transcript into turns
+        turns = self._parse_transcript(transcript_path)
+
+        # Empty transcript — return success with empty output
+        if not turns:
+            return ToolResult(success=True, output="")
+
+        # Turn range (1-indexed): clamp start and end
+        total = len(turns)
+        start = max(1, input.get("start_turn", 1))
+        end = min(total, input.get("end_turn", total))
+
+        # start beyond total: return empty with turn count
+        if start > total:
+            return ToolResult(
+                success=True,
+                output=f"No turns found. Transcript has {total} turn(s).",
+            )
+
+        # Slice to requested range (convert to 0-indexed)
+        range_turns = turns[start - 1 : end]
+        range_indices = list(range(start, end + 1))  # 1-indexed turn numbers
+
+        # Search filter (optional)
+        search = input.get("search")
+        if search:
+            # Compile as regex (IGNORECASE); fall back to literal match on invalid regex
+            try:
+                pattern = re.compile(search, re.IGNORECASE)
+            except re.error:
+                pattern = re.compile(re.escape(search), re.IGNORECASE)
+
+            filtered_turns: list[list[dict]] = []
+            filtered_indices: list[int] = []
+            for idx, turn_msgs in zip(range_indices, range_turns):
+                combined = " ".join(
+                    msg.get("content", "")
+                    for msg in turn_msgs
+                    if isinstance(msg.get("content"), str)
+                )
+                if pattern.search(combined):
+                    filtered_turns.append(turn_msgs)
+                    filtered_indices.append(idx)
+
+            if not filtered_turns:
+                return ToolResult(success=True, output="No matches found.")
+        else:
+            filtered_turns = range_turns
+            filtered_indices = range_indices
+
+        # Format turns with correct turn numbers using zip of filtered_turns and filtered_indices
+        sections: list[str] = []
+        for idx, turn_msgs in zip(filtered_indices, filtered_turns):
+            section = self._format_turns([turn_msgs], start_turn=idx)
+            sections.append(section)
+
+        return ToolResult(success=True, output="\n\n".join(sections))
 
     def _parse_transcript(self, transcript_path: str) -> list[list[dict]]:
         """Parse a transcript file into turns.
