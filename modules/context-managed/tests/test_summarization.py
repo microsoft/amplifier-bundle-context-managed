@@ -1875,3 +1875,332 @@ class TestNoProviderGuard:
         # Summarization was triggered: task ran and failed (object() has no .complete())
         # This proves the trigger fired (not deferred)
         assert mgr._summarization_failures == 1
+
+
+class TestFullSummarizationCycle:
+    """End-to-end integration tests covering the complete summarization lifecycle (task-14)."""
+
+    @pytest.mark.asyncio
+    async def test_full_cycle_with_mock_provider(self):
+        """Full cycle: messages → threshold → async task completes → swap → tier in result."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        # Mock provider that returns a successful summary
+        mock_block = MagicMock()
+        mock_block.text = "Mock summary of the conversation so far"
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+        mock_provider = MagicMock()
+        mock_provider.complete = AsyncMock(return_value=mock_response)
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            verbatim_window_tokens=50,
+            summarize_trigger=0.80,
+        )
+        # Cache provider so summarization trigger can fire during add_message
+        mgr._cached_provider = mock_provider
+
+        # Add messages with substantial content to cross the 80% threshold (800 tokens)
+        for i in range(20):
+            await mgr.add_message(
+                {"role": "user", "content": f"user {i}: " + "X" * 100}
+            )
+            await mgr.add_message(
+                {"role": "assistant", "content": f"asst {i}: " + "Y" * 100}
+            )
+            if mgr._running_token_estimate >= int(
+                mgr.max_tokens * mgr.summarize_trigger
+            ):
+                break
+
+        # Let async summarization task complete
+        await asyncio.sleep(0.05)
+        if mgr._summarization_task is not None:
+            task = mgr._summarization_task
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+        await asyncio.sleep(0.05)
+
+        assert mgr._pending_summary is not None, (
+            f"Expected pending_summary after task completion. "
+            f"failures={mgr._summarization_failures}, "
+            f"is_summarizing={mgr._is_summarizing}, "
+            f"tokens={mgr._running_token_estimate}"
+        )
+
+        verbatim_count_before = len(mgr._messages)
+
+        # Call get_messages_for_request to trigger the pending summary swap
+        result = await mgr.get_messages_for_request()
+
+        # _pending_summary consumed
+        assert mgr._pending_summary is None
+        # At least one tier exists
+        assert len(mgr._summary_tiers) >= 1
+        # Tier messages present in assembled result
+        tier_messages = [
+            m
+            for m in result
+            if (m.get("metadata") or {}).get("type") == "context_managed_summary"
+        ]
+        assert len(tier_messages) >= 1
+        # Verbatim count reduced
+        assert len(mgr._messages) < verbatim_count_before
+
+    @pytest.mark.asyncio
+    async def test_full_cycle_with_disk_persistence(self, tmp_path):
+        """Full cycle with session_dir — transcript.jsonl contains context_managed_summary markers."""
+        import json
+        from unittest.mock import AsyncMock, MagicMock
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mock_block = MagicMock()
+        mock_block.text = "Summary persisted to disk"
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+        mock_provider = MagicMock()
+        mock_provider.complete = AsyncMock(return_value=mock_response)
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            verbatim_window_tokens=50,
+            summarize_trigger=0.80,
+            session_dir=tmp_path,
+        )
+        mgr._cached_provider = mock_provider
+
+        for i in range(20):
+            await mgr.add_message(
+                {"role": "user", "content": f"user {i}: " + "X" * 100}
+            )
+            await mgr.add_message(
+                {"role": "assistant", "content": f"asst {i}: " + "Y" * 100}
+            )
+            if mgr._running_token_estimate >= int(
+                mgr.max_tokens * mgr.summarize_trigger
+            ):
+                break
+
+        await asyncio.sleep(0.05)
+        if mgr._summarization_task is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(mgr._summarization_task), timeout=1.0
+                )
+            except (asyncio.TimeoutError, Exception):
+                pass
+        await asyncio.sleep(0.05)
+
+        assert mgr._pending_summary is not None, (
+            f"Expected pending_summary. failures={mgr._summarization_failures}"
+        )
+
+        # Trigger the swap
+        await mgr.get_messages_for_request()
+
+        # Verify transcript contains summary markers
+        assert mgr.transcript_path is not None
+        assert mgr.transcript_path.exists()
+
+        records = []
+        with open(mgr.transcript_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+
+        summary_markers = [
+            r
+            for r in records
+            if (r.get("metadata") or {}).get("type") == "context_managed_summary"
+        ]
+        assert len(summary_markers) >= 1, (
+            f"Expected at least one context_managed_summary marker in transcript. "
+            f"Records found: {len(records)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_after_full_cycle(self, tmp_path):
+        """Resume: new manager loads same tier count and verbatim count from transcript."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mock_block = MagicMock()
+        mock_block.text = "Summary for resume test"
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+        mock_provider = MagicMock()
+        mock_provider.complete = AsyncMock(return_value=mock_response)
+
+        # First manager: run full summarization cycle
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            verbatim_window_tokens=50,
+            summarize_trigger=0.80,
+            session_dir=tmp_path,
+        )
+        mgr._cached_provider = mock_provider
+
+        for i in range(20):
+            await mgr.add_message(
+                {"role": "user", "content": f"user {i}: " + "X" * 100}
+            )
+            await mgr.add_message(
+                {"role": "assistant", "content": f"asst {i}: " + "Y" * 100}
+            )
+            if mgr._running_token_estimate >= int(
+                mgr.max_tokens * mgr.summarize_trigger
+            ):
+                break
+
+        await asyncio.sleep(0.05)
+        if mgr._summarization_task is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(mgr._summarization_task), timeout=1.0
+                )
+            except (asyncio.TimeoutError, Exception):
+                pass
+        await asyncio.sleep(0.05)
+
+        assert mgr._pending_summary is not None, (
+            f"Expected pending_summary. failures={mgr._summarization_failures}"
+        )
+
+        await mgr.get_messages_for_request()
+
+        # Record post-cycle state
+        tier_count = len(mgr._summary_tiers)
+        verbatim_count = len(mgr._messages)
+        assert tier_count >= 1, "Expected at least one summary tier after full cycle"
+
+        # Second manager: resume from the same transcript
+        mgr2 = ManagedContextManager(
+            max_tokens=1000,
+            verbatim_window_tokens=50,
+            session_dir=tmp_path,
+        )
+        await mgr2._load_from_transcript()
+
+        assert len(mgr2._summary_tiers) == tier_count, (
+            f"Resumed tier count {len(mgr2._summary_tiers)} != original {tier_count}"
+        )
+        assert len(mgr2._messages) == verbatim_count, (
+            f"Resumed verbatim count {len(mgr2._messages)} != original {verbatim_count}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_failure_path_then_emergency_fallback(self):
+        """Failures accumulate to retry limit, then emergency fallback emits context:compaction."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        class FailingProvider:
+            """Provider that always raises RuntimeError on complete()."""
+
+            async def complete(self, request):
+                raise RuntimeError("Provider deliberately fails for testing")
+
+        emitted_events: list[tuple[str, dict]] = []
+
+        class MockHooks:
+            async def emit(self, event: str, data: dict) -> None:
+                emitted_events.append((event, data))
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            verbatim_window_tokens=50,
+            summarize_trigger=0.80,
+            emergency_fallback=0.92,
+            summarization_retries_before_fallback=3,
+        )
+        mgr._cached_provider = FailingProvider()
+        mgr._hooks = MockHooks()
+
+        content_chunk = "M" * 100  # ~50 tokens per message
+
+        # Phase 1: add messages until threshold is crossed (80% = 800 tokens)
+        for i in range(20):
+            await mgr.add_message(
+                {"role": "user", "content": f"message {i}: " + content_chunk}
+            )
+            await mgr.add_message(
+                {"role": "assistant", "content": f"response {i}: " + content_chunk}
+            )
+            if mgr._running_token_estimate >= int(
+                mgr.max_tokens * mgr.summarize_trigger
+            ):
+                break
+
+        # Wait for first summarization task to fail
+        await asyncio.sleep(0.05)
+        if mgr._summarization_task is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(mgr._summarization_task), timeout=1.0
+                )
+            except (asyncio.TimeoutError, Exception):
+                pass
+        await asyncio.sleep(0)
+
+        assert mgr._summarization_failures >= 1, (
+            "Expected at least 1 failure after crossing threshold"
+        )
+
+        # Phase 1.5: accumulate failures until retry limit is reached
+        retry_adds = 0
+        while (
+            mgr._summarization_failures < mgr.summarization_retries_before_fallback
+            and retry_adds < 10
+        ):
+            retry_adds += 1
+            await mgr.add_message(
+                {
+                    "role": "user",
+                    "content": f"retry trigger {retry_adds}: " + content_chunk,
+                }
+            )
+            await asyncio.sleep(0.05)
+            if mgr._summarization_task is not None:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(mgr._summarization_task), timeout=1.0
+                    )
+                except (asyncio.TimeoutError, Exception):
+                    pass
+            await asyncio.sleep(0)
+
+        assert (
+            mgr._summarization_failures >= mgr.summarization_retries_before_fallback
+        ), (
+            f"Expected failures >= {mgr.summarization_retries_before_fallback}, "
+            f"got {mgr._summarization_failures}"
+        )
+
+        # Phase 2: push past 0.92 threshold to trigger emergency mechanical fallback
+        for _ in range(5):
+            await mgr.add_message(
+                {"role": "user", "content": "emergency push: " + "N" * 200}
+            )
+            await asyncio.sleep(0)
+            compaction_events = [
+                e for e, _ in emitted_events if e == "context:compaction"
+            ]
+            if compaction_events:
+                break
+
+        # Verify context:compaction event was emitted at least once
+        compaction_events = [e for e, _ in emitted_events if e == "context:compaction"]
+        assert len(compaction_events) >= 1, (
+            f"Expected context:compaction event. "
+            f"Emitted events: {[e for e, _ in emitted_events]}, "
+            f"failures={mgr._summarization_failures}, "
+            f"tokens={mgr._running_token_estimate}, "
+            f"max_tokens={mgr.max_tokens}"
+        )
