@@ -5,6 +5,7 @@ Task 1: Add SummaryResult and SummaryTier dataclasses.
 Task 2: Default summarization prompt and _get_summarization_prompt().
 Task 4: Trigger summarization with guard and threshold wiring.
 Task 12: Tier reconstruction on resume.
+Task 13: Clear handles active summarization, no-provider guard verified.
 """
 
 import asyncio
@@ -1712,3 +1713,165 @@ class TestTierReconstructionOnResume:
 
         # _summarized_through_turn = max turn_range[1] across all tiers = 2
         assert ctx._summarized_through_turn == 2
+
+
+class TestClearDuringSummarization:
+    """Tests for clear() handling of active summarization (task-13)."""
+
+    @pytest.mark.asyncio
+    async def test_clear_resets_phase2_fields(self):
+        """clear() resets all Phase 2 fields to their zero/empty defaults."""
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryResult,
+            SummaryTier,
+        )
+
+        mgr = ManagedContextManager()
+
+        # Set all Phase 2 fields to non-zero/non-default values
+        mgr._current_turn = 5
+        mgr._summarized_through_turn = 3
+        mgr._transcript_message_offset = 10
+        mgr._is_summarizing = True
+        mgr._pending_summary = SummaryResult(
+            summary_text="Some pending summary",
+            turn_range=(1, 3),
+            source_message_range=(0, 6),
+        )
+        mgr._summarization_failures = 4
+        mgr._summary_tiers = [
+            SummaryTier(
+                content="Tier content",
+                turn_range=(1, 2),
+                source_message_range=(0, 4),
+                compression_passes=1,
+                token_estimate=100,
+            )
+        ]
+        # _summarization_task is None (cancel handled in separate test)
+
+        await mgr.clear()
+
+        # Verify all Phase 2 fields are reset
+        assert mgr._current_turn == 0
+        assert mgr._summarized_through_turn == 0
+        assert mgr._transcript_message_offset == 0
+        assert mgr._is_summarizing is False
+        assert mgr._pending_summary is None
+        assert mgr._summarization_failures == 0
+        assert mgr._summary_tiers == []
+        assert mgr._summarization_task is None
+
+    @pytest.mark.asyncio
+    async def test_clear_cancels_active_task(self):
+        """clear() cancels and clears an in-flight _summarization_task."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+
+        # Create a long-running asyncio task
+        long_task = asyncio.create_task(asyncio.sleep(100))
+        mgr._summarization_task = long_task
+
+        await mgr.clear()
+
+        # Give the event loop a tick to process the cancellation
+        await asyncio.sleep(0)
+
+        # Task should be cancelled
+        assert long_task.cancelled()
+        # _summarization_task should be None after clear
+        assert mgr._summarization_task is None
+
+
+class TestNoProviderGuard:
+    """Tests for no-provider guard in summarization trigger (task-13)."""
+
+    @pytest.mark.asyncio
+    async def test_trigger_deferred_without_provider(self):
+        """Summarization trigger is deferred (no task created) when _cached_provider is None."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            summarize_trigger=0.80,
+            verbatim_window_tokens=10,
+        )
+
+        # No provider set - verify initial state
+        assert mgr._cached_provider is None
+
+        # Pre-seed messages so _calculate_segment_boundary() returns non-None
+        mgr._messages = [
+            {"role": "user", "content": "earlier message"},
+            {"role": "assistant", "content": "earlier response"},
+        ]
+        # 90% of 1000 - well above the 0.80 trigger threshold
+        mgr._running_token_estimate = 900
+
+        # Add a message - trigger should be deferred (no provider)
+        await mgr.add_message({"role": "user", "content": "new message"})
+
+        # Give event loop a tick
+        await asyncio.sleep(0)
+
+        # No summarization should have started (guard blocked it)
+        assert mgr._is_summarizing is False
+        assert mgr._summarization_task is None
+        assert mgr._summarization_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_trigger_fires_after_provider_available(self):
+        """Summarization trigger fires on the next add_message() once provider is available."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            summarize_trigger=0.80,
+            verbatim_window_tokens=10,
+        )
+
+        # No provider initially
+        assert mgr._cached_provider is None
+
+        # Pre-seed messages and high usage
+        mgr._messages = [
+            {"role": "user", "content": "earlier message"},
+            {"role": "assistant", "content": "earlier response"},
+        ]
+        mgr._running_token_estimate = 900  # 90% > 0.80 threshold
+
+        # First add_message without provider - trigger deferred
+        await mgr.add_message({"role": "user", "content": "first message"})
+        await asyncio.sleep(0)
+
+        # Verify still deferred
+        assert mgr._summarization_task is None
+        assert mgr._summarization_failures == 0
+
+        # Provider becomes available via get_messages_for_request
+        mock_provider = object()  # Non-None provider - will fail on .complete() call
+        await mgr.get_messages_for_request(provider=mock_provider)
+
+        # Provider is now cached
+        assert mgr._cached_provider is mock_provider
+
+        # Next add_message - trigger should fire now that provider is available
+        await mgr.add_message({"role": "user", "content": "second message"})
+
+        # Wait for background task to run and complete
+        await asyncio.sleep(0)
+        # The task may still be running; wait for it to finish
+        if mgr._summarization_task is not None:
+            task = mgr._summarization_task
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+        await asyncio.sleep(0)
+
+        # Summarization was triggered: task ran and failed (object() has no .complete())
+        # This proves the trigger fired (not deferred)
+        assert mgr._summarization_failures == 1
