@@ -29,7 +29,8 @@ TOOL_DESCRIPTION = (
 
 async def mount(coordinator: Any, config: dict[str, Any] | None = None) -> None:
     """Mount the transcript tool into the coordinator."""
-    tool = ReadTranscriptTool(coordinator)
+    rate_limit = (config or {}).get("rate_limit_per_turn", 3)
+    tool = ReadTranscriptTool(coordinator, rate_limit_per_turn=rate_limit)
     await coordinator.mount("tools", tool, name=tool.name)
     logger.info("tool-transcript mounted: registered 'read_transcript'")
 
