@@ -714,8 +714,90 @@ class ManagedContextManager:
         return (0, end_idx)
 
     async def _perform_summarization(self, boundary: tuple[int, int]) -> SummaryResult:
-        """Placeholder for Phase 2 LLM summarization (not yet implemented)."""
-        raise NotImplementedError
+        """Perform LLM summarization over the given message boundary.
+
+        Slices messages, builds a ChatRequest with the summarization prompt and
+        formatted conversation, calls the cached provider, and returns a
+        SummaryResult with absolute source_message_range (offset by
+        _transcript_message_offset) and a turn_range derived from
+        _summarized_through_turn.
+        """
+        from amplifier_core import ChatRequest, Message
+
+        start, end = boundary
+        messages_to_summarize = self._messages[start:end]
+
+        prompt = self._get_summarization_prompt()
+        formatted_conversation = self._format_messages_for_summarization(
+            messages_to_summarize
+        )
+
+        # Calculate turn range
+        turn_start = self._summarized_through_turn + 1
+        user_count = sum(
+            1 for msg in messages_to_summarize if msg.get("role") == "user"
+        )
+        turn_end = self._summarized_through_turn + user_count
+
+        # Calculate absolute source_message_range
+        abs_start = self._transcript_message_offset + start
+        abs_end = self._transcript_message_offset + end
+        source_message_range = (abs_start, abs_end)
+
+        # Build and send the ChatRequest
+        request = ChatRequest(
+            messages=[
+                Message(role="system", content=prompt),
+                Message(role="user", content=formatted_conversation),
+            ],
+            model=self.summarization_model,
+        )
+
+        response = await self._cached_provider.complete(request)
+
+        summary_text = self._extract_text_from_response(response)
+
+        return SummaryResult(
+            summary_text=summary_text,
+            turn_range=(turn_start, turn_end),
+            source_message_range=source_message_range,
+        )
+
+    def _format_messages_for_summarization(self, messages: list[dict[str, Any]]) -> str:
+        """Format messages for the summarization prompt.
+
+        Each message is formatted as '[role]: content'.  When content is a
+        list of content blocks, text is extracted from blocks that have a
+        .text attribute and joined together.
+        """
+        lines = []
+        for msg in messages:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                # Join text from all blocks that carry a .text attribute
+                text_parts = []
+                for block in content:
+                    if hasattr(block, "text"):
+                        text_parts.append(block.text)
+                    elif isinstance(block, dict) and "text" in block:
+                        text_parts.append(block["text"])
+                content = "".join(text_parts)
+            lines.append(f"[{role}]: {content}")
+        return "\n".join(lines)
+
+    def _extract_text_from_response(self, response: Any) -> str:
+        """Extract text content from a ChatResponse.
+
+        Iterates response.content and joins the .text attribute of every
+        block that has one (TextBlock instances).  Blocks without .text are
+        silently skipped.
+        """
+        parts = []
+        for block in response.content:
+            if hasattr(block, "text"):
+                parts.append(block.text)
+        return "".join(parts)
 
     async def _trigger_summarization(self) -> None:
         """Trigger summarization with guards.

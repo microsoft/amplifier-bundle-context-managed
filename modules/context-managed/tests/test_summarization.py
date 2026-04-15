@@ -409,3 +409,219 @@ class TestThresholdWiring:
         assert mgr._summarization_failures == 0
         assert mgr._is_summarizing is False
         assert mgr._summarization_task is None
+
+
+class TestPerformSummarization:
+    """Tests for _perform_summarization() with real provider call."""
+
+    @pytest.mark.asyncio
+    async def test_returns_summary_result(self):
+        """_perform_summarization() returns a SummaryResult."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryResult,
+        )
+
+        mgr = ManagedContextManager()
+        mgr._messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+        ]
+
+        mock_block = MagicMock()
+        mock_block.text = "Summary text"
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+
+        mock_provider = MagicMock()
+        mock_provider.complete = AsyncMock(return_value=mock_response)
+        mgr._cached_provider = mock_provider
+
+        result = await mgr._perform_summarization((0, 2))
+
+        assert isinstance(result, SummaryResult)
+        assert result.summary_text == "Summary text"
+
+    @pytest.mark.asyncio
+    async def test_calls_provider_complete(self):
+        """_perform_summarization() calls self._cached_provider.complete() with a ChatRequest."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from amplifier_core import ChatRequest
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        mgr._messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+        ]
+
+        mock_block = MagicMock()
+        mock_block.text = "Summary"
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+
+        mock_provider = MagicMock()
+        mock_provider.complete = AsyncMock(return_value=mock_response)
+        mgr._cached_provider = mock_provider
+
+        await mgr._perform_summarization((0, 2))
+
+        mock_provider.complete.assert_called_once()
+        # Verify the argument is a ChatRequest
+        call_args = mock_provider.complete.call_args
+        assert isinstance(call_args[0][0], ChatRequest)
+
+    @pytest.mark.asyncio
+    async def test_uses_absolute_source_message_range(self):
+        """_perform_summarization() uses _transcript_message_offset for source_message_range."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        mgr._transcript_message_offset = 10  # Previous messages already summarized
+        mgr._messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+            {"role": "user", "content": "More"},
+        ]
+
+        mock_block = MagicMock()
+        mock_block.text = "Summary"
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+
+        mock_provider = MagicMock()
+        mock_provider.complete = AsyncMock(return_value=mock_response)
+        mgr._cached_provider = mock_provider
+
+        result = await mgr._perform_summarization((0, 2))
+
+        # source_message_range should be absolute (offset + boundary)
+        assert result.source_message_range == (10, 12)  # offset=10, start=0, end=2
+
+    @pytest.mark.asyncio
+    async def test_calculates_turn_range(self):
+        """_perform_summarization() calculates turn_range using _summarized_through_turn."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        mgr._summarized_through_turn = 5  # Already summarized through turn 5
+        mgr._messages = [
+            {"role": "user", "content": "Msg 1"},
+            {"role": "assistant", "content": "Resp 1"},
+            {"role": "user", "content": "Msg 2"},
+            {"role": "assistant", "content": "Resp 2"},
+        ]
+
+        mock_block = MagicMock()
+        mock_block.text = "Summary"
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+
+        mock_provider = MagicMock()
+        mock_provider.complete = AsyncMock(return_value=mock_response)
+        mgr._cached_provider = mock_provider
+
+        result = await mgr._perform_summarization((0, 4))
+
+        # turn_start = _summarized_through_turn + 1 = 6
+        # turn_end = _summarized_through_turn + user_count_in_segment = 5 + 2 = 7
+        assert result.turn_range == (6, 7)
+
+
+class TestFormatMessagesForSummarization:
+    """Tests for _format_messages_for_summarization()."""
+
+    def test_formats_string_content(self):
+        """_format_messages_for_summarization() formats messages with string content as '[role]: content'."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+        ]
+
+        result = mgr._format_messages_for_summarization(messages)
+
+        assert "[user]: Hello" in result
+        assert "[assistant]: World" in result
+
+    def test_formats_list_content_blocks(self):
+        """_format_messages_for_summarization() handles list content by joining text blocks."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+
+        class _TextBlock:
+            def __init__(self, text):
+                self.text = text
+
+        messages = [
+            {
+                "role": "user",
+                "content": [_TextBlock("First part"), _TextBlock(" second part")],
+            },
+        ]
+
+        result = mgr._format_messages_for_summarization(messages)
+
+        assert "[user]:" in result
+        assert "First part" in result
+        assert "second part" in result
+
+
+class TestExtractTextFromResponse:
+    """Tests for _extract_text_from_response()."""
+
+    def test_extracts_text_from_content_blocks(self):
+        """_extract_text_from_response() extracts and joins text from blocks with .text attribute."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+
+        class _TextBlock:
+            def __init__(self, text):
+                self.text = text
+
+        class _MockResponse:
+            def __init__(self, blocks):
+                self.content = blocks
+
+        response = _MockResponse([_TextBlock("Hello "), _TextBlock("World")])
+
+        result = mgr._extract_text_from_response(response)
+
+        assert result == "Hello World"
+
+    def test_skips_non_text_blocks(self):
+        """_extract_text_from_response() skips blocks that lack a .text attribute."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+
+        class _TextBlock:
+            def __init__(self, text):
+                self.text = text
+
+        class _NonTextBlock:
+            pass  # No .text attribute
+
+        class _MockResponse:
+            def __init__(self, blocks):
+                self.content = blocks
+
+        response = _MockResponse(
+            [_TextBlock("Hello"), _NonTextBlock(), _TextBlock(" World")]
+        )
+
+        result = mgr._extract_text_from_response(response)
+
+        assert result == "Hello World"
