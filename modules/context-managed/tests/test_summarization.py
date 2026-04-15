@@ -1517,10 +1517,14 @@ class TestSummaryPersistence:
 
 
 def _write_transcript_with_markers(session_dir, records):
-    """Write a transcript.jsonl file with header + the given records (messages and markers)."""
+    """Write a transcript.jsonl file with header + the given records (messages and markers).
+
+    Files are placed under the context-managed/ subdirectory to match the
+    module's storage layout (avoids collision with CLI's own transcript.jsonl).
+    """
     from amplifier_module_context_managed import TRANSCRIPT_FORMAT_VERSION
 
-    transcript_path = session_dir / "transcript.jsonl"
+    transcript_path = session_dir / "context-managed" / "transcript.jsonl"
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     with open(transcript_path, "w") as f:
         header = {

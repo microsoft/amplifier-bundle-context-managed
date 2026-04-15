@@ -25,7 +25,7 @@ class TestTranscriptCreation:
         self, context: ManagedContextManager, tmp_session_dir: Path
     ):
         """transcript.jsonl doesn't exist before, exists after add_message."""
-        transcript_path = tmp_session_dir / "transcript.jsonl"
+        transcript_path = tmp_session_dir / "context-managed" / "transcript.jsonl"
         assert not transcript_path.exists()
 
         await context.add_message({"role": "user", "content": "hello"})
@@ -39,7 +39,7 @@ class TestTranscriptCreation:
         """First line is JSON with type='transcript_header', correct format_version, and 'created_at'."""
         await context.add_message({"role": "user", "content": "hello"})
 
-        transcript_path = tmp_session_dir / "transcript.jsonl"
+        transcript_path = tmp_session_dir / "context-managed" / "transcript.jsonl"
         with open(transcript_path) as f:
             first_line = f.readline().strip()
 
@@ -60,7 +60,7 @@ class TestMessagePersistence:
         await context.add_message({"role": "user", "content": "first message"})
         await context.add_message({"role": "assistant", "content": "second message"})
 
-        transcript_path = tmp_session_dir / "transcript.jsonl"
+        transcript_path = tmp_session_dir / "context-managed" / "transcript.jsonl"
         with open(transcript_path) as f:
             lines = [line.strip() for line in f if line.strip()]
 
@@ -118,7 +118,7 @@ class TestSummaryMarkerExclusion:
         await context.add_message({"role": "user", "content": "first message"})
 
         # Manually write a summary marker directly to the transcript file
-        transcript_path = tmp_session_dir / "transcript.jsonl"
+        transcript_path = tmp_session_dir / "context-managed" / "transcript.jsonl"
         summary_marker = {
             "role": "system",
             "content": "summary of earlier conversation",
@@ -169,7 +169,7 @@ class TestMalformedLineHandling:
         await context.add_message({"role": "user", "content": "first message"})
 
         # Inject a non-JSON line directly into the transcript file
-        transcript_path = tmp_session_dir / "transcript.jsonl"
+        transcript_path = tmp_session_dir / "context-managed" / "transcript.jsonl"
         with open(transcript_path, "a") as f:
             f.write("this is not valid JSON!!!\n")
 
@@ -200,7 +200,7 @@ class TestLargeToolResultHandling:
             }
         )
 
-        tool_results_dir = tmp_session_dir / "tool_results"
+        tool_results_dir = tmp_session_dir / "context-managed" / "tool_results"
         assert tool_results_dir.exists()
         files = list(tool_results_dir.iterdir())
         assert len(files) == 1
@@ -299,13 +299,15 @@ class TestClearAndArchive:
         gone, verify transcript.*.archived.jsonl exists."""
         await context.add_message({"role": "user", "content": "hello"})
 
-        transcript_path = tmp_session_dir / "transcript.jsonl"
+        transcript_path = tmp_session_dir / "context-managed" / "transcript.jsonl"
         assert transcript_path.exists()
 
         await context.clear()
 
-        # Verify archive file exists
-        archived_files = list(tmp_session_dir.glob("transcript.*.archived.jsonl"))
+        # Verify archive file exists (archived alongside transcript in context-managed/)
+        archived_files = list(
+            (tmp_session_dir / "context-managed").glob("transcript.*.archived.jsonl")
+        )
         assert len(archived_files) == 1
 
         # Verify the archive name contains a valid timestamp (YYYYMMDDTHHMMSS)
@@ -324,7 +326,7 @@ class TestClearAndArchive:
 
         await context.clear()
 
-        transcript_path = tmp_session_dir / "transcript.jsonl"
+        transcript_path = tmp_session_dir / "context-managed" / "transcript.jsonl"
         assert transcript_path.exists()
 
         with open(transcript_path) as f:
@@ -370,7 +372,7 @@ class TestClearAndArchive:
             }
         )
 
-        tool_results_dir = tmp_session_dir / "tool_results"
+        tool_results_dir = tmp_session_dir / "context-managed" / "tool_results"
         assert tool_results_dir.exists()
 
         await context.clear()
@@ -378,8 +380,10 @@ class TestClearAndArchive:
         # tool_results/ should be gone (renamed to archive)
         assert not tool_results_dir.exists()
 
-        # tool_results.*.archived should exist
-        archived_dirs = list(tmp_session_dir.glob("tool_results.*.archived"))
+        # tool_results.*.archived should exist (archived alongside tool_results in context-managed/)
+        archived_dirs = list(
+            (tmp_session_dir / "context-managed").glob("tool_results.*.archived")
+        )
         assert len(archived_dirs) == 1
 
     @pytest.mark.asyncio
@@ -406,7 +410,7 @@ class TestFormatVersioning:
         """Add message, read first line, verify format_version == TRANSCRIPT_FORMAT_VERSION == '1.0.0'."""
         await context.add_message({"role": "user", "content": "hello"})
 
-        transcript_path = tmp_session_dir / "transcript.jsonl"
+        transcript_path = tmp_session_dir / "context-managed" / "transcript.jsonl"
         with open(transcript_path) as f:
             first_line = f.readline().strip()
 
@@ -424,7 +428,7 @@ class TestFormatVersioning:
 
         await context.clear()
 
-        transcript_path = tmp_session_dir / "transcript.jsonl"
+        transcript_path = tmp_session_dir / "context-managed" / "transcript.jsonl"
         with open(transcript_path) as f:
             first_line = f.readline().strip()
 

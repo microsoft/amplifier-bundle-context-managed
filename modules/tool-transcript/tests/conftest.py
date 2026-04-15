@@ -91,11 +91,17 @@ def sample_transcript(tmp_session_dir):
 
 @pytest.fixture
 def mock_coordinator(tmp_session_dir, sample_transcript):
-    """Mock coordinator that returns a transcript path via get_capability."""
+    """Mock coordinator that returns a transcript path via get_capability.
+
+    Uses the namespaced key "context-managed.transcript_path" that the
+    context-managed module registers at mount time.
+    """
     coordinator = MagicMock()
     coordinator.get_capability = MagicMock(
         side_effect=lambda name: (
-            str(sample_transcript) if name == "context_transcript_path" else None
+            str(sample_transcript)
+            if name == "context-managed.transcript_path"
+            else None
         )
     )
     return coordinator

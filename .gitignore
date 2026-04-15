@@ -8,3 +8,4 @@ build/
 .venv/
 uv.lock
 .uv/
+amplifier-bundle-context-managed/

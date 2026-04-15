@@ -8,7 +8,6 @@ Uses real ManagedContextManager from amplifier_module_context_managed to verify
 end-to-end behaviour without mocking the file I/O layer.
 """
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,7 +20,11 @@ def _make_coordinator(session_dir):
     """Create a MagicMock coordinator with a real capabilities registry.
 
     register_capability stores values, get_capability retrieves them.
-    mount is an AsyncMock. session is a SimpleNamespace with session_dir.
+    mount is an AsyncMock.
+
+    Note: session_dir is not used by ManagedContextManager via coordinator —
+    tests create ManagedContextManager(session_dir=...) directly. The
+    coordinator is only used here for the capability registry wiring.
     """
     capabilities: dict = {}
 
@@ -33,7 +36,6 @@ def _make_coordinator(session_dir):
     coordinator.get_capability = MagicMock(
         side_effect=lambda name: capabilities.get(name)
     )
-    coordinator.session = SimpleNamespace(session_dir=str(session_dir))
 
     return coordinator
 
@@ -49,7 +51,7 @@ class TestContextToTranscriptCycle:
 
         # Register transcript path so the tool can discover it
         coordinator.register_capability(
-            "context_transcript_path", str(ctx.transcript_path)
+            "context-managed.transcript_path", str(ctx.transcript_path)
         )
 
         # Add 4 messages (2 turns: user+assistant pairs)
@@ -80,7 +82,7 @@ class TestContextToTranscriptCycle:
         ctx = ManagedContextManager(session_dir=tmp_path)
 
         coordinator.register_capability(
-            "context_transcript_path", str(ctx.transcript_path)
+            "context-managed.transcript_path", str(ctx.transcript_path)
         )
 
         # Add 3 turns (6 messages: user+assistant for each)
@@ -109,7 +111,7 @@ class TestContextToTranscriptCycle:
         ctx = ManagedContextManager(session_dir=tmp_path)
 
         coordinator.register_capability(
-            "context_transcript_path", str(ctx.transcript_path)
+            "context-managed.transcript_path", str(ctx.transcript_path)
         )
 
         # Add a turn with README content (should NOT match "login")
@@ -147,7 +149,7 @@ class TestContextToTranscriptCycle:
         ctx = ManagedContextManager(session_dir=tmp_path)
 
         coordinator.register_capability(
-            "context_transcript_path", str(ctx.transcript_path)
+            "context-managed.transcript_path", str(ctx.transcript_path)
         )
 
         # Add some messages
@@ -174,7 +176,7 @@ class TestContextToTranscriptCycle:
         # ctx1 writes the original messages to transcript
         ctx1 = ManagedContextManager(session_dir=tmp_path)
         coordinator.register_capability(
-            "context_transcript_path", str(ctx1.transcript_path)
+            "context-managed.transcript_path", str(ctx1.transcript_path)
         )
 
         await ctx1.add_message({"role": "user", "content": "Original first question"})

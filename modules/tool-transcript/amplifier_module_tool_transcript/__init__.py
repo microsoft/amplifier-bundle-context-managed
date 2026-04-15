@@ -90,8 +90,12 @@ class ReadTranscriptTool:
         # Increment call counter
         self._calls_this_turn += 1
 
-        # Discover transcript path via coordinator
-        transcript_path = self._coordinator.get_capability("context_transcript_path")
+        # Discover transcript path via coordinator capability registry.
+        # The context-managed module registers this at mount time under the
+        # namespaced key "context-managed.transcript_path".
+        transcript_path = self._coordinator.get_capability(
+            "context-managed.transcript_path"
+        )
         if transcript_path is None:
             return ToolResult(
                 success=False,

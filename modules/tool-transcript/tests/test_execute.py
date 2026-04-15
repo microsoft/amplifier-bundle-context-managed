@@ -189,7 +189,7 @@ class TestExecuteGracefulFailure:
         missing_path = str(tmp_path / "nonexistent_transcript.jsonl")
         coordinator.get_capability = MagicMock(
             side_effect=lambda name: (
-                missing_path if name == "context_transcript_path" else None
+                missing_path if name == "context-managed.transcript_path" else None
             )
         )
         tool = ReadTranscriptTool(coordinator)

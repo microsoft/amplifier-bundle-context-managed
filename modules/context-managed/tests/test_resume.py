@@ -18,8 +18,12 @@ from amplifier_module_context_managed import (
 
 
 def _write_transcript(session_dir: Path, messages: list[dict]) -> None:
-    """Write a transcript.jsonl file with a header followed by the given messages."""
-    transcript_path = session_dir / "transcript.jsonl"
+    """Write a transcript.jsonl file with a header followed by the given messages.
+
+    Files are placed under the context-managed/ subdirectory to match the
+    module's storage layout (avoids collision with CLI's own transcript.jsonl).
+    """
+    transcript_path = session_dir / "context-managed" / "transcript.jsonl"
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     with open(transcript_path, "w") as f:
         header = {

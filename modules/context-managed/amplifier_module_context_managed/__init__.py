@@ -101,11 +101,25 @@ async def mount(coordinator: Any, config: dict[str, Any] | None = None):
     """
     config = config or {}
 
-    # Resolve session directory for transcript storage
-    session = getattr(coordinator, "session", None)
+    # Resolve session directory using coordinator.session_id + CLI slug algorithm.
+    # AmplifierSession has no session_dir attribute — the correct approach is to
+    # reconstruct the path the same way the CLI does (path-based slug, not hash).
     session_dir = None
-    if session is not None:
-        session_dir = getattr(session, "session_dir", None)
+    session_id = getattr(coordinator, "session_id", None)
+    if session_id and isinstance(session_id, str):
+        # Get working_dir: registered capability for child sessions, CWD for root
+        working_dir = coordinator.get_capability("session.working_dir")
+        cwd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
+
+        # CLI's slug algorithm (from amplifier_app_cli/project_utils.py)
+        slug = str(cwd).replace("/", "-").replace("\\", "-").replace(":", "")
+        if not slug.startswith("-"):
+            slug = "-" + slug
+
+        session_dir = (
+            Path.home() / ".amplifier" / "projects" / slug / "sessions" / session_id
+        )
+        logger.debug(f"Resolved session_dir: {session_dir}")
 
     context = ManagedContextManager(
         max_tokens=config.get("max_tokens", 200_000),
@@ -126,10 +140,12 @@ async def mount(coordinator: Any, config: dict[str, Any] | None = None):
         session_dir=session_dir,
     )
 
-    # Register transcript path for the transcript tool to discover
+    # Register transcript path (namespaced key) for the transcript tool to discover
     transcript_path = context.transcript_path
     if transcript_path is not None:
-        coordinator.register_capability("context_transcript_path", str(transcript_path))
+        coordinator.register_capability(
+            "context-managed.transcript_path", str(transcript_path)
+        )
 
     # Attempt to load existing transcript for session resume
     await context._load_from_transcript()
@@ -216,17 +232,26 @@ class ManagedContextManager:
 
     @property
     def transcript_path(self) -> Path | None:
-        """Path to the transcript JSONL file, or None if no session dir."""
+        """Path to the transcript JSONL file, or None if no session dir.
+
+        Files are stored under a ``context-managed/`` subdirectory within the
+        session directory to avoid collisions with the CLI's own
+        ``transcript.jsonl`` (written by SessionStore) and with other modules.
+        Follows the ``context-intelligence/`` precedent for module-owned storage.
+        """
         if self._session_dir is None:
             return None
-        return self._session_dir / "transcript.jsonl"
+        return self._session_dir / "context-managed" / "transcript.jsonl"
 
     @property
     def tool_results_dir(self) -> Path | None:
-        """Path to the large tool results directory, or None if no session dir."""
+        """Path to the large tool results directory, or None if no session dir.
+
+        Stored under ``context-managed/tool_results/`` alongside the transcript.
+        """
         if self._session_dir is None:
             return None
-        return self._session_dir / "tool_results"
+        return self._session_dir / "context-managed" / "tool_results"
 
     # ── Protocol Methods ──────────────────────────────────────────────────────
 
