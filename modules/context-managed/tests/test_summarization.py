@@ -1413,3 +1413,100 @@ class TestEmergencyFallback:
         # The tool message content should be truncated
         updated_content = mgr._messages[0]["content"]
         assert updated_content == "X" * 500 + "\n\n[truncated by emergency compaction]"
+
+
+class TestSummaryPersistence:
+    """Tests for summary marker persistence to transcript (task-11)."""
+
+    def test_persist_summary_marker_writes_to_transcript(self, tmp_path):
+        """_persist_summary_marker() writes a marker dict to the transcript JSONL file."""
+        import json
+
+        from amplifier_module_context_managed import ManagedContextManager, SummaryTier
+
+        mgr = ManagedContextManager(session_dir=tmp_path)
+
+        tier = SummaryTier(
+            content="Summary of first conversation segment",
+            turn_range=(1, 5),
+            source_message_range=(0, 10),
+            compression_passes=2,
+            token_estimate=350,
+        )
+
+        mgr._persist_summary_marker(tier)
+
+        # Transcript file should now exist
+        assert mgr.transcript_path is not None
+        assert mgr.transcript_path.exists()
+
+        # Read the transcript and find the summary marker
+        records = []
+        with open(mgr.transcript_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                records.append(json.loads(line))
+
+        # Find the summary marker record (not the header)
+        markers = [
+            r
+            for r in records
+            if (r.get("metadata") or {}).get("type") == "context_managed_summary"
+        ]
+        assert len(markers) == 1, f"Expected 1 summary marker, found: {len(markers)}"
+
+        marker = markers[0]
+        # role must be 'system'
+        assert marker["role"] == "system"
+        # content must be the tier content
+        assert marker["content"] == "Summary of first conversation segment"
+        # metadata must have all required fields
+        meta = marker["metadata"]
+        assert meta["type"] == "context_managed_summary"
+        assert meta["turn_range"] == [1, 5]  # list, not tuple
+        assert isinstance(meta["turn_range"], list)
+        assert meta["source_message_range"] == [0, 10]  # list, not tuple
+        assert isinstance(meta["source_message_range"], list)
+        assert meta["compression_passes"] == 2
+        assert meta["token_estimate"] == 350
+
+    @pytest.mark.asyncio
+    async def test_get_messages_excludes_persisted_summary_markers(self, tmp_path):
+        """get_messages() excludes persisted summary markers from the returned list."""
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryTier,
+        )
+
+        mgr = ManagedContextManager(session_dir=tmp_path)
+
+        # Add some regular conversation messages
+        await mgr.add_message({"role": "user", "content": "Hello"})
+        await mgr.add_message({"role": "assistant", "content": "World"})
+
+        # Persist a summary marker directly
+        tier = SummaryTier(
+            content="Summary of the conversation",
+            turn_range=(1, 1),
+            source_message_range=(0, 2),
+            compression_passes=1,
+            token_estimate=200,
+        )
+        mgr._persist_summary_marker(tier)
+
+        # get_messages() reads from transcript — should exclude the summary marker
+        messages = await mgr.get_messages()
+
+        # Only the two conversation messages should be returned
+        assert len(messages) == 2
+        assert messages[0]["content"] == "Hello"
+        assert messages[1]["content"] == "World"
+
+        # No summary markers should appear in get_messages() output
+        for msg in messages:
+            meta = msg.get("metadata") or {}
+            assert meta.get("type") != "context_managed_summary", (
+                f"Summary marker leaked into get_messages() output: {msg}"
+            )

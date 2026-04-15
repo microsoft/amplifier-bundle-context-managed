@@ -359,6 +359,9 @@ class ManagedContextManager:
                 self._summarized_through_turn = pending.turn_range[1]
                 self._summarization_failures = 0
 
+                # Persist summary marker to transcript
+                self._persist_summary_marker(tier)
+
                 # Phase 2: merge oldest tiers if count exceeds limit
                 if len(self._summary_tiers) > self.max_summary_tiers:
                     try:
@@ -662,6 +665,27 @@ class ManagedContextManager:
             self._messages = []
             self._message_index = 0
             self._running_token_estimate = 0
+
+    def _persist_summary_marker(self, tier: "SummaryTier") -> None:
+        """Write a summary marker to the transcript JSONL file.
+
+        Builds a marker dict with role='system', content=tier.content,
+        and metadata containing all tier fields (type, turn_range as list,
+        source_message_range as list, compression_passes, token_estimate).
+        Appends the marker to the transcript via _append_to_transcript().
+        """
+        marker: dict[str, Any] = {
+            "role": "system",
+            "content": tier.content,
+            "metadata": {
+                "type": "context_managed_summary",
+                "turn_range": list(tier.turn_range),
+                "source_message_range": list(tier.source_message_range),
+                "compression_passes": tier.compression_passes,
+                "token_estimate": tier.token_estimate,
+            },
+        }
+        self._append_to_transcript(marker)
 
     async def _archive_transcript(self) -> None:
         """Archive current transcript and tool results."""
