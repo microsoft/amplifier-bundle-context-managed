@@ -4,7 +4,7 @@ Older parts of this conversation have been summarized to save space. Keep these 
 
 1. **Summaries are hints, not truth.** Verify against the actual codebase or use the `read_transcript` tool before acting on specific details from a summary.
 
-2. **How to use the transcript tool.** Each summary includes the turn range it covers. Call `read_transcript(start_turn=N, end_turn=M)` for exact wording, specific code, or full error output. Don't guess — retrieve.
+2. **How to use the transcript tool.** Each summary includes the turn range it covers. Call `read_transcript(start_turn=N, end_turn=M)` for exact wording, specific code, or full error output. Use the `search` parameter to find specific content without reading entire ranges. Don't guess — retrieve.
 
 3. **The gradient is intentional.** Older context is more compressed, recent context is verbatim. This is by design. If you need old details with full fidelity, the tool is there.
 
