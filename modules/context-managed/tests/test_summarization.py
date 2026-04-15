@@ -1867,7 +1867,7 @@ class TestNoProviderGuard:
             task = mgr._summarization_task
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 pass
 
         await asyncio.sleep(0)
@@ -1922,7 +1922,7 @@ class TestFullSummarizationCycle:
             task = mgr._summarization_task
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 pass
         await asyncio.sleep(0.05)
 
@@ -1955,7 +1955,6 @@ class TestFullSummarizationCycle:
     @pytest.mark.asyncio
     async def test_full_cycle_with_disk_persistence(self, tmp_path):
         """Full cycle with session_dir — transcript.jsonl contains context_managed_summary markers."""
-        import json
         from unittest.mock import AsyncMock, MagicMock
 
         from amplifier_module_context_managed import ManagedContextManager
@@ -1993,7 +1992,7 @@ class TestFullSummarizationCycle:
                 await asyncio.wait_for(
                     asyncio.shield(mgr._summarization_task), timeout=1.0
                 )
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 pass
         await asyncio.sleep(0.05)
 
@@ -2066,7 +2065,7 @@ class TestFullSummarizationCycle:
                 await asyncio.wait_for(
                     asyncio.shield(mgr._summarization_task), timeout=1.0
                 )
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 pass
         await asyncio.sleep(0.05)
 
@@ -2145,7 +2144,7 @@ class TestFullSummarizationCycle:
                 await asyncio.wait_for(
                     asyncio.shield(mgr._summarization_task), timeout=1.0
                 )
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 pass
         await asyncio.sleep(0)
 
@@ -2172,7 +2171,7 @@ class TestFullSummarizationCycle:
                     await asyncio.wait_for(
                         asyncio.shield(mgr._summarization_task), timeout=1.0
                     )
-                except (asyncio.TimeoutError, Exception):
+                except asyncio.TimeoutError:
                     pass
             await asyncio.sleep(0)
 
