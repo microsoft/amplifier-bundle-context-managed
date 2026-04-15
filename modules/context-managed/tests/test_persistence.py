@@ -394,3 +394,40 @@ class TestClearAndArchive:
 
         messages = await context_no_disk.get_messages()
         assert messages == []
+
+
+class TestFormatVersioning:
+    """Tests verifying TRANSCRIPT_FORMAT_VERSION in transcript headers."""
+
+    @pytest.mark.asyncio
+    async def test_fresh_transcript_has_version(
+        self, context: ManagedContextManager, tmp_session_dir: Path
+    ):
+        """Add message, read first line, verify format_version == TRANSCRIPT_FORMAT_VERSION == '1.0.0'."""
+        await context.add_message({"role": "user", "content": "hello"})
+
+        transcript_path = tmp_session_dir / "transcript.jsonl"
+        with open(transcript_path) as f:
+            first_line = f.readline().strip()
+
+        header = json.loads(first_line)
+        assert TRANSCRIPT_FORMAT_VERSION == "1.0.0"
+        assert header["format_version"] == TRANSCRIPT_FORMAT_VERSION
+
+    @pytest.mark.asyncio
+    async def test_clear_writes_new_header(
+        self, context: ManagedContextManager, tmp_session_dir: Path
+    ):
+        """Add message, clear, read first line of new transcript, verify type=='transcript_header'
+        and format_version==TRANSCRIPT_FORMAT_VERSION."""
+        await context.add_message({"role": "user", "content": "hello"})
+
+        await context.clear()
+
+        transcript_path = tmp_session_dir / "transcript.jsonl"
+        with open(transcript_path) as f:
+            first_line = f.readline().strip()
+
+        header = json.loads(first_line)
+        assert header["type"] == "transcript_header"
+        assert header["format_version"] == TRANSCRIPT_FORMAT_VERSION
