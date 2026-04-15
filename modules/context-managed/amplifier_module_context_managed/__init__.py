@@ -954,7 +954,7 @@ class ManagedContextManager:
                         text_parts.append(block["text"])
                 content = "".join(text_parts)
             lines.append(f"[{role}]: {content}")
-        return "\n".join(lines)
+        return "\n\n".join(lines)
 
     def _extract_text_from_response(self, response: Any) -> str:
         """Extract text content from a ChatResponse.
@@ -1044,6 +1044,8 @@ class ManagedContextManager:
         if self._is_summarizing:
             return
         budget = self._calculate_budget(None, self._cached_provider)
+        if budget <= 0:
+            return
         usage_fraction = self._running_token_estimate / budget
 
         # Emergency check BEFORE normal trigger
