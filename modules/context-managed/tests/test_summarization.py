@@ -4,9 +4,11 @@ Tests for Phase 2 summarization dataclasses: SummaryResult and SummaryTier.
 Task 1: Add SummaryResult and SummaryTier dataclasses.
 Task 2: Default summarization prompt and _get_summarization_prompt().
 Task 4: Trigger summarization with guard and threshold wiring.
+Task 12: Tier reconstruction on resume.
 """
 
 import asyncio
+import json
 
 import pytest
 
@@ -1420,8 +1422,6 @@ class TestSummaryPersistence:
 
     def test_persist_summary_marker_writes_to_transcript(self, tmp_path):
         """_persist_summary_marker() writes a marker dict to the transcript JSONL file."""
-        import json
-
         from amplifier_module_context_managed import ManagedContextManager, SummaryTier
 
         mgr = ManagedContextManager(session_dir=tmp_path)
@@ -1510,3 +1510,205 @@ class TestSummaryPersistence:
             assert meta.get("type") != "context_managed_summary", (
                 f"Summary marker leaked into get_messages() output: {msg}"
             )
+
+
+# ── Helper for tier reconstruction tests ─────────────────────────────────────
+
+
+def _write_transcript_with_markers(session_dir, records):
+    """Write a transcript.jsonl file with header + the given records (messages and markers)."""
+    from amplifier_module_context_managed import TRANSCRIPT_FORMAT_VERSION
+
+    transcript_path = session_dir / "transcript.jsonl"
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(transcript_path, "w") as f:
+        header = {
+            "type": "transcript_header",
+            "format_version": TRANSCRIPT_FORMAT_VERSION,
+            "created_at": "2024-01-01T00:00:00.000+00:00",
+        }
+        f.write(json.dumps(header) + "\n")
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+
+
+class TestTierReconstructionOnResume:
+    """Tests for Phase 2 tier reconstruction on session resume (task-12)."""
+
+    @pytest.mark.asyncio
+    async def test_resume_reconstructs_tiers(self, tmp_path):
+        """_load_from_transcript() reconstructs SummaryTier objects from summary markers."""
+        from amplifier_module_context_managed import ManagedContextManager, SummaryTier
+
+        records = [
+            {"role": "user", "content": "First message"},
+            {"role": "assistant", "content": "First response"},
+            {
+                "role": "system",
+                "content": "Summary of messages 0-1",
+                "metadata": {
+                    "type": "context_managed_summary",
+                    "turn_range": [1, 1],
+                    "source_message_range": [0, 2],
+                    "compression_passes": 1,
+                    "token_estimate": 100,
+                },
+            },
+            {"role": "user", "content": "Second message"},
+            {"role": "assistant", "content": "Second response"},
+        ]
+        _write_transcript_with_markers(tmp_path, records)
+
+        ctx = ManagedContextManager(session_dir=tmp_path)
+        await ctx._load_from_transcript()
+
+        # Should have reconstructed 1 SummaryTier
+        assert len(ctx._summary_tiers) == 1
+
+        tier = ctx._summary_tiers[0]
+        assert isinstance(tier, SummaryTier)
+        assert tier.content == "Summary of messages 0-1"
+        # turn_range and source_message_range must be tuples (not lists)
+        assert tier.turn_range == (1, 1)
+        assert isinstance(tier.turn_range, tuple)
+        assert tier.source_message_range == (0, 2)
+        assert isinstance(tier.source_message_range, tuple)
+        assert tier.compression_passes == 1
+        assert tier.token_estimate == 100
+
+        assert ctx._loaded_from_transcript is True
+
+    @pytest.mark.asyncio
+    async def test_resume_sets_verbatim_window_correctly(self, tmp_path):
+        """_load_from_transcript() sets _messages to only the verbatim window after last summary."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        records = [
+            {"role": "user", "content": "Msg 0"},
+            {"role": "assistant", "content": "Msg 1"},
+            {
+                "role": "system",
+                "content": "Summary covering msgs 0-1",
+                "metadata": {
+                    "type": "context_managed_summary",
+                    "turn_range": [1, 1],
+                    "source_message_range": [0, 2],
+                    "compression_passes": 1,
+                    "token_estimate": 80,
+                },
+            },
+            {"role": "user", "content": "Msg 2"},
+            {"role": "assistant", "content": "Msg 3"},
+        ]
+        _write_transcript_with_markers(tmp_path, records)
+
+        ctx = ManagedContextManager(session_dir=tmp_path)
+        await ctx._load_from_transcript()
+
+        # _messages should only contain msgs after the summary boundary (offset 2)
+        assert len(ctx._messages) == 2
+        assert ctx._messages[0]["content"] == "Msg 2"
+        assert ctx._messages[1]["content"] == "Msg 3"
+
+        # _transcript_message_offset should be 2 (last summarized end index)
+        assert ctx._transcript_message_offset == 2
+
+        # _summarized_through_turn should be 1 (from turn_range[1])
+        assert ctx._summarized_through_turn == 1
+
+        # _current_turn = _summarized_through_turn + user messages in verbatim window
+        # verbatim has 1 user message ("Msg 2") -> _current_turn = 1 + 1 = 2
+        assert ctx._current_turn == 2
+
+        assert ctx._loaded_from_transcript is True
+
+    @pytest.mark.asyncio
+    async def test_resume_without_tiers_loads_all_messages(self, tmp_path):
+        """_load_from_transcript() loads all messages with offset=0 when no summary markers exist."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        records = [
+            {"role": "user", "content": "First"},
+            {"role": "assistant", "content": "Second"},
+            {"role": "user", "content": "Third"},
+        ]
+        _write_transcript_with_markers(tmp_path, records)
+
+        ctx = ManagedContextManager(session_dir=tmp_path)
+        await ctx._load_from_transcript()
+
+        # All 3 messages should be in _messages
+        assert len(ctx._messages) == 3
+        assert ctx._messages[0]["content"] == "First"
+        assert ctx._messages[1]["content"] == "Second"
+        assert ctx._messages[2]["content"] == "Third"
+
+        # _transcript_message_offset should be 0
+        assert ctx._transcript_message_offset == 0
+
+        # No summary tiers
+        assert len(ctx._summary_tiers) == 0
+
+        assert ctx._loaded_from_transcript is True
+
+    @pytest.mark.asyncio
+    async def test_resume_reconstructs_multiple_tiers(self, tmp_path):
+        """_load_from_transcript() reconstructs multiple SummaryTier objects correctly."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        records = [
+            {"role": "user", "content": "Msg 0"},
+            {"role": "assistant", "content": "Msg 1"},
+            {
+                "role": "system",
+                "content": "Summary of msgs 0-1",
+                "metadata": {
+                    "type": "context_managed_summary",
+                    "turn_range": [1, 1],
+                    "source_message_range": [0, 2],
+                    "compression_passes": 1,
+                    "token_estimate": 80,
+                },
+            },
+            {"role": "user", "content": "Msg 2"},
+            {"role": "assistant", "content": "Msg 3"},
+            {
+                "role": "system",
+                "content": "Summary of msgs 2-3",
+                "metadata": {
+                    "type": "context_managed_summary",
+                    "turn_range": [2, 2],
+                    "source_message_range": [2, 4],
+                    "compression_passes": 1,
+                    "token_estimate": 90,
+                },
+            },
+            {"role": "user", "content": "Msg 4"},
+            {"role": "assistant", "content": "Msg 5"},
+        ]
+        _write_transcript_with_markers(tmp_path, records)
+
+        ctx = ManagedContextManager(session_dir=tmp_path)
+        await ctx._load_from_transcript()
+
+        # Should have 2 tiers reconstructed
+        assert len(ctx._summary_tiers) == 2
+
+        # First tier covers messages [0, 2)
+        assert ctx._summary_tiers[0].source_message_range == (0, 2)
+        assert ctx._summary_tiers[0].turn_range == (1, 1)
+
+        # Second tier covers messages [2, 4)
+        assert ctx._summary_tiers[1].source_message_range == (2, 4)
+        assert ctx._summary_tiers[1].turn_range == (2, 2)
+
+        # _messages should be [Msg 4, Msg 5] (after max source end = 4)
+        assert len(ctx._messages) == 2
+        assert ctx._messages[0]["content"] == "Msg 4"
+        assert ctx._messages[1]["content"] == "Msg 5"
+
+        # _transcript_message_offset = max source_message_range[1] across all tiers = 4
+        assert ctx._transcript_message_offset == 4
+
+        # _summarized_through_turn = max turn_range[1] across all tiers = 2
+        assert ctx._summarized_through_turn == 2

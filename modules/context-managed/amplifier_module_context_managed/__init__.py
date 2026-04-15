@@ -634,30 +634,113 @@ class ManagedContextManager:
 
         return messages
 
+    def _read_all_transcript_records(self) -> list[dict[str, Any]]:
+        """Read all records from transcript.jsonl, skipping only the header.
+
+        Unlike _read_transcript_messages(), this includes summary markers.
+        Returns all non-header records as a list of dicts.
+        """
+        if self.transcript_path is None or not self.transcript_path.exists():
+            return []
+
+        records = []
+        with open(self.transcript_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning(f"Skipping malformed transcript line: {line[:100]}")
+                    continue
+
+                # Skip only the header
+                if record.get("type") == "transcript_header":
+                    continue
+
+                records.append(record)
+
+        return records
+
     async def _load_from_transcript(self) -> None:
         """Load state from existing transcript file (session resume).
 
-        Reconstructs in-memory state from the JSONL file. Sets
-        _loaded_from_transcript = True so set_messages() becomes a NO-OP.
+        Reads all records, separates summary markers from conversation messages,
+        reconstructs SummaryTier objects, and restores the verbatim window.
+        Sets _loaded_from_transcript = True so set_messages() becomes a NO-OP.
         """
         if self.transcript_path is None or not self.transcript_path.exists():
             return
 
         try:
-            messages = self._read_transcript_messages()
-            if not messages:
+            all_records = self._read_all_transcript_records()
+            if not all_records:
                 return
 
-            self._messages = messages
-            self._message_index = len(messages)
-            self._running_token_estimate = self._estimate_tokens(messages)
+            # Separate summary markers from conversation messages
+            summary_markers = [
+                r
+                for r in all_records
+                if (r.get("metadata") or {}).get("type") == "context_managed_summary"
+            ]
+            conversation_messages = [
+                r
+                for r in all_records
+                if (r.get("metadata") or {}).get("type") != "context_managed_summary"
+            ]
+
+            # Reconstruct SummaryTier objects from markers with valid fields
+            tiers: list[SummaryTier] = []
+            for marker in summary_markers:
+                meta = marker.get("metadata") or {}
+                try:
+                    turn_range_raw = meta["turn_range"]
+                    source_range_raw = meta["source_message_range"]
+                    tier = SummaryTier(
+                        content=marker["content"],
+                        turn_range=tuple(turn_range_raw),
+                        source_message_range=tuple(source_range_raw),
+                        compression_passes=meta.get("compression_passes", 1),
+                        token_estimate=meta.get("token_estimate", 0),
+                    )
+                    tiers.append(tier)
+                except (KeyError, TypeError) as e:
+                    logger.warning(
+                        f"Skipping malformed summary marker during resume: {e}"
+                    )
+                    continue
+
+            if tiers:
+                # Set verbatim window to messages after the last summarized end
+                last_summarized_end = max(
+                    tier.source_message_range[1] for tier in tiers
+                )
+                self._messages = conversation_messages[last_summarized_end:]
+                self._transcript_message_offset = last_summarized_end
+                self._summarized_through_turn = max(
+                    tier.turn_range[1] for tier in tiers
+                )
+            else:
+                self._messages = conversation_messages
+                self._transcript_message_offset = 0
+                self._summarized_through_turn = 0
+
+            self._summary_tiers = tiers
+            self._message_index = len(conversation_messages)
+            self._running_token_estimate = sum(
+                tier.token_estimate for tier in tiers
+            ) + self._estimate_tokens(self._messages)
+            user_in_verbatim = sum(
+                1 for msg in self._messages if msg.get("role") == "user"
+            )
+            self._current_turn = self._summarized_through_turn + user_in_verbatim
             self._loaded_from_transcript = True
             self._pressure_emitted = False
 
-            # Phase 2: reconstruct summary tiers from marked messages
-
             logger.info(
-                f"Resumed from transcript: {len(messages)} messages, "
+                f"Resumed from transcript: {len(self._messages)} verbatim messages, "
+                f"{len(tiers)} summary tier(s), "
                 f"~{self._running_token_estimate:,} tokens"
             )
         except Exception as e:
@@ -665,6 +748,9 @@ class ManagedContextManager:
             self._messages = []
             self._message_index = 0
             self._running_token_estimate = 0
+            self._summary_tiers = []
+            self._transcript_message_offset = 0
+            self._summarized_through_turn = 0
 
     def _persist_summary_marker(self, tier: "SummaryTier") -> None:
         """Write a summary marker to the transcript JSONL file.
