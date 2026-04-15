@@ -326,8 +326,77 @@ class ManagedContextManager:
             assembled.append(self._messages[0])
             conversation_messages = conversation_messages[1:]
 
-        # Phase 2: summary tiers would be inserted here with cache hints
-        # For Phase 1, all conversation is verbatim
+        # Phase 2: perform pending summary swap if available
+        if self._pending_summary is not None:
+            pending = self._pending_summary
+            abs_start, abs_end = pending.source_message_range
+            start_local = abs_start - self._transcript_message_offset
+            end_local = abs_end - self._transcript_message_offset
+
+            if start_local >= 0 and end_local <= len(self._messages):
+                # Valid boundary: perform the swap
+                old_tokens = self._estimate_tokens(
+                    self._messages[start_local:end_local]
+                )
+                token_estimate = self._estimate_tokens_single(
+                    {"role": "system", "content": pending.summary_text}
+                )
+                tier = SummaryTier(
+                    content=pending.summary_text,
+                    turn_range=pending.turn_range,
+                    source_message_range=pending.source_message_range,
+                    compression_passes=pending.compression_passes,
+                    token_estimate=token_estimate,
+                )
+                self._summary_tiers.append(tier)
+                self._messages = (
+                    self._messages[:start_local] + self._messages[end_local:]
+                )
+                self._transcript_message_offset += end_local - start_local
+                self._running_token_estimate = (
+                    self._running_token_estimate - old_tokens + token_estimate
+                )
+                self._summarized_through_turn = pending.turn_range[1]
+                self._summarization_failures = 0
+
+                # Rebuild conversation_messages after swap
+                if self._system_prompt_factory:
+                    conversation_messages = [
+                        msg
+                        for msg in self._messages
+                        if msg.get("role") != "system"
+                        or (msg.get("metadata") or {}).get("source") == "hook"
+                    ]
+                else:
+                    conversation_messages = list(self._messages)
+                    # Re-apply system message slice if stored system already in assembled
+                    if (
+                        not system_message
+                        and self._messages
+                        and self._messages[0].get("role") == "system"
+                    ):
+                        conversation_messages = conversation_messages[1:]
+            else:
+                logger.warning(
+                    f"Discarding pending summary with invalid boundary: "
+                    f"start_local={start_local}, end_local={end_local}, "
+                    f"messages_len={len(self._messages)}"
+                )
+
+            self._pending_summary = None
+
+        # Insert summary tiers with cache hints
+        for tier in self._summary_tiers:
+            assembled.append(
+                {
+                    "role": "system",
+                    "content": tier.content,
+                    "metadata": {
+                        "cache_hint": "breakpoint",
+                        "type": "context_managed_summary",
+                    },
+                }
+            )
 
         assembled.extend(conversation_messages)
 

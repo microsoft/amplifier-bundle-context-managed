@@ -625,3 +625,156 @@ class TestExtractTextFromResponse:
         result = mgr._extract_text_from_response(response)
 
         assert result == "Hello World"
+
+
+class TestPendingSummarySwap:
+    """Tests for Phase 2 pending summary swap in get_messages_for_request()."""
+
+    @pytest.mark.asyncio
+    async def test_swap_removes_verbatim_creates_tier(self):
+        """get_messages_for_request() removes summarized messages and creates a SummaryTier."""
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryResult,
+        )
+
+        mgr = ManagedContextManager()
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+            {"role": "user", "content": "More"},
+            {"role": "assistant", "content": "Content"},
+        ]
+        mgr._messages = list(messages)
+        mgr._running_token_estimate = mgr._estimate_tokens(messages)
+        mgr._transcript_message_offset = 0
+
+        # Pending summary covers messages 0-2 (local = absolute since offset=0)
+        mgr._pending_summary = SummaryResult(
+            summary_text="Summary of first two messages",
+            turn_range=(1, 1),
+            source_message_range=(0, 2),
+            compression_passes=1,
+        )
+
+        await mgr.get_messages_for_request()
+
+        # Messages 0 and 1 should be removed, only messages 2 and 3 remain
+        assert len(mgr._messages) == 2
+        assert mgr._messages[0]["content"] == "More"
+        assert mgr._messages[1]["content"] == "Content"
+
+        # A SummaryTier should have been created
+        assert len(mgr._summary_tiers) == 1
+        assert mgr._summary_tiers[0].content == "Summary of first two messages"
+        assert mgr._summary_tiers[0].turn_range == (1, 1)
+        assert mgr._summary_tiers[0].source_message_range == (0, 2)
+        assert mgr._summary_tiers[0].compression_passes == 1
+
+    @pytest.mark.asyncio
+    async def test_swap_updates_tracking_fields(self):
+        """get_messages_for_request() updates tracking fields after a successful swap."""
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryResult,
+        )
+
+        mgr = ManagedContextManager()
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+            {"role": "user", "content": "More"},
+            {"role": "assistant", "content": "Content"},
+        ]
+        mgr._messages = list(messages)
+        initial_estimate = mgr._estimate_tokens(messages)
+        mgr._running_token_estimate = initial_estimate
+        mgr._transcript_message_offset = 0
+        mgr._summarization_failures = 2  # Start with some failures to verify reset
+
+        old_tokens = mgr._estimate_tokens(messages[0:2])
+        new_tier_tokens = mgr._estimate_tokens_single(
+            {"role": "system", "content": "Summary of first two messages"}
+        )
+
+        mgr._pending_summary = SummaryResult(
+            summary_text="Summary of first two messages",
+            turn_range=(1, 1),
+            source_message_range=(0, 2),
+            compression_passes=1,
+        )
+
+        await mgr.get_messages_for_request()
+
+        # _pending_summary should be cleared
+        assert mgr._pending_summary is None
+        # _transcript_message_offset should be advanced by the number of removed messages (2)
+        assert mgr._transcript_message_offset == 2
+        # _summarized_through_turn should be set to turn_range[1]
+        assert mgr._summarized_through_turn == 1
+        # _summarization_failures should be reset to 0
+        assert mgr._summarization_failures == 0
+        # _running_token_estimate should be updated (subtract old, add new tier)
+        expected_estimate = initial_estimate - old_tokens + new_tier_tokens
+        assert mgr._running_token_estimate == expected_estimate
+
+    @pytest.mark.asyncio
+    async def test_swap_clears_pending_on_invalid_boundary(self):
+        """get_messages_for_request() discards pending summary and clears it on invalid boundary."""
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryResult,
+        )
+
+        mgr = ManagedContextManager()
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+        ]
+        mgr._messages = list(messages)
+        initial_estimate = mgr._estimate_tokens(messages)
+        mgr._running_token_estimate = initial_estimate
+        mgr._transcript_message_offset = 0
+
+        # Invalid: end_local = 10 - 0 = 10, but len(messages) = 2
+        mgr._pending_summary = SummaryResult(
+            summary_text="Summary",
+            turn_range=(1, 1),
+            source_message_range=(0, 10),
+            compression_passes=1,
+        )
+
+        await mgr.get_messages_for_request()
+
+        # _pending_summary should be cleared even on invalid boundary
+        assert mgr._pending_summary is None
+        # No tier should be created
+        assert len(mgr._summary_tiers) == 0
+        # Messages should be unchanged
+        assert len(mgr._messages) == 2
+        # Token estimate should be unchanged
+        assert mgr._running_token_estimate == initial_estimate
+
+    @pytest.mark.asyncio
+    async def test_no_swap_when_no_pending(self):
+        """get_messages_for_request() does nothing when _pending_summary is None."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+        ]
+        mgr._messages = list(messages)
+        initial_estimate = mgr._estimate_tokens(messages)
+        mgr._running_token_estimate = initial_estimate
+        mgr._pending_summary = None
+
+        await mgr.get_messages_for_request()
+
+        # Messages should be unchanged
+        assert len(mgr._messages) == 2
+        # No tier should be created
+        assert len(mgr._summary_tiers) == 0
+        # Estimate should be unchanged
+        assert mgr._running_token_estimate == initial_estimate
