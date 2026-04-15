@@ -603,36 +603,15 @@ class ManagedContextManager:
     def _read_transcript_messages(self) -> list[dict[str, Any]]:
         """Read all conversation messages from transcript.jsonl.
 
-        Skips the header line and any summary markers (metadata.type ==
+        Skips the header and any summary markers (metadata.type ==
         'context_managed_summary'). Returns raw conversation messages only.
+        This is the lossless accessor for SessionStore and external tools.
         """
-        if self.transcript_path is None or not self.transcript_path.exists():
-            return []
-
-        messages = []
-        with open(self.transcript_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.warning(f"Skipping malformed transcript line: {line[:100]}")
-                    continue
-
-                # Skip header
-                if record.get("type") == "transcript_header":
-                    continue
-
-                # Skip summary markers (implementation detail, not conversation)
-                meta = record.get("metadata") or {}
-                if meta.get("type") == "context_managed_summary":
-                    continue
-
-                messages.append(record)
-
-        return messages
+        return [
+            r
+            for r in self._read_all_transcript_records()
+            if (r.get("metadata") or {}).get("type") != "context_managed_summary"
+        ]
 
     def _read_all_transcript_records(self) -> list[dict[str, Any]]:
         """Read all records from transcript.jsonl, skipping only the header.
