@@ -78,6 +78,85 @@ class ReadTranscriptTool:
         """
         return ToolResult(success=True, output="(not yet implemented)")
 
+    def _parse_transcript(self, transcript_path: str) -> list[list[dict]]:
+        """Parse a transcript file into turns.
+
+        A turn starts with a user message and includes all subsequent messages
+        until the next user message.  The following lines are silently skipped:
+
+        * Lines whose top-level ``type`` field equals ``"transcript_header"``.
+        * Lines whose ``metadata.type`` field equals
+          ``"context_managed_summary"`` (context-manager summary markers).
+        * Lines with malformed JSON (a warning is logged for each).
+
+        Args:
+            transcript_path: Absolute or relative path to a ``transcript.jsonl``
+                file.
+
+        Returns:
+            A list of turns.  Each turn is a list of message dicts.  Returns
+            an empty list when the file does not exist or contains no
+            conversation messages.
+        """
+        import json
+        import os
+
+        if not os.path.exists(transcript_path):
+            return []
+
+        turns: list[list[dict]] = []
+        current_turn: list[dict] = []
+
+        try:
+            with open(transcript_path) as fh:
+                for line_num, raw in enumerate(fh, start=1):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+
+                    try:
+                        msg = json.loads(raw)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "Malformed JSON on line %d of %s – skipping",
+                            line_num,
+                            transcript_path,
+                        )
+                        continue
+
+                    # Skip header lines.
+                    if msg.get("type") == "transcript_header":
+                        continue
+
+                    # Skip context-manager summary markers.
+                    metadata = msg.get("metadata")
+                    if (
+                        isinstance(metadata, dict)
+                        and metadata.get("type") == "context_managed_summary"
+                    ):
+                        continue
+
+                    # A user message starts a new turn.
+                    if msg.get("role") == "user":
+                        if current_turn:
+                            turns.append(current_turn)
+                        current_turn = [msg]
+                    else:
+                        # Non-user messages belong to the current turn.
+                        # Discard any that arrive before the first user message.
+                        if current_turn:
+                            current_turn.append(msg)
+
+        except OSError:
+            logger.warning("Could not read transcript file %s", transcript_path)
+            return []
+
+        # Flush the last in-progress turn.
+        if current_turn:
+            turns.append(current_turn)
+
+        return turns
+
     def reset_rate_limit(self) -> None:
         """Reset the per-turn call counter to zero."""
         self._calls_this_turn = 0
