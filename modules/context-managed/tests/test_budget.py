@@ -84,6 +84,151 @@ class TestCalculateBudget:
         assert result == 200000
 
 
+class TestCalculateBudgetMaxTokensCeiling:
+    """Verify that self.max_tokens acts as a ceiling on provider-derived budgets.
+
+    This is the regression suite for the session-edc7a345 bug where Claude Opus 4.6
+    reported a 1 M-token context window (via the extended-context beta), causing all
+    three threshold events (budget_pressure / summarize_trigger / emergency_fallback)
+    to never fire because the budget denominator was ~932 K instead of the
+    operator-configured 200 K.
+    """
+
+    def test_large_provider_context_window_capped_by_max_tokens_model_info(self):
+        """Provider reporting 1 M context window is capped at max_tokens (200 K)."""
+        ctx = ManagedContextManager(max_tokens=200_000)
+
+        # Claude Opus 4.6 with 1 M extended-context beta
+        model_info = SimpleNamespace(context_window=1_000_000, max_output_tokens=128_000)
+        provider = MagicMock()
+        provider.get_model_info.return_value = model_info
+
+        result = ctx._calculate_budget(token_budget=None, provider=provider)
+
+        # Raw provider budget: 1_000_000 - int(128_000 * 0.5) - 4_096 = 931_904
+        # Capped at max_tokens:  min(931_904, 200_000) = 200_000
+        assert result == 200_000
+
+    def test_large_provider_context_window_capped_by_custom_max_tokens_model_info(self):
+        """Custom max_tokens=1_000 caps even a 1 M provider budget."""
+        ctx = ManagedContextManager(max_tokens=1_000)
+
+        model_info = SimpleNamespace(context_window=1_000_000, max_output_tokens=128_000)
+        provider = MagicMock()
+        provider.get_model_info.return_value = model_info
+
+        result = ctx._calculate_budget(token_budget=None, provider=provider)
+
+        assert result == 1_000
+
+    def test_large_provider_context_window_capped_by_max_tokens_defaults(self):
+        """Provider.get_info().defaults path also caps at max_tokens."""
+        ctx = ManagedContextManager(max_tokens=200_000)
+
+        provider = MagicMock()
+        provider.get_model_info.return_value = None
+        provider_info = SimpleNamespace(
+            defaults={"context_window": 1_000_000, "max_output_tokens": 128_000}
+        )
+        provider.get_info.return_value = provider_info
+
+        result = ctx._calculate_budget(token_budget=None, provider=provider)
+
+        # Raw: 1_000_000 - 64_000 - 4_096 = 931_904 → capped at 200_000
+        assert result == 200_000
+
+    def test_provider_budget_smaller_than_max_tokens_is_unchanged(self):
+        """When provider budget < max_tokens the provider value is returned as-is."""
+        ctx = ManagedContextManager(max_tokens=200_000)
+
+        # Small model: 32 K window
+        model_info = SimpleNamespace(context_window=32_768, max_output_tokens=4_096)
+        provider = MagicMock()
+        provider.get_model_info.return_value = model_info
+
+        result = ctx._calculate_budget(token_budget=None, provider=provider)
+
+        # 32_768 - int(4_096 * 0.5) - 4_096 = 32_768 - 2_048 - 4_096 = 26_624
+        # min(26_624, 200_000) = 26_624  (unchanged)
+        assert result == 26_624
+
+    def test_explicit_token_budget_bypasses_ceiling(self):
+        """An explicit token_budget is returned verbatim — no ceiling applied."""
+        ctx = ManagedContextManager(max_tokens=1_000)
+
+        # Even with a tiny max_tokens, explicit overrides should pass through
+        result = ctx._calculate_budget(token_budget=500_000, provider=None)
+
+        assert result == 500_000
+
+
+class TestSummarizationTriggerWithLargeProviderWindow:
+    """Verify threshold events fire against max_tokens, not the provider's raw window.
+
+    Without the ceiling fix, a 1 M provider window produces a budget of ~932 K.
+    A context manager with max_tokens=1_000 and ~900 stored tokens would only be at
+    0.097 % utilisation — far below the 80 % summarise_trigger — so no event fires.
+    With the fix the budget is capped at 1_000, making 900/1_000 = 90 % > 80 %.
+    """
+
+    @pytest.mark.asyncio
+    async def test_summarize_trigger_fires_with_1m_provider_when_above_max_tokens(self):
+        """_check_summarization_trigger fires based on max_tokens, not provider window."""
+        from unittest.mock import patch
+
+        ctx = ManagedContextManager(max_tokens=1_000, summarize_trigger=0.80)
+
+        # Wire a 1 M provider as the cached provider
+        model_info = SimpleNamespace(context_window=1_000_000, max_output_tokens=128_000)
+        provider = MagicMock()
+        provider.get_model_info.return_value = model_info
+        ctx._cached_provider = provider
+
+        # Simulate 900 tokens in the context — 90 % of 1 K budget, 0.097 % of 932 K
+        ctx._running_token_estimate = 900
+
+        trigger_called = []
+
+        async def fake_trigger():
+            trigger_called.append(True)
+
+        with patch.object(ctx, "_trigger_summarization", side_effect=fake_trigger):
+            await ctx._check_summarization_trigger()
+
+        assert trigger_called, (
+            "_trigger_summarization was NOT called; the budget ceiling fix is not working. "
+            "Tokens=900 is 90% of max_tokens=1000 (above 80% trigger) but only 0.097% of "
+            "the raw provider budget=931904."
+        )
+
+    @pytest.mark.asyncio
+    async def test_summarize_trigger_not_fired_below_threshold(self):
+        """_check_summarization_trigger does NOT fire when tokens are below the threshold."""
+        from unittest.mock import patch
+
+        ctx = ManagedContextManager(max_tokens=1_000, summarize_trigger=0.80)
+
+        model_info = SimpleNamespace(context_window=1_000_000, max_output_tokens=128_000)
+        provider = MagicMock()
+        provider.get_model_info.return_value = model_info
+        ctx._cached_provider = provider
+
+        # 500 tokens — 50 % of 1 K, below 80 % trigger
+        ctx._running_token_estimate = 500
+
+        trigger_called = []
+
+        async def fake_trigger():
+            trigger_called.append(True)
+
+        with patch.object(ctx, "_trigger_summarization", side_effect=fake_trigger):
+            await ctx._check_summarization_trigger()
+
+        assert not trigger_called, (
+            "_trigger_summarization fired unexpectedly at 50% utilisation."
+        )
+
+
 class TestTokenEstimation:
     """Verify chars/4 token estimation heuristic."""
 

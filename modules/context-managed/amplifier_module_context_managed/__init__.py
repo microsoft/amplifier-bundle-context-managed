@@ -546,7 +546,16 @@ class ManagedContextManager:
         Priority: explicit token_budget > provider.get_model_info() >
         provider.get_info().defaults > self.max_tokens fallback.
 
-        Same logic as context-simple's _calculate_budget().
+        self.max_tokens acts as a **ceiling** on any provider-derived budget.
+        Even if the provider reports a very large context window (e.g. 1 M tokens
+        with the Claude extended-context beta), the returned budget will never
+        exceed self.max_tokens.  This ensures that the summarization thresholds
+        (pressure_warning / summarize_trigger / emergency_fallback) fire at the
+        token count the operator configured, not at some fraction of the provider's
+        physical limit.
+
+        Same logic as context-simple's _calculate_budget(), extended with the
+        max_tokens ceiling.
         """
         if token_budget is not None:
             logger.debug(f"Using explicit token_budget: {token_budget}")
@@ -565,12 +574,14 @@ class ManagedContextManager:
                         if context_window and max_output:
                             reserved_output = int(max_output * output_reserve_fraction)
                             budget = context_window - reserved_output - safety_margin
+                            capped = min(budget, self.max_tokens)
                             logger.info(
                                 f"Budget from provider model info: {budget:,} "
                                 f"(context={context_window:,}, "
-                                f"reserved_output={reserved_output:,})"
+                                f"reserved_output={reserved_output:,}) "
+                                f"→ capped at max_tokens={capped:,}"
                             )
-                            return budget
+                            return capped
 
                 info = provider.get_info()
                 defaults = info.defaults or {}
@@ -580,8 +591,12 @@ class ManagedContextManager:
                 if context_window and max_output_tokens:
                     reserved_output = int(max_output_tokens * output_reserve_fraction)
                     budget = context_window - reserved_output - safety_margin
-                    logger.info(f"Budget from provider defaults: {budget:,}")
-                    return budget
+                    capped = min(budget, self.max_tokens)
+                    logger.info(
+                        f"Budget from provider defaults: {budget:,} "
+                        f"→ capped at max_tokens={capped:,}"
+                    )
+                    return capped
             except Exception as e:
                 logger.debug(f"Could not get budget from provider: {e}")
 
