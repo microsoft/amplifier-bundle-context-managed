@@ -2,37 +2,138 @@
 bundle:
   name: context-managed
   version: 0.1.0
-  description: LLM-powered rolling context summarization with persistent transcript and budget-aware tracking
+  description: |
+    Foundation bundle with LLM-powered rolling context summarization.
 
-modules:
-  - name: context-managed
-    path: modules/context-managed
-    type: context
-  - name: tool-transcript
-    path: modules/tool-transcript
-    type: tool
+    Features:
+    - Two-parameter context inheritance (context_depth + context_scope)
+    - Session resume (use full session_id from delegate calls)
+    - Fixed tool inheritance (explicit declarations always honored)
+    - Multi-agent collaboration patterns
+    - Persistent transcript with rolling LLM summaries
+    - Budget-aware context tracking with pressure warnings
+
+includes:
+  # Ecosystem expert behaviors (provides @amplifier: and @core: namespaces)
+  - bundle: git+https://github.com/microsoft/amplifier@main#subdirectory=behaviors/amplifier-expert.yaml
+  - bundle: git+https://github.com/microsoft/amplifier-core@main#subdirectory=behaviors/core-expert.yaml
+  # Foundation expert behavior
+  - bundle: foundation:behaviors/foundation-expert
+  # Foundation behaviors
+  - bundle: foundation:behaviors/sessions
+  - bundle: foundation:behaviors/status-context
+  - bundle: foundation:behaviors/redaction
+  - bundle: foundation:behaviors/todo-reminder
+  - bundle: foundation:behaviors/streaming-ui
+  # Agent orchestration with delegate tool
+  - bundle: foundation:behaviors/agents
+  # External bundles
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-recipes@main#subdirectory=behaviors/recipes.yaml
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-design-intelligence@main#subdirectory=behaviors/design-intelligence.yaml
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-python-dev@main
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-shadow@main
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-skills@main#subdirectory=behaviors/skills.yaml
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-browser-tester@main#subdirectory=behaviors/browser-tester.yaml
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-superpowers@main#subdirectory=behaviors/superpowers-methodology.yaml
+  - bundle: git+https://github.com/microsoft/amplifier-module-hook-shell@main#subdirectory=behaviors/hook-shell.yaml
+  - bundle: git+https://github.com/microsoft/amplifier-module-tool-mcp@main#subdirectory=behaviors/mcp.yaml
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-filesystem@main#subdirectory=behaviors/apply-patch.yaml
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-routing-matrix@main
+
+
+session:
+  raw: true
+  orchestrator:
+    module: loop-streaming
+    source: git+https://github.com/microsoft/amplifier-module-loop-streaming@main
+    config:
+      extended_thinking: true
+  context:
+    module: context-managed
+    source: ./modules/context-managed
+    config:
+      max_tokens: 200000
+      verbatim_window_tokens: 40000
+      summarize_trigger: 0.80
+      pressure_warning: 0.70
+      emergency_fallback: 0.92
+      max_summary_tiers: 3
+      summary_target_tokens: 1500
+      summarization_retries_before_fallback: 3
+      emergency_target_usage: 0.50
+      large_result_threshold: 50000
+
+tools:
+  - module: tool-filesystem
+    source: git+https://github.com/microsoft/amplifier-module-tool-filesystem@main
+  - module: tool-bash
+    source: git+https://github.com/microsoft/amplifier-module-tool-bash@main
+  - module: tool-web
+    source: git+https://github.com/microsoft/amplifier-module-tool-web@main
+  - module: tool-search
+    source: git+https://github.com/microsoft/amplifier-module-tool-search@main
+  # NOTE: delegate tool comes from agents behavior
+  - module: tool-transcript
+    source: ./modules/tool-transcript
     config:
       rate_limit_per_turn: 3
 
-includes: []
+agents:
+  include:
+    # Note: amplifier-expert, core-expert, and foundation-expert come via included behaviors above
+    - foundation:bug-hunter
+    - foundation:explorer
+    - foundation:file-ops
+    - foundation:git-ops
+    - foundation:integration-specialist
+    - foundation:modular-builder
+    - foundation:post-task-cleanup
+    - foundation:security-guardian
+    - foundation:test-coverage
+    - foundation:web-research
+    - foundation:zen-architect
 ---
 
-# Context Managed Bundle
+# Context Managed Bundle v0.1.0
 
-This bundle provides intelligent context management for Amplifier, replacing mechanical truncation with LLM-powered rolling summaries, persistent message history, and budget-aware context tracking.
+This bundle provides the standard Amplifier foundation with LLM-powered rolling context summarization, replacing mechanical truncation with intelligent summaries and persistent message history.
 
-## Components
+## Key Features
 
-### Context Manager Module
+| Feature | Description |
+|---------|-------------|
+| **Delegate tool** | Two-parameter context control (depth + scope) |
+| **Session resume** | Continue agent sessions with full session_id |
+| **Tool inheritance** | Explicit declarations always honored |
+| **MCP support** | Model Context Protocol integration (configure via mcp.json) |
+| **Rolling summaries** | LLM-powered context compression at 80% budget |
+| **Persistent transcript** | Full message history in JSONL format |
+| **Budget tracking** | Token budget awareness with pressure warnings at 70% |
 
-The core module implementing the `ContextManager` protocol. Must be mounted before the transcript tool so it can register `context_transcript_path` in the session environment. Manages message lifecycle: accepting messages, persisting to disk, maintaining rolling summary tiers, tracking budget, and assembling optimized message lists.
+## Delegate Tool
 
-### Transcript Tool
+```python
+# Context depth: HOW MUCH to inherit
+context_depth: "none" | "recent" | "all"
 
-A lightweight tool giving the LLM on-demand access to full-fidelity past messages that have been compressed into summaries. Reads from the same `transcript.jsonl` that the context module writes.
+# Context scope: WHICH content to include
+context_scope: "conversation" | "agents" | "full"
+```
 
-### Context Instructions
+## MCP Configuration
+
+To use MCP servers, create `.amplifier/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "your-server": {
+      "url": "https://example.com/mcp"
+    }
+  }
+}
+```
+
+@foundation:context/shared/common-system-base.md
 
 @context-managed:context/summary-instructions.md
-
-Teaches the model how to interpret summaries and when to use the transcript tool.
