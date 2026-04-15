@@ -3,7 +3,12 @@ Tests for Phase 2 summarization dataclasses: SummaryResult and SummaryTier.
 
 Task 1: Add SummaryResult and SummaryTier dataclasses.
 Task 2: Default summarization prompt and _get_summarization_prompt().
+Task 4: Trigger summarization with guard and threshold wiring.
 """
+
+import asyncio
+
+import pytest
 
 
 class TestSummaryResultDataclass:
@@ -250,3 +255,157 @@ class TestToolPairSnapping:
         result = mgr._snap_to_tool_pair_boundary(2)
 
         assert result == 2  # Unchanged
+
+
+class TestTriggerSummarization:
+    """Tests for _trigger_summarization() guards and behavior."""
+
+    @pytest.mark.asyncio
+    async def test_trigger_sets_is_summarizing_flag(self):
+        """_trigger_summarization() sets _is_summarizing=True and creates a task."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(verbatim_window_tokens=10)
+        mgr._cached_provider = object()  # non-None provider
+        mgr._messages = [
+            {"role": "user", "content": "hello world"},
+            {"role": "assistant", "content": "response here"},
+        ]
+        mgr._running_token_estimate = 1000  # exceeds verbatim_window_tokens=10
+
+        await mgr._trigger_summarization()
+
+        # Immediately after call: flag should be True and task should exist
+        assert mgr._is_summarizing is True
+        assert mgr._summarization_task is not None
+
+        task = mgr._summarization_task
+        await task  # Task catches NotImplementedError internally, completes normally
+
+        # After task runs: flag reset, failure counted (NotImplementedError)
+        assert mgr._is_summarizing is False
+        assert mgr._summarization_task is None
+        assert mgr._summarization_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_trigger_skips_when_already_summarizing(self):
+        """_trigger_summarization() is a no-op when _is_summarizing is True."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(verbatim_window_tokens=10)
+        mgr._cached_provider = object()
+        mgr._messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "response"},
+        ]
+        mgr._running_token_estimate = 1000
+        mgr._is_summarizing = True  # Already summarizing
+
+        await mgr._trigger_summarization()
+
+        # Guard fires: no task created, no state change
+        assert mgr._summarization_task is None
+        assert mgr._summarization_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_trigger_skips_when_no_provider(self):
+        """_trigger_summarization() is a no-op when _cached_provider is None."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(verbatim_window_tokens=10)
+        mgr._cached_provider = None  # No provider available
+        mgr._messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "response"},
+        ]
+        mgr._running_token_estimate = 1000
+
+        await mgr._trigger_summarization()
+
+        assert mgr._is_summarizing is False
+        assert mgr._summarization_task is None
+
+    @pytest.mark.asyncio
+    async def test_trigger_skips_when_no_boundary(self):
+        """_trigger_summarization() is a no-op when _calculate_segment_boundary() is None."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(verbatim_window_tokens=10_000)
+        mgr._cached_provider = object()
+        # Running estimate below verbatim_window_tokens → boundary returns None
+        mgr._messages = [{"role": "user", "content": "hi"}]
+        mgr._running_token_estimate = 5
+
+        await mgr._trigger_summarization()
+
+        assert mgr._is_summarizing is False
+        assert mgr._summarization_task is None
+
+
+class TestThresholdWiring:
+    """Tests for threshold-based trigger wiring in add_message()."""
+
+    @pytest.mark.asyncio
+    async def test_add_message_increments_turn_on_user_message(self):
+        """add_message() increments _current_turn only for user messages."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        assert mgr._current_turn == 0
+
+        await mgr.add_message({"role": "user", "content": "hello"})
+        assert mgr._current_turn == 1
+
+        await mgr.add_message({"role": "assistant", "content": "world"})
+        assert mgr._current_turn == 1  # Not incremented for non-user messages
+
+        await mgr.add_message({"role": "user", "content": "follow up"})
+        assert mgr._current_turn == 2
+
+    @pytest.mark.asyncio
+    async def test_add_message_triggers_at_080_threshold(self):
+        """add_message() triggers summarization when usage fraction >= summarize_trigger."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            summarize_trigger=0.80,
+            verbatim_window_tokens=10,
+        )
+        mgr._cached_provider = object()  # non-None so trigger guard passes
+        # Pre-seed messages so _calculate_segment_boundary() returns non-None
+        mgr._messages = [
+            {"role": "user", "content": "earlier message"},
+            {"role": "assistant", "content": "earlier response"},
+        ]
+        # 90% of 1000 → well above 0.80 trigger
+        mgr._running_token_estimate = 900
+
+        await mgr.add_message({"role": "user", "content": "new message"})
+
+        # Give the event loop a tick to let the background task run
+        await asyncio.sleep(0)
+
+        # Summarization was triggered: task ran, hit NotImplementedError, failure counted
+        assert mgr._summarization_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_add_message_does_not_trigger_below_threshold(self):
+        """add_message() does not trigger summarization when usage fraction < summarize_trigger."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            summarize_trigger=0.80,
+        )
+        mgr._cached_provider = object()
+        # 10% of 1000 → well below 0.80 trigger
+        mgr._running_token_estimate = 100
+
+        await mgr.add_message({"role": "user", "content": "short message"})
+
+        await asyncio.sleep(0)
+
+        assert mgr._summarization_failures == 0
+        assert mgr._is_summarizing is False
+        assert mgr._summarization_task is None

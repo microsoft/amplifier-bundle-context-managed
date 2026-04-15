@@ -236,6 +236,10 @@ class ManagedContextManager:
         Persists to transcript.jsonl, injects timestamp, handles large tool
         results, updates running token estimate, and checks thresholds.
         """
+        # Increment turn counter for user messages (Phase 2)
+        if message.get("role") == "user":
+            self._current_turn += 1
+
         # Inject timestamp if not present (same pattern as context-simple)
         existing_meta = message.get("metadata") or {}
         if "timestamp" not in existing_meta:
@@ -266,6 +270,9 @@ class ManagedContextManager:
             f"{len(self._messages)} total messages, "
             f"{self._running_token_estimate:,} tokens"
         )
+
+        # Check summarization threshold (Phase 2)
+        await self._check_summarization_trigger()
 
     async def get_messages_for_request(
         self,
@@ -705,6 +712,67 @@ class ManagedContextManager:
         end_idx = self._snap_to_tool_pair_boundary(end_idx)
 
         return (0, end_idx)
+
+    async def _perform_summarization(self, boundary: tuple[int, int]) -> SummaryResult:
+        """Placeholder for Phase 2 LLM summarization (not yet implemented)."""
+        raise NotImplementedError
+
+    async def _trigger_summarization(self) -> None:
+        """Trigger summarization with guards.
+
+        Guards (in order):
+          1. Skip if _is_summarizing is True.
+          2. Skip if _cached_provider is None (log debug).
+          3. Skip if _calculate_segment_boundary() returns None.
+
+        On pass: sets _is_summarizing=True and creates an asyncio.Task for
+        _run_summarization(boundary).
+        """
+        if self._is_summarizing:
+            return
+        if self._cached_provider is None:
+            logger.debug("Skipping summarization: no cached provider")
+            return
+        boundary = self._calculate_segment_boundary()
+        if boundary is None:
+            return
+        self._is_summarizing = True
+        self._summarization_task = asyncio.create_task(
+            self._run_summarization(boundary)
+        )
+
+    async def _run_summarization(self, boundary: tuple[int, int]) -> None:
+        """Wrapper that runs summarization and handles errors.
+
+        Calls _perform_summarization(boundary) and stores result in
+        _pending_summary.  On exception: increments _summarization_failures
+        and logs a warning.  In the finally block: resets _is_summarizing=False
+        and _summarization_task=None.
+        """
+        try:
+            result = await self._perform_summarization(boundary)
+            self._pending_summary = result
+        except Exception as e:
+            self._summarization_failures += 1
+            logger.warning(f"Summarization failed: {e}")
+        finally:
+            self._is_summarizing = False
+            self._summarization_task = None
+
+    async def _check_summarization_trigger(self) -> None:
+        """Check if summarization should be triggered based on usage fraction.
+
+        Skips if _is_summarizing is True.  Calculates budget via
+        _calculate_budget(None, _cached_provider) and computes
+        usage_fraction = _running_token_estimate / budget.  Calls
+        _trigger_summarization() if usage_fraction >= summarize_trigger.
+        """
+        if self._is_summarizing:
+            return
+        budget = self._calculate_budget(None, self._cached_provider)
+        usage_fraction = self._running_token_estimate / budget
+        if usage_fraction >= self.summarize_trigger:
+            await self._trigger_summarization()
 
     def _snap_to_tool_pair_boundary(self, end_idx: int) -> int:
         """Adjust end_idx to avoid splitting tool call/result pairs.
