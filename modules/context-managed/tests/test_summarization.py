@@ -1263,3 +1263,153 @@ class TestSummarizationEvents:
         assert "context:post_summarize" not in emitted_events
         # Failure counter should still be incremented
         assert mgr._summarization_failures == 1
+
+
+class TestEmergencyFallback:
+    """Tests for _emergency_mechanical_fallback() and its trigger in _check_summarization_trigger()."""
+
+    @pytest.mark.asyncio
+    async def test_fallback_fires_when_failures_and_high_usage(self):
+        """_check_summarization_trigger() calls _emergency_mechanical_fallback() when
+        _summarization_failures >= summarization_retries_before_fallback AND
+        usage_fraction >= emergency_fallback.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            summarize_trigger=0.80,
+            emergency_fallback=0.92,
+            summarization_retries_before_fallback=3,
+        )
+        # Set failures at the threshold
+        mgr._summarization_failures = 3
+        # Usage fraction = 950 / 1000 = 0.95 >= 0.92 (emergency_fallback)
+        mgr._running_token_estimate = 950
+
+        with patch.object(
+            mgr, "_emergency_mechanical_fallback", new_callable=AsyncMock
+        ) as mock_fallback:
+            await mgr._check_summarization_trigger()
+
+        mock_fallback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_fallback_reduces_token_estimate(self):
+        """_emergency_mechanical_fallback() reduces _running_token_estimate
+        by removing non-protected messages.
+        """
+        from amplifier_module_context_managed import ManagedContextManager
+
+        # max_tokens=1000, emergency_target_usage=0.10 → target_tokens=100
+        # Messages are ~173 tokens total, which exceeds 100 → removal triggered
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_target_usage=0.10,
+        )
+        # 3 removable messages (no system/hook messages = all removable)
+        mgr._messages = [
+            {"role": "user", "content": "A" * 200},
+            {"role": "assistant", "content": "B" * 200},
+            {"role": "user", "content": "C" * 200},
+        ]
+        initial_estimate = mgr._estimate_tokens(mgr._messages)
+        mgr._running_token_estimate = initial_estimate
+        mgr._summarization_failures = 1
+
+        # Verify the test precondition: initial estimate > target
+        target_tokens = int(1000 * 0.10)
+        assert initial_estimate > target_tokens, (
+            f"Test precondition failed: initial_estimate={initial_estimate} "
+            f"must exceed target_tokens={target_tokens}"
+        )
+
+        await mgr._emergency_mechanical_fallback()
+
+        assert mgr._running_token_estimate < initial_estimate
+
+    @pytest.mark.asyncio
+    async def test_fallback_does_not_fire_below_failure_threshold(self):
+        """_check_summarization_trigger() does NOT call _emergency_mechanical_fallback()
+        when _summarization_failures < summarization_retries_before_fallback.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            summarize_trigger=0.80,
+            emergency_fallback=0.92,
+            summarization_retries_before_fallback=3,
+        )
+        # Only 2 failures — below the threshold of 3
+        mgr._summarization_failures = 2
+        # Usage fraction = 950 / 1000 = 0.95 >= 0.92 (emergency_fallback) -- high usage
+        mgr._running_token_estimate = 950
+
+        with patch.object(
+            mgr, "_emergency_mechanical_fallback", new_callable=AsyncMock
+        ) as mock_fallback:
+            await mgr._check_summarization_trigger()
+
+        mock_fallback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fallback_preserves_hook_messages(self):
+        """_emergency_mechanical_fallback() does not remove messages with metadata.source=='hook'."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_target_usage=0.10,  # Very low target — force aggressive removal
+        )
+        hook_msg = {
+            "role": "user",
+            "content": "Hook-injected content",
+            "metadata": {"source": "hook"},
+        }
+        system_msg = {"role": "system", "content": "System prompt"}
+        removable_msg = {"role": "user", "content": "Regular user message"}
+
+        mgr._messages = [system_msg, hook_msg, removable_msg]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+        mgr._summarization_failures = 1
+
+        await mgr._emergency_mechanical_fallback()
+
+        # Hook message and system message must still be present
+        remaining_contents = [m["content"] for m in mgr._messages]
+        assert "Hook-injected content" in remaining_contents
+        assert "System prompt" in remaining_contents
+        # Removable message may or may not be present depending on whether we hit target
+        # But hook and system messages must NEVER be removed
+
+    @pytest.mark.asyncio
+    async def test_fallback_truncates_large_tool_results_first(self):
+        """_emergency_mechanical_fallback() truncates tool messages with string content > 1000 chars
+        to first 500 chars + '\\n\\n[truncated by emergency compaction]' before removing messages.
+        """
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_target_usage=0.90,  # High target — only truncation needed
+        )
+        large_content = "X" * 2000  # Well over 1000 chars
+        tool_msg = {
+            "role": "tool",
+            "content": large_content,
+            "tool_call_id": "call_abc",
+        }
+        mgr._messages = [tool_msg]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+        mgr._summarization_failures = 1
+
+        await mgr._emergency_mechanical_fallback()
+
+        # The tool message content should be truncated
+        updated_content = mgr._messages[0]["content"]
+        assert updated_content == "X" * 500 + "\n\n[truncated by emergency compaction]"

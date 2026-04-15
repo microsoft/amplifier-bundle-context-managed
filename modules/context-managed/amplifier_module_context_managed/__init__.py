@@ -943,15 +943,100 @@ class ManagedContextManager:
 
         Skips if _is_summarizing is True.  Calculates budget via
         _calculate_budget(None, _cached_provider) and computes
-        usage_fraction = _running_token_estimate / budget.  Calls
-        _trigger_summarization() if usage_fraction >= summarize_trigger.
+        usage_fraction = _running_token_estimate / budget.
+
+        Emergency check BEFORE normal trigger: if _summarization_failures >=
+        summarization_retries_before_fallback AND usage_fraction >=
+        emergency_fallback, calls _emergency_mechanical_fallback() and returns.
+
+        Otherwise calls _trigger_summarization() if usage_fraction >=
+        summarize_trigger.
         """
         if self._is_summarizing:
             return
         budget = self._calculate_budget(None, self._cached_provider)
         usage_fraction = self._running_token_estimate / budget
+
+        # Emergency check BEFORE normal trigger
+        if (
+            self._summarization_failures >= self.summarization_retries_before_fallback
+            and usage_fraction >= self.emergency_fallback
+        ):
+            await self._emergency_mechanical_fallback()
+            return
+
         if usage_fraction >= self.summarize_trigger:
             await self._trigger_summarization()
+
+    async def _emergency_mechanical_fallback(self) -> None:
+        """Emergency mechanical compaction when LLM summarization keeps failing.
+
+        Calculates target_tokens = budget * emergency_target_usage.
+        Emits 'context:compaction' event with reason, failures, target_usage,
+        current_tokens, and target_tokens.
+
+        Step 1: Truncate large tool results — for each tool message whose string
+        content exceeds 1000 chars, truncate to first 500 chars +
+        '\\n\\n[truncated by emergency compaction]' and update
+        _running_token_estimate.
+
+        Step 2: Remove oldest non-protected messages — while
+        _running_token_estimate > target_tokens, find the first removable
+        message (not a system message, not a hook-sourced message), pop it and
+        subtract its token estimate.  Break if only protected messages remain.
+        """
+        budget = self._calculate_budget(None, self._cached_provider)
+        target_tokens = int(budget * self.emergency_target_usage)
+
+        await self._emit_event(
+            "context:compaction",
+            {
+                "reason": "emergency_mechanical_fallback",
+                "failures": self._summarization_failures,
+                "target_usage": self.emergency_target_usage,
+                "current_tokens": self._running_token_estimate,
+                "target_tokens": target_tokens,
+            },
+        )
+
+        # Step 1: Truncate large tool results
+        for i, msg in enumerate(self._messages):
+            if msg.get("role") != "tool":
+                continue
+            content = msg.get("content", "")
+            if not isinstance(content, str) or len(content) <= 1000:
+                continue
+            old_tokens = self._estimate_tokens_single(msg)
+            truncated = content[:500] + "\n\n[truncated by emergency compaction]"
+            self._messages[i] = {**msg, "content": truncated}
+            new_tokens = self._estimate_tokens_single(self._messages[i])
+            self._running_token_estimate -= old_tokens - new_tokens
+
+        # Step 2: Remove oldest non-protected messages
+        while self._running_token_estimate > target_tokens:
+            removable_idx = None
+            for i, msg in enumerate(self._messages):
+                if not self._is_protected_message(msg):
+                    removable_idx = i
+                    break
+            if removable_idx is None:
+                break  # Only protected messages remain
+            removed = self._messages.pop(removable_idx)
+            self._running_token_estimate -= self._estimate_tokens_single(removed)
+
+    def _is_protected_message(self, msg: dict[str, Any]) -> bool:
+        """Return True if a message should not be removed during emergency compaction.
+
+        Protected messages:
+        - System messages (any system message, with or without hook source)
+        - Any message with metadata.source == 'hook'
+        """
+        meta = msg.get("metadata") or {}
+        if msg.get("role") == "system":
+            return True
+        if meta.get("source") == "hook":
+            return True
+        return False
 
     async def _merge_oldest_tiers(self) -> None:
         """Merge the two oldest summary tiers into one when tier count exceeds limit.
