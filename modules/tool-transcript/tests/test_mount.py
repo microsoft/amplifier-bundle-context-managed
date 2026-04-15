@@ -31,11 +31,11 @@ class TestMount:
         coordinator.mount.assert_called_once()
         call_args = coordinator.mount.call_args
         # First positional arg is "tools"
-        assert call_args[0][0] == "tools"
+        assert call_args.args[0] == "tools"
         # Second positional arg is a ReadTranscriptTool instance
-        assert isinstance(call_args[0][1], ReadTranscriptTool)
+        assert isinstance(call_args.args[1], ReadTranscriptTool)
         # Keyword arg name is "read_transcript"
-        assert call_args[1]["name"] == "read_transcript"
+        assert call_args.kwargs["name"] == "read_transcript"
 
     @pytest.mark.asyncio
     async def test_mount_passes_rate_limit_config(self):
@@ -46,7 +46,7 @@ class TestMount:
 
         # Retrieve the tool instance from the call
         call_args = coordinator.mount.call_args
-        tool = call_args[0][1]
+        tool = call_args.args[1]
         assert tool._rate_limit_per_turn == 5
 
     @pytest.mark.asyncio
@@ -58,7 +58,7 @@ class TestMount:
 
         # Retrieve the tool instance from the call
         call_args = coordinator.mount.call_args
-        tool = call_args[0][1]
+        tool = call_args.args[1]
         assert tool._rate_limit_per_turn == 3
 
     @pytest.mark.asyncio
