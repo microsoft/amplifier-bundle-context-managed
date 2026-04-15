@@ -6,6 +6,7 @@ and basic round-trip operations work correctly.
 """
 
 import pytest
+from datetime import datetime, UTC
 
 
 class TestProtocolMethodsExist:
@@ -107,3 +108,66 @@ class TestProtocolBehavior:
         roles = [m["role"] for m in result]
         assert "user" in roles
         assert "assistant" in roles
+
+
+class TestTimestampBehavior:
+    """Verify timestamp injection and mutation behavior in add_message."""
+
+    @pytest.mark.asyncio
+    async def test_timestamp_injected_automatically(self, context_no_disk):
+        """add_message without metadata injects metadata.timestamp as valid ISO datetime."""
+        message = {"role": "user", "content": "hello"}
+        await context_no_disk.add_message(message)
+
+        messages = await context_no_disk.get_messages()
+        assert len(messages) == 1
+        stored = messages[0]
+        assert "metadata" in stored
+        assert "timestamp" in stored["metadata"]
+        # Verify it's a valid ISO datetime string close to the current time
+        ts = stored["metadata"]["timestamp"]
+        parsed = datetime.fromisoformat(ts)  # Raises ValueError if not valid ISO
+        age_seconds = abs((datetime.now(UTC) - parsed).total_seconds())
+        assert age_seconds < 5  # Timestamp should be very recent
+
+    @pytest.mark.asyncio
+    async def test_timestamp_preserved_when_present(self, context_no_disk):
+        """add_message with existing timestamp preserves it unchanged."""
+        existing_ts = "2026-01-15T10:00:00.123+00:00"
+        message = {
+            "role": "user",
+            "content": "hello",
+            "metadata": {"timestamp": existing_ts},
+        }
+        await context_no_disk.add_message(message)
+
+        messages = await context_no_disk.get_messages()
+        assert len(messages) == 1
+        stored = messages[0]
+        assert stored["metadata"]["timestamp"] == existing_ts
+
+    @pytest.mark.asyncio
+    async def test_existing_metadata_preserved(self, context_no_disk):
+        """add_message preserves existing metadata fields and adds timestamp."""
+        message = {
+            "role": "system",
+            "content": "You are a helpful assistant.",
+            "metadata": {"source": "hook", "custom": "value"},
+        }
+        await context_no_disk.add_message(message)
+
+        messages = await context_no_disk.get_messages()
+        assert len(messages) == 1
+        stored = messages[0]
+        assert stored["metadata"]["source"] == "hook"
+        assert stored["metadata"]["custom"] == "value"
+        assert "timestamp" in stored["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_add_message_does_not_mutate_caller_dict(self, context_no_disk):
+        """add_message does not mutate the caller's original dict."""
+        original = {"role": "user", "content": "hello"}
+        await context_no_disk.add_message(original)
+
+        # Original dict must not have 'metadata' key added
+        assert "metadata" not in original
