@@ -1153,3 +1153,113 @@ class TestTierMerging:
         assert len(mgr._summary_tiers) == 2
         assert mgr._summary_tiers[0] is tier_a
         assert mgr._summary_tiers[1] is tier_b
+
+
+class TestSummarizationEvents:
+    """Tests for event emission in _run_summarization() (task-9)."""
+
+    @pytest.mark.asyncio
+    async def test_pre_summarize_event_emitted(self):
+        """_run_summarization() emits 'context:pre_summarize' with {boundary, message_count} before calling _perform_summarization."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        mgr._messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+        ]
+
+        mock_hooks = MagicMock()
+        mock_hooks.emit = AsyncMock()
+        mgr._hooks = mock_hooks
+
+        # Make _perform_summarization raise to keep test simple
+        with patch.object(mgr, "_perform_summarization", side_effect=Exception("fail")):
+            await mgr._run_summarization((0, 2))
+
+        # Verify pre_summarize was emitted
+        emitted_events = [call.args[0] for call in mock_hooks.emit.call_args_list]
+        assert "context:pre_summarize" in emitted_events
+
+        # Verify the data payload for pre_summarize
+        pre_call = next(
+            call
+            for call in mock_hooks.emit.call_args_list
+            if call.args[0] == "context:pre_summarize"
+        )
+        data = pre_call.args[1]
+        assert data["boundary"] == (0, 2)
+        assert data["message_count"] == 2  # boundary[1] - boundary[0]
+
+    @pytest.mark.asyncio
+    async def test_post_summarize_event_emitted_with_stats(self):
+        """_run_summarization() emits 'context:post_summarize' with stats after successful summarization."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryResult,
+        )
+
+        mgr = ManagedContextManager()
+        mgr._messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+        ]
+
+        mock_hooks = MagicMock()
+        mock_hooks.emit = AsyncMock()
+        mgr._hooks = mock_hooks
+
+        mock_result = SummaryResult(
+            summary_text="This is a summary.",
+            turn_range=(1, 3),
+            source_message_range=(0, 2),
+            compression_passes=2,
+        )
+
+        with patch.object(mgr, "_perform_summarization", return_value=mock_result):
+            await mgr._run_summarization((0, 2))
+
+        # Verify post_summarize was emitted
+        emitted_events = [call.args[0] for call in mock_hooks.emit.call_args_list]
+        assert "context:post_summarize" in emitted_events
+
+        # Verify the data payload for post_summarize
+        post_call = next(
+            call
+            for call in mock_hooks.emit.call_args_list
+            if call.args[0] == "context:post_summarize"
+        )
+        data = post_call.args[1]
+        assert data["turn_range"] == [1, 3]  # turn_range as list
+        assert data["summary_length"] == len("This is a summary.")
+        assert data["compression_passes"] == 2
+
+    @pytest.mark.asyncio
+    async def test_no_post_event_on_failure(self):
+        """_run_summarization() does NOT emit 'context:post_summarize' when _perform_summarization raises."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        mgr._messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+        ]
+
+        mock_hooks = MagicMock()
+        mock_hooks.emit = AsyncMock()
+        mgr._hooks = mock_hooks
+
+        with patch.object(mgr, "_perform_summarization", side_effect=Exception("fail")):
+            await mgr._run_summarization((0, 2))
+
+        # Verify post_summarize was NOT emitted
+        emitted_events = [call.args[0] for call in mock_hooks.emit.call_args_list]
+        assert "context:post_summarize" not in emitted_events
+        # Failure counter should still be incremented
+        assert mgr._summarization_failures == 1

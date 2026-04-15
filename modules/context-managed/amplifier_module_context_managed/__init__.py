@@ -907,14 +907,30 @@ class ManagedContextManager:
     async def _run_summarization(self, boundary: tuple[int, int]) -> None:
         """Wrapper that runs summarization and handles errors.
 
-        Calls _perform_summarization(boundary) and stores result in
-        _pending_summary.  On exception: increments _summarization_failures
-        and logs a warning.  In the finally block: resets _is_summarizing=False
-        and _summarization_task=None.
+        Emits 'context:pre_summarize' before calling _perform_summarization.
+        On success, stores result in _pending_summary and emits
+        'context:post_summarize' with stats.  On exception: increments
+        _summarization_failures and logs a warning (no post_summarize emitted).
+        In the finally block: resets _is_summarizing=False and
+        _summarization_task=None.
         """
+        start, end = boundary
+        message_count = end - start
+        await self._emit_event(
+            "context:pre_summarize",
+            {"boundary": boundary, "message_count": message_count},
+        )
         try:
             result = await self._perform_summarization(boundary)
             self._pending_summary = result
+            await self._emit_event(
+                "context:post_summarize",
+                {
+                    "turn_range": list(result.turn_range),
+                    "summary_length": len(result.summary_text),
+                    "compression_passes": result.compression_passes,
+                },
+            )
         except Exception as e:
             self._summarization_failures += 1
             logger.warning(f"Summarization failed: {e}")
