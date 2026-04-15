@@ -359,6 +359,13 @@ class ManagedContextManager:
                 self._summarized_through_turn = pending.turn_range[1]
                 self._summarization_failures = 0
 
+                # Phase 2: merge oldest tiers if count exceeds limit
+                if len(self._summary_tiers) > self.max_summary_tiers:
+                    try:
+                        await self._merge_oldest_tiers()
+                    except Exception as e:
+                        logger.warning(f"Tier merge failed: {e}")
+
                 # Rebuild conversation_messages after swap
                 if self._system_prompt_factory:
                     conversation_messages = [
@@ -929,6 +936,81 @@ class ManagedContextManager:
         usage_fraction = self._running_token_estimate / budget
         if usage_fraction >= self.summarize_trigger:
             await self._trigger_summarization()
+
+    async def _merge_oldest_tiers(self) -> None:
+        """Merge the two oldest summary tiers into one when tier count exceeds limit.
+
+        Returns early if len(_summary_tiers) <= max_summary_tiers.
+
+        Takes tier_a=_summary_tiers[0] and tier_b=_summary_tiers[1], builds
+        a merge prompt requesting cohesion of two summaries with their turn
+        ranges and a read_transcript advisory note, then calls the cached
+        provider to produce a merged summary.
+
+        The merged SummaryTier has:
+          - turn_range: (tier_a.turn_range[0], tier_b.turn_range[1])
+          - source_message_range: (tier_a.source_message_range[0], tier_b.source_message_range[1])
+          - compression_passes: max(tier_a.compression_passes, tier_b.compression_passes) + 1
+          - token_estimate: estimated from merged content
+
+        Replaces first two tiers: self._summary_tiers = [merged_tier] + self._summary_tiers[2:]
+        """
+        if len(self._summary_tiers) <= self.max_summary_tiers:
+            return
+
+        from amplifier_core import ChatRequest, Message
+
+        tier_a = self._summary_tiers[0]
+        tier_b = self._summary_tiers[1]
+
+        merge_prompt = (
+            f"Merge the following two summaries into a single cohesive summary. "
+            f"The first summary covers turns {tier_a.turn_range[0]}-{tier_a.turn_range[1]} "
+            f"and the second covers turns {tier_b.turn_range[0]}-{tier_b.turn_range[1]}. "
+            f"Produce a unified summary that preserves all important information from both.\n\n"
+            f"Note: Use the read_transcript tool to retrieve verbatim content from a specific "
+            f"turn range when exact wording, full error output, or code details are needed.\n\n"
+            f"SUMMARY 1 (turns {tier_a.turn_range[0]}-{tier_a.turn_range[1]}):\n"
+            f"{tier_a.content}\n\n"
+            f"SUMMARY 2 (turns {tier_b.turn_range[0]}-{tier_b.turn_range[1]}):\n"
+            f"{tier_b.content}"
+        )
+
+        request = ChatRequest(
+            messages=[
+                Message(role="user", content=merge_prompt),
+            ],
+            model=self.summarization_model,
+        )
+
+        response = await self._cached_provider.complete(request)
+        merged_text = self._extract_text_from_response(response)
+
+        merged_turn_range = (tier_a.turn_range[0], tier_b.turn_range[1])
+        merged_source_range = (
+            tier_a.source_message_range[0],
+            tier_b.source_message_range[1],
+        )
+        merged_compression_passes = (
+            max(tier_a.compression_passes, tier_b.compression_passes) + 1
+        )
+        merged_token_estimate = self._estimate_tokens_single(
+            {"role": "system", "content": merged_text}
+        )
+
+        merged_tier = SummaryTier(
+            content=merged_text,
+            turn_range=merged_turn_range,
+            source_message_range=merged_source_range,
+            compression_passes=merged_compression_passes,
+            token_estimate=merged_token_estimate,
+        )
+
+        self._summary_tiers = [merged_tier] + self._summary_tiers[2:]
+        logger.debug(
+            f"Merged oldest two tiers: turns {merged_turn_range[0]}-{merged_turn_range[1]}, "
+            f"compression_passes={merged_compression_passes}"
+        )
 
     def _snap_to_tool_pair_boundary(self, end_idx: int) -> int:
         """Adjust end_idx to avoid splitting tool call/result pairs.

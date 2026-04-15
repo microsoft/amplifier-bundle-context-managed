@@ -952,3 +952,204 @@ class TestTiersInAssembly:
             if (m.get("metadata") or {}).get("type") == "context_managed_summary"
         ]
         assert len(tier_messages) == 0
+
+
+class TestTierMerging:
+    """Tests for _merge_oldest_tiers() (task-8)."""
+
+    @pytest.mark.asyncio
+    async def test_merge_oldest_two_tiers(self):
+        """_merge_oldest_tiers() replaces the first two tiers with a single merged tier."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryTier,
+        )
+
+        mgr = ManagedContextManager(max_summary_tiers=1)
+
+        tier_a = SummaryTier(
+            content="Summary A covering turns 1-3",
+            turn_range=(1, 3),
+            source_message_range=(0, 6),
+            compression_passes=1,
+            token_estimate=100,
+        )
+        tier_b = SummaryTier(
+            content="Summary B covering turns 4-6",
+            turn_range=(4, 6),
+            source_message_range=(6, 12),
+            compression_passes=1,
+            token_estimate=100,
+        )
+        tier_c = SummaryTier(
+            content="Summary C covering turns 7-9",
+            turn_range=(7, 9),
+            source_message_range=(12, 18),
+            compression_passes=1,
+            token_estimate=100,
+        )
+        mgr._summary_tiers = [tier_a, tier_b, tier_c]
+
+        mock_block = MagicMock()
+        mock_block.text = "Merged summary of A and B"
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+
+        mock_provider = MagicMock()
+        mock_provider.complete = AsyncMock(return_value=mock_response)
+        mgr._cached_provider = mock_provider
+
+        await mgr._merge_oldest_tiers()
+
+        # Should have 2 tiers: merged + tier_c
+        assert len(mgr._summary_tiers) == 2
+
+        # First tier is the merged one
+        merged = mgr._summary_tiers[0]
+        assert merged.content == "Merged summary of A and B"
+        # Combined turn_range: tier_a start to tier_b end
+        assert merged.turn_range == (1, 6)
+        # Combined source_message_range: tier_a start to tier_b end
+        assert merged.source_message_range == (0, 12)
+
+        # Third tier unchanged
+        assert mgr._summary_tiers[1] is tier_c
+
+    @pytest.mark.asyncio
+    async def test_merge_calls_provider(self):
+        """_merge_oldest_tiers() calls provider.complete() with a ChatRequest containing a single user message."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from amplifier_core import ChatRequest
+
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryTier,
+        )
+
+        mgr = ManagedContextManager(max_summary_tiers=1)
+
+        tier_a = SummaryTier(
+            content="Summary A",
+            turn_range=(1, 3),
+            source_message_range=(0, 6),
+            compression_passes=1,
+            token_estimate=100,
+        )
+        tier_b = SummaryTier(
+            content="Summary B",
+            turn_range=(4, 6),
+            source_message_range=(6, 12),
+            compression_passes=1,
+            token_estimate=100,
+        )
+        mgr._summary_tiers = [tier_a, tier_b]
+
+        mock_block = MagicMock()
+        mock_block.text = "Merged"
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+
+        mock_provider = MagicMock()
+        mock_provider.complete = AsyncMock(return_value=mock_response)
+        mgr._cached_provider = mock_provider
+
+        await mgr._merge_oldest_tiers()
+
+        # provider.complete should be called once
+        mock_provider.complete.assert_called_once()
+        # The argument should be a ChatRequest
+        call_args = mock_provider.complete.call_args
+        request = call_args[0][0]
+        assert isinstance(request, ChatRequest)
+        # Should have exactly one message (single user message)
+        assert len(request.messages) == 1
+        assert request.messages[0].role == "user"
+
+    @pytest.mark.asyncio
+    async def test_merge_increments_compression_passes(self):
+        """_merge_oldest_tiers() sets merged tier compression_passes = max(a, b) + 1."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryTier,
+        )
+
+        mgr = ManagedContextManager(max_summary_tiers=1)
+
+        # tier_a has 2 passes, tier_b has 3 passes -> max = 3, merged = 4
+        tier_a = SummaryTier(
+            content="Summary A",
+            turn_range=(1, 3),
+            source_message_range=(0, 6),
+            compression_passes=2,
+            token_estimate=100,
+        )
+        tier_b = SummaryTier(
+            content="Summary B",
+            turn_range=(4, 6),
+            source_message_range=(6, 12),
+            compression_passes=3,
+            token_estimate=100,
+        )
+        mgr._summary_tiers = [tier_a, tier_b]
+
+        mock_block = MagicMock()
+        mock_block.text = "Merged"
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+
+        mock_provider = MagicMock()
+        mock_provider.complete = AsyncMock(return_value=mock_response)
+        mgr._cached_provider = mock_provider
+
+        await mgr._merge_oldest_tiers()
+
+        assert len(mgr._summary_tiers) == 1
+        merged = mgr._summary_tiers[0]
+        assert merged.compression_passes == 4  # max(2, 3) + 1
+
+    @pytest.mark.asyncio
+    async def test_no_merge_when_under_limit(self):
+        """_merge_oldest_tiers() returns early without calling provider when count <= max_summary_tiers."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryTier,
+        )
+
+        # max_summary_tiers=3, tiers=2 -> no merge needed (2 <= 3)
+        mgr = ManagedContextManager(max_summary_tiers=3)
+
+        tier_a = SummaryTier(
+            content="Summary A",
+            turn_range=(1, 3),
+            source_message_range=(0, 6),
+            compression_passes=1,
+            token_estimate=100,
+        )
+        tier_b = SummaryTier(
+            content="Summary B",
+            turn_range=(4, 6),
+            source_message_range=(6, 12),
+            compression_passes=1,
+            token_estimate=100,
+        )
+        mgr._summary_tiers = [tier_a, tier_b]
+
+        mock_provider = MagicMock()
+        mock_provider.complete = AsyncMock()
+        mgr._cached_provider = mock_provider
+
+        await mgr._merge_oldest_tiers()
+
+        # Provider should NOT be called - returned early
+        mock_provider.complete.assert_not_called()
+        # Tiers should be unchanged
+        assert len(mgr._summary_tiers) == 2
+        assert mgr._summary_tiers[0] is tier_a
+        assert mgr._summary_tiers[1] is tier_b
