@@ -4,6 +4,16 @@ bundle:
   version: 0.1.0
   description: LLM-powered rolling context summarization with persistent transcript and budget-aware tracking
 
+modules:
+  - name: context-managed
+    path: modules/context-managed
+    type: context
+  - name: tool-transcript
+    path: modules/tool-transcript
+    type: tool
+    config:
+      rate_limit_per_turn: 3
+
 includes: []
 ---
 
@@ -15,7 +25,7 @@ This bundle provides intelligent context management for Amplifier, replacing mec
 
 ### Context Manager Module
 
-The core module implementing the `ContextManager` protocol. Manages message lifecycle: accepting messages, persisting to disk, maintaining rolling summary tiers, tracking budget, and assembling optimized message lists.
+The core module implementing the `ContextManager` protocol. Must be mounted before the transcript tool so it can register `context_transcript_path` in the session environment. Manages message lifecycle: accepting messages, persisting to disk, maintaining rolling summary tiers, tracking budget, and assembling optimized message lists.
 
 ### Transcript Tool
 
