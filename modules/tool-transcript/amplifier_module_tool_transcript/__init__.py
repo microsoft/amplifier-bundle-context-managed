@@ -9,7 +9,9 @@ Implementation is Phase 3. This is a skeleton for bundle composition.
 
 __amplifier_module_type__ = "tool"
 
+import json
 import logging
+import os
 from typing import Any
 
 from amplifier_core import ToolResult
@@ -98,9 +100,6 @@ class ReadTranscriptTool:
             an empty list when the file does not exist or contains no
             conversation messages.
         """
-        import json
-        import os
-
         if not os.path.exists(transcript_path):
             return []
 
