@@ -31,9 +31,14 @@ allow-direct-references = true
 
 [tool.uv.sources]
 amplifier-core = { git = "https://github.com/microsoft/amplifier-core", branch = "main" }
+amplifier-module-context-managed = { path = "../context-managed", editable = true }
 
 [dependency-groups]
-dev = ["amplifier-core", "pytest>=8.0.0", "pytest-asyncio>=0.23.0"]
+dev = ["amplifier-core", "amplifier-module-context-managed", "pytest>=8.0.0", "pytest-asyncio>=0.23.0"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
