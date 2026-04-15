@@ -6,7 +6,7 @@ token estimation heuristic used throughout the module.
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -132,3 +132,104 @@ class TestTokenEstimation:
         )
         after_second = ctx._running_token_estimate
         assert after_second > after_first
+
+
+class TestBudgetPressure:
+    """Verify budget pressure event emission at the pressure_warning threshold."""
+
+    @pytest.mark.asyncio
+    async def test_pressure_event_at_threshold(self):
+        """Event emitted with correct data when usage crosses 70% threshold."""
+        hooks = MagicMock()
+        hooks.emit = AsyncMock()
+        ctx = ManagedContextManager(max_tokens=100, pressure_warning=0.70, hooks=hooks)
+
+        # Add 20 messages with padding — easily accumulates enough tokens to
+        # cross 70 tokens on a 100-token budget (each message ~25 tokens after
+        # timestamp injection).
+        for i in range(20):
+            await ctx.add_message({"role": "user", "content": f"msg{i}" + "x" * 10})
+
+        await ctx.get_messages_for_request()
+
+        pressure_calls = [
+            c
+            for c in hooks.emit.call_args_list
+            if c.args[0] == "context:budget_pressure"
+        ]
+        assert len(pressure_calls) == 1
+        event_data = pressure_calls[0].args[1]
+        assert event_data["usage_fraction"] >= 0.70
+        assert "token_count" in event_data
+        assert "budget" in event_data
+
+    @pytest.mark.asyncio
+    async def test_pressure_event_not_emitted_below_threshold(self):
+        """No budget_pressure event when usage is well below the threshold."""
+        hooks = MagicMock()
+        hooks.emit = AsyncMock()
+        ctx = ManagedContextManager(
+            max_tokens=200000, pressure_warning=0.70, hooks=hooks
+        )
+
+        # One small message — negligible fraction of 200 000-token budget
+        await ctx.add_message({"role": "user", "content": "hello"})
+
+        await ctx.get_messages_for_request()
+
+        pressure_calls = [
+            c
+            for c in hooks.emit.call_args_list
+            if c.args[0] == "context:budget_pressure"
+        ]
+        assert len(pressure_calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_pressure_event_emitted_only_once(self):
+        """Budget pressure event is emitted exactly once even after multiple requests."""
+        hooks = MagicMock()
+        hooks.emit = AsyncMock()
+        ctx = ManagedContextManager(max_tokens=100, pressure_warning=0.70, hooks=hooks)
+
+        # Cross the threshold
+        for i in range(20):
+            await ctx.add_message({"role": "user", "content": f"msg{i}" + "x" * 10})
+
+        # Multiple requests while still above threshold
+        await ctx.get_messages_for_request()
+        await ctx.get_messages_for_request()
+        await ctx.get_messages_for_request()
+
+        pressure_calls = [
+            c
+            for c in hooks.emit.call_args_list
+            if c.args[0] == "context:budget_pressure"
+        ]
+        assert len(pressure_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_pressure_reset_after_clear(self):
+        """Pressure flag resets after clear(), allowing a second emission on re-crossing."""
+        hooks = MagicMock()
+        hooks.emit = AsyncMock()
+        ctx = ManagedContextManager(max_tokens=100, pressure_warning=0.70, hooks=hooks)
+
+        # First crossing
+        for i in range(20):
+            await ctx.add_message({"role": "user", "content": f"msg{i}" + "x" * 10})
+        await ctx.get_messages_for_request()
+
+        # clear() archives transcript and resets _pressure_emitted
+        await ctx.clear()
+
+        # Second crossing after clear
+        for i in range(20):
+            await ctx.add_message({"role": "user", "content": f"msg{i}" + "x" * 10})
+        await ctx.get_messages_for_request()
+
+        pressure_calls = [
+            c
+            for c in hooks.emit.call_args_list
+            if c.args[0] == "context:budget_pressure"
+        ]
+        assert len(pressure_calls) == 2
