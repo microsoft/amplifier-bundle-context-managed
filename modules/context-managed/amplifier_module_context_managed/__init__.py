@@ -52,6 +52,8 @@ async def mount(coordinator: Any, config: dict[str, Any] | None = None):
         verbatim_window_tokens=config.get("verbatim_window_tokens", 40_000),
         max_summary_tiers=config.get("max_summary_tiers", 3),
         summary_target_tokens=config.get("summary_target_tokens", 1_500),
+        summarization_model=config.get("summarization_model"),
+        summarization_prompt_path=config.get("summarization_prompt_path"),
         summarization_retries_before_fallback=config.get(
             "summarization_retries_before_fallback", 3
         ),
@@ -96,6 +98,8 @@ class ManagedContextManager:
         verbatim_window_tokens: int = 40_000,
         max_summary_tiers: int = 3,
         summary_target_tokens: int = 1_500,
+        summarization_model: str | None = None,
+        summarization_prompt_path: str | None = None,
         summarization_retries_before_fallback: int = 3,
         emergency_target_usage: float = 0.50,
         large_result_threshold: int = 50_000,
@@ -110,6 +114,8 @@ class ManagedContextManager:
         self.verbatim_window_tokens = verbatim_window_tokens
         self.max_summary_tiers = max_summary_tiers
         self.summary_target_tokens = summary_target_tokens
+        self.summarization_model = summarization_model
+        self.summarization_prompt_path = summarization_prompt_path
         self.summarization_retries_before_fallback = (
             summarization_retries_before_fallback
         )
