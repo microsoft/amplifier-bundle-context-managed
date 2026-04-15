@@ -59,6 +59,35 @@ class SummaryTier:
     token_estimate: int
 
 
+DEFAULT_SUMMARIZATION_PROMPT = """\
+Produce a compact summary of the conversation so far. Use the following sections:
+
+## User Requests & Decisions
+List the key requests made by the user and any important decisions reached.
+
+## Files Examined or Modified
+List files that were read, analyzed, or modified during the conversation.
+
+## Errors Encountered & Resolutions
+Describe any errors, failures, or unexpected behavior encountered, and how they were resolved.
+
+## Current Task State
+Describe the current state of work — what has been completed, what is in progress, and what remains.
+
+## Key Technical Details
+Note any important technical constraints, patterns, configurations, or implementation details
+discovered during the conversation.
+
+## Guidelines
+- Be factual and concise. Do not speculate beyond what the conversation contains.
+- Preserve numeric values, file paths, error messages, and command outputs exactly.
+- Each section may be omitted if there is nothing to report for it.
+
+Note: Use the read_transcript tool to retrieve verbatim content from a specific turn range
+when exact wording, full error output, or code details are needed.
+"""
+
+
 async def mount(coordinator: Any, config: dict[str, Any] | None = None):
     """
     Mount the context-managed context manager.
@@ -621,3 +650,23 @@ class ManagedContextManager:
                 await self._hooks.emit(event, data)
             except Exception as e:
                 logger.warning(f"Could not emit {event}: {e}")
+
+    # ── Summarization Helpers ─────────────────────────────────────────────────
+
+    def _get_summarization_prompt(self) -> str:
+        """Return the summarization prompt.
+
+        Returns the prompt read from file if summarization_prompt_path is
+        configured and the file exists. Falls back to DEFAULT_SUMMARIZATION_PROMPT
+        on OSError/FileNotFoundError, logging a warning.
+        """
+        if self.summarization_prompt_path:
+            try:
+                return Path(self.summarization_prompt_path).read_text()
+            except (OSError, FileNotFoundError) as e:
+                logger.warning(
+                    f"Could not read summarization prompt from "
+                    f"{self.summarization_prompt_path}: {e}. "
+                    "Falling back to DEFAULT_SUMMARIZATION_PROMPT."
+                )
+        return DEFAULT_SUMMARIZATION_PROMPT
