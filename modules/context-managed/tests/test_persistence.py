@@ -6,6 +6,7 @@ reading, header/summary exclusion, no-disk mode, and malformed line handling.
 """
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -285,3 +286,111 @@ class TestLargeToolResultHandling:
         messages = await context.get_messages()
         assert messages[0]["content"] == large_content
         assert len(messages[0]["content"]) == 200
+
+
+class TestClearAndArchive:
+    """Tests for clear() method: archiving transcript, resetting state, no-disk mode."""
+
+    @pytest.mark.asyncio
+    async def test_clear_archives_transcript(
+        self, context: ManagedContextManager, tmp_session_dir: Path
+    ):
+        """Add message, verify transcript exists, clear, verify original transcript
+        gone, verify transcript.*.archived.jsonl exists."""
+        await context.add_message({"role": "user", "content": "hello"})
+
+        transcript_path = tmp_session_dir / "transcript.jsonl"
+        assert transcript_path.exists()
+
+        await context.clear()
+
+        # Verify archive file exists
+        archived_files = list(tmp_session_dir.glob("transcript.*.archived.jsonl"))
+        assert len(archived_files) == 1
+
+        # Verify the archive name contains a valid timestamp (YYYYMMDDTHHMMSS)
+        archive_name = archived_files[0].name
+        timestamp_str = archive_name.split(".")[1]
+        parsed = time.strptime(timestamp_str, "%Y%m%dT%H%M%S")
+        assert parsed is not None
+
+    @pytest.mark.asyncio
+    async def test_clear_creates_fresh_transcript(
+        self, context: ManagedContextManager, tmp_session_dir: Path
+    ):
+        """Add message, clear, verify new transcript.jsonl exists with just 1 line
+        being the header."""
+        await context.add_message({"role": "user", "content": "hello"})
+
+        await context.clear()
+
+        transcript_path = tmp_session_dir / "transcript.jsonl"
+        assert transcript_path.exists()
+
+        with open(transcript_path) as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        assert len(lines) == 1
+        header = json.loads(lines[0])
+        assert header["type"] == "transcript_header"
+
+    @pytest.mark.asyncio
+    async def test_clear_resets_in_memory_state(
+        self, context: ManagedContextManager, tmp_session_dir: Path
+    ):
+        """Add 2 messages, clear, verify get_messages returns empty,
+        _running_token_estimate==0, _message_index==0, _loaded_from_transcript==False,
+        _pressure_emitted==False."""
+        await context.add_message({"role": "user", "content": "first"})
+        await context.add_message({"role": "assistant", "content": "second"})
+
+        await context.clear()
+
+        messages = await context.get_messages()
+        assert messages == []
+        assert context._running_token_estimate == 0
+        assert context._message_index == 0
+        assert context._loaded_from_transcript is False
+        assert context._pressure_emitted is False
+
+    @pytest.mark.asyncio
+    async def test_clear_archives_tool_results(self, tmp_session_dir: Path):
+        """Create ManagedContextManager with large_result_threshold=10, add tool message
+        with 100-char content, verify tool_results exists, clear, verify tool_results
+        gone, verify tool_results.*.archived exists."""
+        context = ManagedContextManager(
+            session_dir=tmp_session_dir, large_result_threshold=10
+        )
+        large_content = "x" * 100
+        await context.add_message(
+            {
+                "role": "tool",
+                "content": large_content,
+                "tool_call_id": "call_test",
+            }
+        )
+
+        tool_results_dir = tmp_session_dir / "tool_results"
+        assert tool_results_dir.exists()
+
+        await context.clear()
+
+        # tool_results/ should be gone (renamed to archive)
+        assert not tool_results_dir.exists()
+
+        # tool_results.*.archived should exist
+        archived_dirs = list(tmp_session_dir.glob("tool_results.*.archived"))
+        assert len(archived_dirs) == 1
+
+    @pytest.mark.asyncio
+    async def test_clear_when_no_transcript(
+        self, context_no_disk: ManagedContextManager
+    ):
+        """context_no_disk, add message, clear doesn't raise, get_messages returns empty."""
+        await context_no_disk.add_message({"role": "user", "content": "hello"})
+
+        # Should not raise
+        await context_no_disk.clear()
+
+        messages = await context_no_disk.get_messages()
+        assert messages == []
