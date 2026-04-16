@@ -478,6 +478,21 @@ class ManagedContextManager:
                     },
                 )
 
+        # Hard budget enforcement — never return more tokens than the budget allows.
+        # The async LLM summarization is the preferred path (produces proper summaries),
+        # but this is the last gate before the provider call.  It operates on the
+        # assembled view so self._messages and self._running_token_estimate are left
+        # untouched; the async summary continues and will swap in on the next turn.
+        total_tokens = self._estimate_tokens(assembled)
+        if total_tokens > budget:
+            logger.warning(
+                "Assembled messages (%s tokens) exceed budget (%s). "
+                "Applying inline compaction.",
+                f"{total_tokens:,}",
+                f"{budget:,}",
+            )
+            assembled = await self._inline_compact(assembled, budget)
+
         return assembled
 
     async def get_messages(self) -> list[dict[str, Any]]:
@@ -1217,6 +1232,126 @@ class ManagedContextManager:
         if meta.get("source") == "hook":
             return True
         return False
+
+    async def _inline_compact(
+        self, messages: list[dict[str, Any]], budget: int
+    ) -> list[dict[str, Any]]:
+        """Compact an assembled message list to fit within the budget.
+
+        This is a per-request safety net that operates on a copy of the
+        assembled view.  It does **not** modify ``self._messages`` or
+        ``self._running_token_estimate`` (the persistent state).  The async
+        LLM summarization continues running and will produce a proper summary
+        for the next turn; this ensures the *current* request never sees more
+        tokens than the budget allows.
+
+        Step 1 — Truncate large tool results: for each tool message whose
+        string content exceeds 1 000 chars, truncate to the first 500 chars
+        plus ``"\\n\\n[truncated by inline compaction]"``.  The last five tool
+        results in the list are protected and not truncated.
+
+        Step 2 — Remove oldest non-protected messages: while the estimated
+        token count of ``compacted`` exceeds ``target_tokens``, scan forward
+        and remove the first removable block.  Protected = system messages,
+        ``metadata.source == "hook"`` messages, or the last user message
+        (current intent).  An assistant message that carries ``tool_calls`` is
+        removed atomically together with all immediately following ``tool``
+        messages so we never leave orphaned tool results.
+
+        Emits a ``context:compaction`` event with
+        ``reason="inline_budget_enforcement"``.
+
+        Args:
+            messages: The assembled message list (will be shallow-copied).
+            budget: The effective token budget for this request.
+
+        Returns:
+            A compacted copy of ``messages`` that fits within ``budget``.
+        """
+        target_tokens = int(budget * self.emergency_target_usage)
+        compacted: list[dict[str, Any]] = list(messages)
+        original_count = len(compacted)
+        original_tokens = self._estimate_tokens(compacted)
+
+        # ── Step 1: truncate large tool results (protect last 5) ──────────
+        tool_indices = [i for i, m in enumerate(compacted) if m.get("role") == "tool"]
+        protected_from_truncation: set[int] = set(tool_indices[-5:])
+
+        for idx in range(len(compacted)):
+            if idx in protected_from_truncation:
+                continue
+            msg = compacted[idx]
+            if msg.get("role") != "tool":
+                continue
+            content = msg.get("content", "")
+            if not isinstance(content, str) or len(content) <= 1000:
+                continue
+            truncated_content = content[:500] + "\n\n[truncated by inline compaction]"
+            compacted[idx] = {**msg, "content": truncated_content}
+
+        # ── Step 2: remove oldest non-protected messages ──────────────────
+        while self._estimate_tokens(compacted) > target_tokens:
+            # Recompute last user index each iteration as the list shrinks.
+            last_user_idx: int | None = next(
+                (
+                    i
+                    for i in range(len(compacted) - 1, -1, -1)
+                    if compacted[i].get("role") == "user"
+                ),
+                None,
+            )
+
+            removed = False
+            i = 0
+            while i < len(compacted):
+                msg = compacted[i]
+                if self._is_protected_message(msg) or i == last_user_idx:
+                    i += 1
+                    continue
+
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    # Remove this assistant message + all consecutive tool
+                    # results atomically to avoid orphaned tool results.
+                    block_end = i + 1
+                    while (
+                        block_end < len(compacted)
+                        and compacted[block_end].get("role") == "tool"
+                    ):
+                        block_end += 1
+                    del compacted[i:block_end]
+                else:
+                    # Single non-protected message (user, assistant without
+                    # tool_calls, or an orphaned tool result).
+                    del compacted[i]
+
+                removed = True
+                break
+
+            if not removed:
+                # Only protected messages remain; cannot compact further.
+                break
+
+        compacted_tokens = self._estimate_tokens(compacted)
+        await self._emit_event(
+            "context:compaction",
+            {
+                "reason": "inline_budget_enforcement",
+                "budget": budget,
+                "target_tokens": target_tokens,
+                "original_tokens": original_tokens,
+                "compacted_tokens": compacted_tokens,
+                "original_message_count": original_count,
+                "compacted_message_count": len(compacted),
+            },
+        )
+        logger.info(
+            "Inline compaction: %s → %s tokens (%d → %d messages)",
+            f"{original_tokens:,}",
+            f"{compacted_tokens:,}",
+            original_count,
+            len(compacted),
+        )
+        return compacted
 
     async def _merge_oldest_tiers(self) -> None:
         """Merge the two oldest summary tiers into one when tier count exceeds limit.
