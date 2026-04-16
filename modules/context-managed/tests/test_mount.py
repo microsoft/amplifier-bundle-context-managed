@@ -58,7 +58,11 @@ async def test_mount_registers_context(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_mount_registers_transcript_path(tmp_path, monkeypatch):
-    """mount() calls register_capability with 'context-managed.transcript_path' and path to transcript.jsonl."""
+    """mount() calls register_capability with 'context-managed.transcript_path' and path to transcript.jsonl.
+
+    mount() also always registers 'observability.events' for hooks-logging auto-discovery,
+    so register_capability is now called twice when a session_id is present.
+    """
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     coordinator = MagicMock()
@@ -74,9 +78,14 @@ async def test_mount_registers_transcript_path(tmp_path, monkeypatch):
 
     await module.mount(coordinator)
 
-    coordinator.register_capability.assert_called_once()
-    cap_name, cap_value = coordinator.register_capability.call_args[0]
-    assert cap_name == "context-managed.transcript_path"
+    # Two register_capability calls: observability.events + transcript_path
+    assert coordinator.register_capability.call_count == 2
+    calls_by_key = {
+        call[0][0]: call[0][1]
+        for call in coordinator.register_capability.call_args_list
+    }
+    assert "context-managed.transcript_path" in calls_by_key
+    cap_value = calls_by_key["context-managed.transcript_path"]
     assert "transcript.jsonl" in cap_value
     # Must be inside the context-managed/ subdirectory
     assert "context-managed" in cap_value
@@ -104,7 +113,13 @@ async def test_mount_passes_config():
 
 @pytest.mark.asyncio
 async def test_mount_no_session_dir():
-    """mount() with session_id=None succeeds and does not call register_capability."""
+    """mount() with session_id=None registers observability.events but not transcript_path.
+
+    The observability.events capability is always registered (hooks-logging needs it
+    regardless of whether there is a session directory).  The transcript path capability
+    is only registered when a real session directory can be computed (i.e. session_id
+    is present), so it must NOT appear when session_id is None.
+    """
     coordinator = MagicMock()
     coordinator.mount = AsyncMock()
     coordinator.hooks = MagicMock()
@@ -115,7 +130,83 @@ async def test_mount_no_session_dir():
     await module.mount(coordinator)
 
     coordinator.mount.assert_called_once()
-    coordinator.register_capability.assert_not_called()
+    # observability.events is always registered; transcript_path is not
+    call_names = [call[0][0] for call in coordinator.register_capability.call_args_list]
+    assert "observability.events" in call_names
+    assert "context-managed.transcript_path" not in call_names
+
+
+@pytest.mark.asyncio
+async def test_mount_registers_observability_events():
+    """mount() registers our four context:* events under 'observability.events' capability.
+
+    hooks-logging discovers module events by calling coordinator.get_capability(
+    'observability.events') during its own mount().  Without this registration our
+    custom events fire into the void because no handler is ever subscribed to them.
+    The registration must happen unconditionally (even with no session_id) so
+    hooks-logging sees the events regardless of storage availability.
+    """
+    coordinator = MagicMock()
+    coordinator.mount = AsyncMock()
+    coordinator.hooks = MagicMock()
+    coordinator.session_id = None  # No session — events registration must still happen
+    coordinator.get_capability = MagicMock(return_value=None)
+    coordinator.register_capability = MagicMock()
+
+    await module.mount(coordinator)
+
+    calls_by_key = {
+        call[0][0]: call[0][1]
+        for call in coordinator.register_capability.call_args_list
+    }
+    assert "observability.events" in calls_by_key, (
+        "mount() must register 'observability.events' so hooks-logging can "
+        "subscribe to context:* events"
+    )
+    registered_events = calls_by_key["observability.events"]
+    for expected in [
+        "context:budget_pressure",
+        "context:pre_summarize",
+        "context:post_summarize",
+        "context:compaction",
+    ]:
+        assert expected in registered_events, (
+            f"Expected '{expected}' in registered observability.events, "
+            f"got: {registered_events}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_mount_merges_existing_observability_events():
+    """mount() merges our events with any existing 'observability.events' entries.
+
+    If another module already registered events before us, we must not
+    discard them — we append our events to the existing list.
+    """
+    existing = ["kernel:turn_start", "kernel:turn_end"]
+
+    coordinator = MagicMock()
+    coordinator.mount = AsyncMock()
+    coordinator.hooks = MagicMock()
+    coordinator.session_id = None
+    coordinator.get_capability = MagicMock(
+        side_effect=lambda name: existing if name == "observability.events" else None
+    )
+    coordinator.register_capability = MagicMock()
+
+    await module.mount(coordinator)
+
+    calls_by_key = {
+        call[0][0]: call[0][1]
+        for call in coordinator.register_capability.call_args_list
+    }
+    registered = calls_by_key["observability.events"]
+    # Existing events preserved
+    for ev in existing:
+        assert ev in registered, f"Existing event '{ev}' was dropped"
+    # Our events appended
+    for ev in ["context:budget_pressure", "context:pre_summarize"]:
+        assert ev in registered, f"Our event '{ev}' missing from merged list"
 
 
 @pytest.mark.asyncio

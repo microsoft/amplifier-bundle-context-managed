@@ -1391,6 +1391,139 @@ class TestEmergencyFallback:
         # But hook and system messages must NEVER be removed
 
     @pytest.mark.asyncio
+    async def test_emergency_fires_while_summarization_in_flight(self):
+        """_check_summarization_trigger() calls _emergency_mechanical_fallback() even when
+        _is_summarizing=True, if usage_fraction >= emergency_fallback.
+
+        This is the session-a7f688f8 overshoot regression: the async summarization
+        task ran (correctly triggered at 80%) but the context kept growing past 92%
+        while the LLM call was still in-flight.  The old code returned early at the
+        _is_summarizing guard, skipping the emergency check entirely.  With the fix,
+        both emergency checks are evaluated before the guard.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            summarize_trigger=0.80,
+            emergency_fallback=0.92,
+            summarization_retries_before_fallback=3,
+        )
+        # Simulate: summarization was triggered at 80% and is still running
+        mgr._is_summarizing = True
+        # But context kept growing — we're now well past the emergency threshold
+        # (usage_fraction = 950 / 1000 = 0.95 >= 0.92)
+        mgr._running_token_estimate = 950
+        # No failures yet — this tests the *in-flight overshoot* path, not the retry path
+        mgr._summarization_failures = 0
+
+        with patch.object(
+            mgr, "_emergency_mechanical_fallback", new_callable=AsyncMock
+        ) as mock_fallback:
+            await mgr._check_summarization_trigger()
+
+        mock_fallback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_in_flight_task_cancelled_on_emergency_preempt(self):
+        """When emergency fallback preempts an in-flight summarization, the task is cancelled
+        and _is_summarizing/_summarization_task are both reset.
+
+        Uses a MagicMock task to verify cancel() is called without needing the event loop
+        to fully process the cancellation (which requires an await after cancel()).
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_fallback=0.92,
+            summarization_retries_before_fallback=3,
+        )
+        mgr._is_summarizing = True
+        mgr._running_token_estimate = 950  # 95% — over emergency threshold
+
+        # Use a mock task so we can assert cancel() was called without needing
+        # the event loop to process the actual CancelledError
+        mock_task = MagicMock()
+        mock_task.done.return_value = False  # Task still running
+        mgr._summarization_task = mock_task
+
+        with patch.object(
+            mgr, "_emergency_mechanical_fallback", new_callable=AsyncMock
+        ):
+            await mgr._check_summarization_trigger()
+
+        # Task.cancel() must have been called
+        mock_task.cancel.assert_called_once()
+        # State reset so the context manager is no longer locked
+        assert mgr._is_summarizing is False
+        assert mgr._summarization_task is None
+
+    @pytest.mark.asyncio
+    async def test_is_summarizing_reset_after_emergency_preempt(self):
+        """After an in-flight emergency preempt, _is_summarizing is False so future
+        messages can trigger a fresh summarization cycle.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_fallback=0.92,
+            summarization_retries_before_fallback=3,
+        )
+        mgr._is_summarizing = True
+        mgr._running_token_estimate = 950  # 95% — over emergency threshold
+
+        with patch.object(
+            mgr, "_emergency_mechanical_fallback", new_callable=AsyncMock
+        ):
+            await mgr._check_summarization_trigger()
+
+        assert mgr._is_summarizing is False
+
+    @pytest.mark.asyncio
+    async def test_normal_is_summarizing_guard_still_blocks_duplicate_trigger(self):
+        """When _is_summarizing=True but usage is below the emergency threshold,
+        the normal guard still prevents a duplicate summarization trigger.
+
+        Verifies the guard was moved (not removed): it still applies for usage
+        levels between summarize_trigger and emergency_fallback.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            summarize_trigger=0.80,
+            emergency_fallback=0.92,
+            summarization_retries_before_fallback=3,
+        )
+        mgr._is_summarizing = True
+        # Usage at 85% — above summarize_trigger (80%) but BELOW emergency (92%)
+        mgr._running_token_estimate = 850
+
+        with (
+            patch.object(
+                mgr, "_trigger_summarization", new_callable=AsyncMock
+            ) as mock_trigger,
+            patch.object(
+                mgr, "_emergency_mechanical_fallback", new_callable=AsyncMock
+            ) as mock_fallback,
+        ):
+            await mgr._check_summarization_trigger()
+
+        # Neither trigger nor emergency fallback should fire
+        mock_trigger.assert_not_called()
+        mock_fallback.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_fallback_truncates_large_tool_results_first(self):
         """_emergency_mechanical_fallback() truncates tool messages with string content > 1000 chars
         to first 500 chars + '\\n\\n[truncated by emergency compaction]' before removing messages.

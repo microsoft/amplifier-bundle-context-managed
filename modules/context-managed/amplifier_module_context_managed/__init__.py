@@ -140,6 +140,27 @@ async def mount(coordinator: Any, config: dict[str, Any] | None = None):
         session_dir=session_dir,
     )
 
+    # Register custom events for auto-discovery by hooks-logging.
+    # hooks-logging checks "observability.events" during its own mount() and
+    # registers handlers for every event listed there.  Our module mounts
+    # before hooks (module order: context → providers → tools → hooks), so
+    # registering here ensures the events are visible when hooks-logging
+    # mounts.  Without this, our context:* events fire into the void because
+    # no handler is ever subscribed for them.
+    existing_events: list[str] = list(
+        coordinator.get_capability("observability.events") or []
+    )
+    our_events = [
+        "context:budget_pressure",
+        "context:pre_summarize",
+        "context:post_summarize",
+        "context:compaction",
+    ]
+    coordinator.register_capability(
+        "observability.events",
+        existing_events + our_events,
+    )
+
     # Register transcript path (namespaced key) for the transcript tool to discover
     transcript_path = context.transcript_path
     if transcript_path is not None:
@@ -1070,30 +1091,58 @@ class ManagedContextManager:
     async def _check_summarization_trigger(self) -> None:
         """Check if summarization should be triggered based on usage fraction.
 
-        Skips if _is_summarizing is True.  Calculates budget via
-        _calculate_budget(None, _cached_provider) and computes
-        usage_fraction = _running_token_estimate / budget.
+        Budget and usage fraction are always computed first.
 
-        Emergency check BEFORE normal trigger: if _summarization_failures >=
-        summarization_retries_before_fallback AND usage_fraction >=
-        emergency_fallback, calls _emergency_mechanical_fallback() and returns.
+        Emergency checks run **even when summarization is already in-flight**
+        to ensure the safety net fires regardless of async timing:
 
-        Otherwise calls _trigger_summarization() if usage_fraction >=
-        summarize_trigger.
+        1. Failure-based emergency: if _summarization_failures >=
+           summarization_retries_before_fallback AND usage_fraction >=
+           emergency_fallback → call _emergency_mechanical_fallback() and return.
+
+        2. In-flight overshoot emergency: if _is_summarizing is True AND
+           usage_fraction >= emergency_fallback → the async LLM call is too
+           slow to rescue us.  Cancel the in-flight task, reset _is_summarizing,
+           and call _emergency_mechanical_fallback() and return.
+
+        Otherwise: skip if _is_summarizing is True (prevent duplicate triggers).
+        Call _trigger_summarization() if usage_fraction >= summarize_trigger.
         """
-        if self._is_summarizing:
-            return
         budget = self._calculate_budget(None, self._cached_provider)
         if budget <= 0:
             return
         usage_fraction = self._running_token_estimate / budget
 
-        # Emergency check BEFORE normal trigger
+        # Emergency check 1: repeated LLM failures — do mechanical fallback
         if (
             self._summarization_failures >= self.summarization_retries_before_fallback
             and usage_fraction >= self.emergency_fallback
         ):
             await self._emergency_mechanical_fallback()
+            return
+
+        # Emergency check 2: summarization is in-flight but we've overshot the
+        # emergency threshold.  Cancel the slow LLM call and use the mechanical
+        # fallback as a safety net right now.
+        if self._is_summarizing and usage_fraction >= self.emergency_fallback:
+            logger.warning(
+                "Summarization in-flight but usage at %.1f%% "
+                "(emergency threshold %.0f%%). Running emergency mechanical fallback.",
+                usage_fraction * 100,
+                self.emergency_fallback * 100,
+            )
+            if (
+                self._summarization_task is not None
+                and not self._summarization_task.done()
+            ):
+                self._summarization_task.cancel()
+            self._is_summarizing = False
+            self._summarization_task = None
+            await self._emergency_mechanical_fallback()
+            return
+
+        # Normal trigger: block duplicates, fire when above summarize_trigger
+        if self._is_summarizing:
             return
 
         if usage_fraction >= self.summarize_trigger:
