@@ -134,7 +134,7 @@ async def mount(coordinator: Any, config: dict[str, Any] | None = None):
         emergency_target_usage=config.get("emergency_target_usage", 0.50),
         large_result_threshold=config.get("large_result_threshold", 50_000),
         pressure_warning=config.get("pressure_warning", 0.70),
-        summarize_trigger=config.get("summarize_trigger", 0.80),
+        summarize_trigger=config.get("summarize_trigger", 0.60),
         emergency_fallback=config.get("emergency_fallback", 0.92),
         hooks=getattr(coordinator, "hooks", None),
         session_dir=session_dir,
@@ -182,8 +182,19 @@ class ManagedContextManager:
 
     Implements the full ContextManager protocol. Every message is persisted
     to a JSONL transcript file. Budget is tracked continuously with three
-    thresholds: pressure_warning (0.70), summarize_trigger (0.80), and
+    thresholds: summarize_trigger (0.60), pressure_warning (0.70), and
     emergency_fallback (0.92).
+
+    Threshold cascade (in firing order):
+      summarize_trigger (0.60) — start async LLM summarization with ample
+          headroom for the ~50 s completion window during which the orchestrator
+          continues adding messages.
+      pressure_warning (0.70) — emit context:budget_pressure event; by this
+          point summarization should already be in-flight.
+      emergency_fallback (0.92) — mechanical fallback if LLM summarization
+          is still in-flight or has failed.
+      inline compact (1.00) — hard cap enforced in get_messages_for_request();
+          the returned list will never exceed the token budget.
 
     Phase 1: Persistence, budget tracking, protocol compliance.
     Phase 2 adds: async LLM summarization, tier management, swap mechanic.
@@ -201,7 +212,7 @@ class ManagedContextManager:
         emergency_target_usage: float = 0.50,
         large_result_threshold: int = 50_000,
         pressure_warning: float = 0.70,
-        summarize_trigger: float = 0.80,
+        summarize_trigger: float = 0.60,
         emergency_fallback: float = 0.92,
         hooks: Any = None,
         session_dir: str | Path | None = None,

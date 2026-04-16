@@ -213,8 +213,26 @@ class TestContextManagedModule:
         assert ctx.emergency_target_usage == 0.50
         assert ctx.large_result_threshold == 50_000
         assert ctx.pressure_warning == 0.70
-        assert ctx.summarize_trigger == 0.80
+        assert ctx.summarize_trigger == 0.60
         assert ctx.emergency_fallback == 0.92
+
+    def test_summarize_trigger_default_is_60_not_80(self):
+        """summarize_trigger default is 0.60, lowered from 0.80.
+
+        Async LLM summarization takes ~50 seconds; the orchestrator continues
+        adding messages during that window (40-60 K tokens).  Starting at 0.80
+        of a 200 K budget means context often grows past 120 % before the
+        summary is ready.  0.60 provides adequate headroom so the swap happens
+        before budget is exceeded.
+        """
+        from amplifier_module_context_managed import ManagedContextManager
+
+        ctx = ManagedContextManager(session_dir=None)
+        assert ctx.summarize_trigger == 0.60, (
+            "summarize_trigger must default to 0.60 (not 0.80) to allow "
+            "headroom during the async summarization window"
+        )
+        assert ctx.summarize_trigger != 0.80, "Old 0.80 default must not be in use"
 
 
 class TestToolTranscriptModule:

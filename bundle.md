@@ -53,7 +53,7 @@ session:
     config:
       max_tokens: 200000
       verbatim_window_tokens: 40000
-      summarize_trigger: 0.80
+      summarize_trigger: 0.60
       pressure_warning: 0.70
       emergency_fallback: 0.92
       max_summary_tiers: 3
