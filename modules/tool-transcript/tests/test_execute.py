@@ -167,6 +167,71 @@ class TestExecuteSearch:
         assert "Turn 1" not in result.output
 
 
+class TestExecuteOutputSizeLimit:
+    """Tests for output-size based turn reduction in execute()."""
+
+    @pytest.mark.asyncio
+    async def test_large_output_truncated_with_note(self, tmp_path):
+        """When formatted output exceeds 100K chars, only a leading subset of turns is returned
+        and a note is appended explaining the truncation."""
+        import json
+
+        # Build a transcript with 5 turns each containing ~30K chars of tool result
+        transcript = tmp_path / "transcript.jsonl"
+        header = {
+            "type": "transcript_header",
+            "format_version": "1.0.0",
+            "created_at": "2024-01-01T00:00:00.000+00:00",
+        }
+        messages = []
+        for i in range(1, 6):
+            messages.append({"role": "user", "content": f"Turn {i} question"})
+            messages.append({"role": "assistant", "content": ""})
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": f"tc_{i}",
+                    # ~30K chars per tool result
+                    "content": f"result-{i}: " + "x" * 30_000,
+                }
+            )
+
+        with open(transcript, "w") as f:
+            f.write(json.dumps(header) + "\n")
+            for msg in messages:
+                f.write(json.dumps(msg) + "\n")
+
+        coordinator = MagicMock()
+        coordinator.get_capability = MagicMock(
+            side_effect=lambda name: (
+                str(transcript) if name == "context-managed.transcript_path" else None
+            )
+        )
+
+        tool = ReadTranscriptTool(coordinator)
+        result = await tool.execute({})
+
+        assert result.success is True
+        assert isinstance(result.output, str)
+        # Output should contain a truncation note
+        assert (
+            "narrower range" in result.output.lower()
+            or "showing turns" in result.output.lower()
+        )
+        # Not all 5 turns should be present
+        assert "Turn 5" not in result.output or "Turn 1" in result.output
+
+    @pytest.mark.asyncio
+    async def test_small_output_not_truncated(self, mock_coordinator):
+        """When formatted output is under 100K chars, no truncation note is added."""
+        tool = ReadTranscriptTool(mock_coordinator)
+        result = await tool.execute({})
+
+        assert result.success is True
+        # The 3-turn sample transcript is tiny — no truncation note
+        assert "narrower range" not in result.output.lower()
+
+
 class TestExecuteGracefulFailure:
     """Tests for graceful failure cases in execute()."""
 

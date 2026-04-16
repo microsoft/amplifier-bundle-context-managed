@@ -1064,23 +1064,96 @@ class ManagedContextManager:
         """Format messages for the summarization prompt.
 
         Each message is formatted as '[role]: content'.  When content is a
-        list of content blocks, text is extracted from blocks that have a
-        .text attribute and joined together.
+        list of content blocks, text blocks and tool_call blocks are both
+        included.  Thinking blocks are silently skipped.  Tool call inputs
+        are compacted to at most 500 chars.  Tool-role messages are formatted
+        as '[tool_result for {id}]: {content}' so the summarizer can link
+        results back to the calls that requested them.
+
+        The ``tool_calls`` field (separate from content blocks) is also
+        included for any calls not already shown via content blocks.
         """
         lines = []
         for msg in messages:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
+            # IDs of tool calls already shown via content blocks (avoid duplication)
+            shown_tc_ids: set[str] = set()
+
             if isinstance(content, list):
-                # Join text from all blocks that carry a .text attribute
-                text_parts = []
+                parts = []
                 for block in content:
-                    if hasattr(block, "text"):
-                        text_parts.append(block.text)
-                    elif isinstance(block, dict) and "text" in block:
-                        text_parts.append(block["text"])
-                content = "".join(text_parts)
-            lines.append(f"[{role}]: {content}")
+                    if isinstance(block, dict):
+                        block_type = block.get("type", "")
+                        if block_type == "text":
+                            text = block.get("text", "")
+                            if text:
+                                parts.append(text)
+                        elif block_type in ("tool_call", "tool_use"):
+                            name = block.get("name", "unknown_tool")
+                            inp = block.get("input", {})
+                            tc_id = block.get("id", "")
+                            if tc_id:
+                                shown_tc_ids.add(tc_id)
+                            inp_str = json.dumps(inp, separators=(",", ":"))
+                            if len(inp_str) > 500:
+                                inp_str = inp_str[:500] + "..."
+                            parts.append(f"[tool_call: {name}({inp_str})]")
+                        elif block_type == "thinking":
+                            pass  # Skip internal reasoning blocks
+                        elif "text" in block:
+                            # Fallback: dict has a text key but unrecognised type
+                            text = block.get("text", "")
+                            if text:
+                                parts.append(text)
+                    elif hasattr(block, "text"):
+                        parts.append(block.text)
+                content = "\n".join(parts)
+
+            # For tool result messages: include the tool_call_id for linkage
+            if role == "tool":
+                tc_id = msg.get("tool_call_id", "")
+                msg_line = f"[tool_result for {tc_id}]: {content}"
+            else:
+                msg_line = f"[{role}]: {content}"
+
+            # Supplement with tool_calls field for any calls not shown via content blocks
+            extra_lines: list[str] = []
+            for tc in msg.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                tc_id = tc.get("id", "")
+                if tc_id and tc_id in shown_tc_ids:
+                    continue  # already emitted via content block
+                # Support both {function: {name, arguments}} and {name/tool, input/arguments}
+                if "function" in tc:
+                    name = tc["function"].get("name", "unknown_tool")
+                    raw_args = tc["function"].get("arguments", "{}")
+                    if isinstance(raw_args, str):
+                        try:
+                            inp_str = json.dumps(
+                                json.loads(raw_args), separators=(",", ":")
+                            )
+                        except (json.JSONDecodeError, ValueError):
+                            inp_str = raw_args
+                    else:
+                        inp_str = json.dumps(raw_args, separators=(",", ":"))
+                else:
+                    name = tc.get("name") or tc.get("tool", "unknown_tool")
+                    inp = tc.get("input") or tc.get("arguments") or {}
+                    if isinstance(inp, str):
+                        inp_str = inp
+                    else:
+                        inp_str = json.dumps(inp, separators=(",", ":"))
+                if len(inp_str) > 500:
+                    inp_str = inp_str[:500] + "..."
+                extra_lines.append(f"  [tool_call: {name}({inp_str})]")
+
+            if extra_lines:
+                lines.append(msg_line + "\n" + "\n".join(extra_lines))
+            else:
+                lines.append(msg_line)
+
         return "\n\n".join(lines)
 
     def _extract_text_from_response(self, response: Any) -> str:
@@ -1289,10 +1362,12 @@ class ManagedContextManager:
                 break  # Only protected messages remain
             removed = self._messages.pop(removable_idx)
             self._running_token_estimate -= self._estimate_tokens_single(removed)
-            removed_messages_info.append({
-                "role": removed.get("role", "unknown"),
-                "content_preview": str(removed.get("content", ""))[:100],
-            })
+            removed_messages_info.append(
+                {
+                    "role": removed.get("role", "unknown"),
+                    "content_preview": str(removed.get("content", ""))[:100],
+                }
+            )
 
         # Update transcript offset by the number of messages removed.  Without
         # this, any pending summary that was computed before the fallback will
@@ -1336,11 +1411,13 @@ class ManagedContextManager:
                 for preview in user_previews:
                     marker_lines.append(f"  - {preview}")
                 marker_lines.append("")
-            marker_lines.extend([
-                f"For full details of turns {turn_start}-{turn_end}, use: read_transcript(start_turn={turn_start}, end_turn={turn_end})",
-                "",
-                "Treat this summary as approximate. Verify against the actual codebase before acting on any specifics.",
-            ])
+            marker_lines.extend(
+                [
+                    f"For full details of turns {turn_start}-{turn_end}, use: read_transcript(start_turn={turn_start}, end_turn={turn_end})",
+                    "",
+                    "Treat this summary as approximate. Verify against the actual codebase before acting on any specifics.",
+                ]
+            )
             marker_content = "\n".join(marker_lines)
 
             marker_token_estimate = self._estimate_tokens_single(

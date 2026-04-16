@@ -114,3 +114,107 @@ class TestOutputFormatting:
         # Should indicate emptiness — 'no' or 'empty' must appear (case-insensitive)
         result_lower = result.lower()
         assert "no" in result_lower or "empty" in result_lower
+
+    def test_tool_result_content_shown(self):
+        """Tool result messages show full content, not just the id."""
+        turns = [
+            [
+                {"role": "user", "content": "Read auth.py"},
+                {
+                    "role": "assistant",
+                    "content": "I'll read that.",
+                    "tool_calls": [
+                        {
+                            "id": "tc_99",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": '{"path": "auth.py"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": "def authenticate(token):\n    return verify(token)",
+                    "tool_call_id": "tc_99",
+                },
+            ]
+        ]
+        result = self.tool._format_turns(turns, start_turn=1)
+
+        # Content should be present, not just the ID
+        assert "def authenticate" in result
+        assert "return verify" in result
+        # ID should also appear
+        assert "tc_99" in result
+
+    def test_tool_call_block_in_assistant_content(self):
+        """tool_call content blocks in assistant messages are shown as [tool_call: name(input)]."""
+        turns = [
+            [
+                {"role": "user", "content": "Search for TODO comments"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "I'll search for that."},
+                        {
+                            "type": "tool_call",
+                            "id": "tc_block",
+                            "name": "grep",
+                            "input": {"pattern": "TODO", "path": "src/"},
+                        },
+                    ],
+                },
+            ]
+        ]
+        result = self.tool._format_turns(turns, start_turn=1)
+
+        assert "[tool_call: grep(" in result
+        assert "TODO" in result
+        assert "I'll search for that." in result
+
+    def test_tool_calls_field_shown_both_formats(self):
+        """tool_calls field entries are shown for both {function.name} and {name/tool} formats."""
+        # OpenAI format: {function: {name, arguments}}
+        turns_openai = [
+            [
+                {"role": "user", "content": "Run tests"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "tc_oai",
+                            "function": {
+                                "name": "run_tests",
+                                "arguments": '{"suite":"unit"}',
+                            },
+                        }
+                    ],
+                },
+            ]
+        ]
+        result = self.tool._format_turns(turns_openai, start_turn=1)
+        assert "run_tests" in result
+        assert "unit" in result
+
+        # Direct format: {name, input}
+        turns_direct = [
+            [
+                {"role": "user", "content": "Check code"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "tc_direct",
+                            "name": "check_code",
+                            "input": {"path": "main.py"},
+                        }
+                    ],
+                },
+            ]
+        ]
+        result2 = self.tool._format_turns(turns_direct, start_turn=1)
+        assert "check_code" in result2
+        assert "main.py" in result2

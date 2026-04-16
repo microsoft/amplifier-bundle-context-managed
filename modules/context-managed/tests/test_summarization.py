@@ -580,6 +580,178 @@ class TestFormatMessagesForSummarization:
         assert "First part" in result
         assert "second part" in result
 
+    def test_tool_call_content_block_included(self):
+        """tool_call content blocks are included as [tool_call: name(input)]."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Let me read that file."},
+                    {
+                        "type": "tool_call",
+                        "id": "tc_001",
+                        "name": "read_file",
+                        "input": {"path": "auth.py"},
+                    },
+                ],
+            }
+        ]
+
+        result = mgr._format_messages_for_summarization(messages)
+
+        assert "[tool_call: read_file(" in result
+        assert "auth.py" in result
+        assert "Let me read that file." in result
+
+    def test_tool_use_content_block_included(self):
+        """tool_use content blocks (Anthropic-native naming) are also included."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_01abc",
+                        "name": "search_files",
+                        "input": {"query": "TODO"},
+                    },
+                ],
+            }
+        ]
+
+        result = mgr._format_messages_for_summarization(messages)
+
+        assert "[tool_call: search_files(" in result
+        assert "TODO" in result
+
+    def test_tool_result_content_included(self):
+        """Tool-role messages include content and are labelled with their tool_call_id."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        messages = [
+            {
+                "role": "tool",
+                "tool_call_id": "tc_001",
+                "content": "def authenticate(token):\n    return verify(token)",
+            }
+        ]
+
+        result = mgr._format_messages_for_summarization(messages)
+
+        assert "tc_001" in result
+        assert "def authenticate" in result
+        assert "tool_result for tc_001" in result
+
+    def test_tool_calls_field_included(self):
+        """The tool_calls field (OpenAI format) is included for calls not shown via content blocks."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        messages = [
+            {
+                "role": "assistant",
+                "content": "I will run that.",
+                "tool_calls": [
+                    {
+                        "id": "tc_x",
+                        "function": {
+                            "name": "run_tests",
+                            "arguments": '{"suite": "unit"}',
+                        },
+                    }
+                ],
+            }
+        ]
+
+        result = mgr._format_messages_for_summarization(messages)
+
+        assert "run_tests" in result
+        assert "unit" in result
+
+    def test_tool_calls_field_not_duplicated_when_in_content_blocks(self):
+        """When a tool call already appears in content blocks, the tool_calls field entry is skipped."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_call",
+                        "id": "tc_shared",
+                        "name": "grep",
+                        "input": {"pattern": "foo"},
+                    }
+                ],
+                "tool_calls": [
+                    {
+                        "id": "tc_shared",
+                        "function": {"name": "grep", "arguments": '{"pattern":"foo"}'},
+                    }
+                ],
+            }
+        ]
+
+        result = mgr._format_messages_for_summarization(messages)
+
+        # grep should appear exactly once
+        assert result.count("[tool_call: grep(") == 1
+
+    def test_thinking_blocks_skipped(self):
+        """Thinking blocks are silently skipped — they do not appear in the output."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Internal reasoning here."},
+                    {"type": "text", "text": "Here is my answer."},
+                ],
+            }
+        ]
+
+        result = mgr._format_messages_for_summarization(messages)
+
+        assert "Internal reasoning here." not in result
+        assert "Here is my answer." in result
+
+    def test_long_tool_call_input_truncated_at_500(self):
+        """Tool call inputs longer than 500 chars are truncated with '...' at the cut point."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        long_input = {"data": "x" * 1000}
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_call",
+                        "id": "tc_long",
+                        "name": "big_call",
+                        "input": long_input,
+                    }
+                ],
+            }
+        ]
+
+        result = mgr._format_messages_for_summarization(messages)
+
+        assert "[tool_call: big_call(" in result
+        assert "..." in result
+        # Should not contain the full 1000-char value
+        assert "x" * 600 not in result
+
 
 class TestExtractTextFromResponse:
     """Tests for _extract_text_from_response()."""

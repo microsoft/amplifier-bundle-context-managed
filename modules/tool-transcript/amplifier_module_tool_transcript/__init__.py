@@ -159,7 +159,30 @@ class ReadTranscriptTool:
             section = self._format_turns([turn_msgs], start_turn=idx)
             sections.append(section)
 
-        return ToolResult(success=True, output="\n\n".join(sections))
+        output = "\n\n".join(sections)
+
+        # If the formatted output is very large, return a leading subset of turns
+        # with a note so the caller can use a narrower range.
+        _MAX_OUTPUT_CHARS = 100_000
+        if len(output) > _MAX_OUTPUT_CHARS:
+            truncated: list[str] = []
+            total = 0
+            last_idx = filtered_indices[0]
+            for section, idx in zip(sections, filtered_indices):
+                entry_len = len(section) + 2  # +2 for the "\n\n" separator
+                if total + entry_len > _MAX_OUTPUT_CHARS and truncated:
+                    break
+                truncated.append(section)
+                total += entry_len
+                last_idx = idx
+            note = (
+                f"\n\n[Showing turns {filtered_indices[0]}–{last_idx} of requested "
+                f"{filtered_indices[0]}–{filtered_indices[-1]}. "
+                f"Use a narrower range to retrieve the remaining turns.]"
+            )
+            output = "\n\n".join(truncated) + note
+
+        return ToolResult(success=True, output=output)
 
     def _parse_transcript(self, transcript_path: str) -> list[list[dict]]:
         """Parse a transcript file into turns.
@@ -244,6 +267,21 @@ class ReadTranscriptTool:
     def _format_turns(self, turns: list[list[dict]], start_turn: int) -> str:
         """Format a list of turns into human-readable text.
 
+        Each turn is introduced with a ``--- Turn N ---`` header.  Messages
+        are formatted as follows:
+
+        * **user / other roles** — ``[role] <text>`` with content truncated to
+          ``_MAX_CONTENT_LENGTH``.
+        * **assistant** — ``[assistant] <text>`` (truncated) plus one line per
+          tool call: ``[tool_call: name({compact_input})]``.  Tool calls are
+          gathered from both the ``tool_calls`` field (supporting OpenAI
+          ``function.name`` and direct ``name``/``tool`` formats) and any
+          ``tool_call`` / ``tool_use`` content blocks.
+        * **tool results** — ``[tool result: {id}]`` followed immediately by
+          the full content on the next line.  Tool result content is not
+          truncated here because it is already bounded upstream; the overall
+          output-size guard in ``execute()`` handles extreme cases.
+
         Args:
             turns: A list of turns, each being a list of message dicts.
             start_turn: The turn number to assign to the first turn in the list.
@@ -266,22 +304,97 @@ class ReadTranscriptTool:
                 content = msg.get("content", "")
 
                 if role == "tool":
-                    # Tool result: show the tool_call_id
+                    # Tool result: show id + full content (already bounded upstream)
                     tc_id = msg.get("tool_call_id", "")
+                    # Content is normally a string; handle list as a fallback
+                    if isinstance(content, list):
+                        content = " ".join(
+                            b.get("text", "") if isinstance(b, dict) else str(b)
+                            for b in content
+                        )
                     lines.append(f"[tool result: {tc_id}]")
+                    if content:
+                        lines.append(content)
+
                 elif role == "assistant":
-                    # Show role label + content
-                    tool_calls = msg.get("tool_calls")
+                    # Extract text and tool_call blocks from list content
+                    shown_tc_ids: set[str] = set()
+                    tc_block_lines: list[str] = []
+
+                    if isinstance(content, list):
+                        text_parts: list[str] = []
+                        for block in content:
+                            if isinstance(block, dict):
+                                btype = block.get("type", "")
+                                if btype == "text":
+                                    text_val = block.get("text", "")
+                                    if text_val:
+                                        text_parts.append(text_val)
+                                elif btype in ("tool_call", "tool_use"):
+                                    name = block.get("name", "unknown_tool")
+                                    inp = block.get("input", {})
+                                    tc_id = block.get("id", "")
+                                    if tc_id:
+                                        shown_tc_ids.add(tc_id)
+                                    inp_str = json.dumps(inp, separators=(",", ":"))
+                                    if len(inp_str) > 500:
+                                        inp_str = inp_str[:500] + "..."
+                                    tc_block_lines.append(
+                                        f"[tool_call: {name}({inp_str})]"
+                                    )
+                                elif "text" in block:
+                                    text_val = block.get("text", "")
+                                    if text_val:
+                                        text_parts.append(text_val)
+                            elif hasattr(block, "text"):
+                                text_parts.append(block.text)
+                        content = "\n".join(text_parts)
+
                     if content:
                         truncated = self._truncate_content(content)
                         lines.append(f"[assistant] {truncated}")
-                    if tool_calls:
-                        names = ", ".join(
-                            tc.get("function", {}).get("name", "") for tc in tool_calls
-                        )
-                        lines.append(f"(calls: {names})")
+
+                    # Emit tool_call blocks found in content
+                    lines.extend(tc_block_lines)
+
+                    # Also emit tool_calls field entries not already shown
+                    tool_calls = msg.get("tool_calls") or []
+                    for tc in tool_calls:
+                        if not isinstance(tc, dict):
+                            continue
+                        tc_id = tc.get("id", "")
+                        if tc_id and tc_id in shown_tc_ids:
+                            continue
+                        if "function" in tc:
+                            name = tc["function"].get("name", "unknown_tool")
+                            raw_args = tc["function"].get("arguments", "{}")
+                            if isinstance(raw_args, str):
+                                try:
+                                    inp_str = json.dumps(
+                                        json.loads(raw_args), separators=(",", ":")
+                                    )
+                                except (json.JSONDecodeError, ValueError):
+                                    inp_str = raw_args
+                            else:
+                                inp_str = json.dumps(raw_args, separators=(",", ":"))
+                        else:
+                            name = tc.get("name") or tc.get("tool", "unknown_tool")
+                            inp = tc.get("input") or tc.get("arguments") or {}
+                            if isinstance(inp, str):
+                                inp_str = inp
+                            else:
+                                inp_str = json.dumps(inp, separators=(",", ":"))
+                        if len(inp_str) > 500:
+                            inp_str = inp_str[:500] + "..."
+                        lines.append(f"[tool_call: {name}({inp_str})]")
+
                 else:
                     # user and any other roles
+                    if isinstance(content, list):
+                        content = " ".join(
+                            b.get("text", "") if isinstance(b, dict) else str(b)
+                            for b in content
+                        )
                     truncated = self._truncate_content(content)
                     lines.append(f"[{role}] {truncated}")
 
