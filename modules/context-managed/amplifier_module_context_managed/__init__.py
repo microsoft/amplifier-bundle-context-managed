@@ -239,6 +239,13 @@ class ManagedContextManager:
         self._messages: list[dict[str, Any]] = []
         self._message_index: int = 0  # Running index for large result filenames
         self._running_token_estimate: int = 0
+        # Stable-prefix estimate (system prompt tokens) updated on every
+        # get_messages_for_request() call and used by _check_summarization_trigger()
+        # to compute the *effective* API-level usage fraction.  Without this,
+        # the ~48 K stable prefix (system prompt + tool defs) is invisible to
+        # threshold checks, making every threshold appear ~24 % higher than
+        # intended.
+        self._stable_prefix_estimate: int = 0
         self._loaded_from_transcript: bool = False
 
         # System prompt factory
@@ -474,6 +481,11 @@ class ManagedContextManager:
 
         # Check budget and emit pressure event
         system_tokens = self._estimate_tokens(assembled[:1]) if assembled else 0
+        # Cache the system-prompt token count so _check_summarization_trigger() can
+        # include it in the effective-usage fraction.  This is the only place in the
+        # code that computes the rendered system prompt size, so we update the shared
+        # field here and use it across all threshold checks.
+        self._stable_prefix_estimate = system_tokens
         available = budget - system_tokens
         conversation_tokens = self._running_token_estimate
         if available > 0:
@@ -568,6 +580,7 @@ class ManagedContextManager:
         self._messages = []
         self._message_index = 0
         self._running_token_estimate = 0
+        self._stable_prefix_estimate = 0
         self._loaded_from_transcript = False
         self._pressure_emitted = False
         self._summary_tiers = []
@@ -1137,7 +1150,13 @@ class ManagedContextManager:
         budget = self._calculate_budget(None, self._cached_provider)
         if budget <= 0:
             return
-        usage_fraction = self._running_token_estimate / budget
+        # Include the stable prefix (system prompt tokens, tracked from the most
+        # recent get_messages_for_request() call) in the effective usage total.
+        # Without this, the ~28-48 K stable prefix is invisible here, making
+        # every threshold appear ~24 % higher than intended — e.g. a real 93 %
+        # API-level context load computed as only 69 % inside this method.
+        effective_usage = self._running_token_estimate + self._stable_prefix_estimate
+        usage_fraction = effective_usage / budget
 
         # Emergency check 1: repeated LLM failures — do mechanical fallback
         if (
@@ -1193,6 +1212,16 @@ class ManagedContextManager:
         """
         budget = self._calculate_budget(None, self._cached_provider)
         target_tokens = int(budget * self.emergency_target_usage)
+        # Conversation-only target: the stable prefix (system prompt) occupies part of
+        # the budget, so the *conversation* portion must fit in (target_tokens - prefix).
+        # This prevents the fallback from stopping at a conversation size that, when
+        # added to the prefix, still exceeds the total target.
+        # Safety floor: always leave at least 25% of target_tokens for conversation so
+        # we never over-compact when the prefix estimate is large or stale.
+        conversation_target = max(
+            target_tokens - self._stable_prefix_estimate,
+            target_tokens // 4,
+        )
 
         await self._emit_event(
             "context:compaction",
@@ -1202,6 +1231,8 @@ class ManagedContextManager:
                 "target_usage": self.emergency_target_usage,
                 "current_tokens": self._running_token_estimate,
                 "target_tokens": target_tokens,
+                "stable_prefix_estimate": self._stable_prefix_estimate,
+                "conversation_target": conversation_target,
             },
         )
 
@@ -1219,7 +1250,7 @@ class ManagedContextManager:
             self._running_token_estimate -= old_tokens - new_tokens
 
         # Step 2: Remove oldest non-protected messages
-        while self._running_token_estimate > target_tokens:
+        while self._running_token_estimate > conversation_target:
             removable_idx = None
             for i, msg in enumerate(self._messages):
                 if not self._is_protected_message(msg):
