@@ -36,12 +36,21 @@ class SummaryResult:
 
     Captures the output text along with the turn range and message range
     that were summarized, plus how many compression passes were applied.
+
+    ``offset_at_creation`` records ``_transcript_message_offset`` at the
+    moment ``_perform_summarization()`` computed the absolute boundary.
+    The swap logic in ``get_messages_for_request()`` compares this against
+    the *current* offset to detect stale boundaries: if the offset has
+    grown (a prior swap or compaction ran between trigger and swap), the
+    summary is discarded gracefully rather than producing a negative local
+    index.
     """
 
     summary_text: str
     turn_range: tuple[int, int]
     source_message_range: tuple[int, int]
     compression_passes: int = 1
+    offset_at_creation: int = 0  # _transcript_message_offset when boundary was computed
 
 
 @dataclass
@@ -393,69 +402,86 @@ class ManagedContextManager:
         # Phase 2: perform pending summary swap if available
         if self._pending_summary is not None:
             pending = self._pending_summary
-            abs_start, abs_end = pending.source_message_range
-            start_local = abs_start - self._transcript_message_offset
-            end_local = abs_end - self._transcript_message_offset
 
-            if start_local >= 0 and end_local <= len(self._messages):
-                # Valid boundary: perform the swap
-                old_tokens = self._estimate_tokens(
-                    self._messages[start_local:end_local]
+            # Check for offset drift: if _transcript_message_offset grew between
+            # when _perform_summarization() computed the boundary and now, a prior
+            # swap or compaction removed the messages this summary was targeting.
+            # Attempting the swap would produce a negative start_local (the original
+            # "start_local=-38" bug).  Discard gracefully; _summarization_failures
+            # is NOT incremented — the summary itself was valid, just stale.
+            offset_drift = self._transcript_message_offset - pending.offset_at_creation
+            if offset_drift > 0:
+                logger.info(
+                    "Discarding stale summary (offset drifted by %d): "
+                    "boundary was %s, current offset is %d",
+                    offset_drift,
+                    pending.source_message_range,
+                    self._transcript_message_offset,
                 )
-                token_estimate = self._estimate_tokens_single(
-                    {"role": "system", "content": pending.summary_text}
-                )
-                tier = SummaryTier(
-                    content=pending.summary_text,
-                    turn_range=pending.turn_range,
-                    source_message_range=pending.source_message_range,
-                    compression_passes=pending.compression_passes,
-                    token_estimate=token_estimate,
-                )
-                self._summary_tiers.append(tier)
-                self._messages = (
-                    self._messages[:start_local] + self._messages[end_local:]
-                )
-                self._transcript_message_offset += end_local - start_local
-                self._running_token_estimate = (
-                    self._running_token_estimate - old_tokens + token_estimate
-                )
-                self._summarized_through_turn = pending.turn_range[1]
-                self._summarization_failures = 0
-
-                # Persist summary marker to transcript
-                self._persist_summary_marker(tier)
-
-                # Phase 2: merge oldest tiers if count exceeds limit
-                if len(self._summary_tiers) > self.max_summary_tiers:
-                    try:
-                        await self._merge_oldest_tiers()
-                    except Exception as e:
-                        logger.warning(f"Tier merge failed: {e}")
-
-                # Rebuild conversation_messages after swap
-                if self._system_prompt_factory:
-                    conversation_messages = [
-                        msg
-                        for msg in self._messages
-                        if msg.get("role") != "system"
-                        or (msg.get("metadata") or {}).get("source") == "hook"
-                    ]
-                else:
-                    conversation_messages = list(self._messages)
-                    # Re-apply system message slice if stored system already in assembled
-                    if (
-                        not system_message
-                        and self._messages
-                        and self._messages[0].get("role") == "system"
-                    ):
-                        conversation_messages = conversation_messages[1:]
             else:
-                logger.warning(
-                    f"Discarding pending summary with invalid boundary: "
-                    f"start_local={start_local}, end_local={end_local}, "
-                    f"messages_len={len(self._messages)}"
-                )
+                abs_start, abs_end = pending.source_message_range
+                start_local = abs_start - self._transcript_message_offset
+                end_local = abs_end - self._transcript_message_offset
+
+                if start_local >= 0 and end_local <= len(self._messages):
+                    # Valid boundary: perform the swap
+                    old_tokens = self._estimate_tokens(
+                        self._messages[start_local:end_local]
+                    )
+                    token_estimate = self._estimate_tokens_single(
+                        {"role": "system", "content": pending.summary_text}
+                    )
+                    tier = SummaryTier(
+                        content=pending.summary_text,
+                        turn_range=pending.turn_range,
+                        source_message_range=pending.source_message_range,
+                        compression_passes=pending.compression_passes,
+                        token_estimate=token_estimate,
+                    )
+                    self._summary_tiers.append(tier)
+                    self._messages = (
+                        self._messages[:start_local] + self._messages[end_local:]
+                    )
+                    self._transcript_message_offset += end_local - start_local
+                    self._running_token_estimate = (
+                        self._running_token_estimate - old_tokens + token_estimate
+                    )
+                    self._summarized_through_turn = pending.turn_range[1]
+                    self._summarization_failures = 0
+
+                    # Persist summary marker to transcript
+                    self._persist_summary_marker(tier)
+
+                    # Phase 2: merge oldest tiers if count exceeds limit
+                    if len(self._summary_tiers) > self.max_summary_tiers:
+                        try:
+                            await self._merge_oldest_tiers()
+                        except Exception as e:
+                            logger.warning(f"Tier merge failed: {e}")
+
+                    # Rebuild conversation_messages after swap
+                    if self._system_prompt_factory:
+                        conversation_messages = [
+                            msg
+                            for msg in self._messages
+                            if msg.get("role") != "system"
+                            or (msg.get("metadata") or {}).get("source") == "hook"
+                        ]
+                    else:
+                        conversation_messages = list(self._messages)
+                        # Re-apply system message slice if stored system already in assembled
+                        if (
+                            not system_message
+                            and self._messages
+                            and self._messages[0].get("role") == "system"
+                        ):
+                            conversation_messages = conversation_messages[1:]
+                else:
+                    logger.warning(
+                        f"Discarding pending summary with invalid boundary: "
+                        f"start_local={start_local}, end_local={end_local}, "
+                        f"messages_len={len(self._messages)}"
+                    )
 
             self._pending_summary = None
 
@@ -1031,6 +1057,7 @@ class ManagedContextManager:
             summary_text=summary_text,
             turn_range=(turn_start, turn_end),
             source_message_range=source_message_range,
+            offset_at_creation=self._transcript_message_offset,
         )
 
     def _format_messages_for_summarization(self, messages: list[dict[str, Any]]) -> str:

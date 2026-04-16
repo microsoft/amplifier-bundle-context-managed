@@ -2340,3 +2340,249 @@ class TestFullSummarizationCycle:
             f"tokens={mgr._running_token_estimate}, "
             f"max_tokens={mgr.max_tokens}"
         )
+
+
+class TestStaleSummaryDiscard:
+    """Tests for stale summary boundary detection via offset_at_creation (session-29acaa25 fix).
+
+    Root cause: when a prior swap completes between _perform_summarization() capturing
+    the offset and the swap in get_messages_for_request(), the boundary indices become
+    stale.  The fix stores offset_at_creation in SummaryResult and detects drift
+    (current_offset > offset_at_creation) before attempting the swap.
+    """
+
+    def test_summary_result_has_offset_at_creation_field(self):
+        """SummaryResult includes an offset_at_creation field that defaults to 0."""
+        from amplifier_module_context_managed import SummaryResult
+
+        result = SummaryResult(
+            summary_text="text",
+            turn_range=(1, 2),
+            source_message_range=(0, 5),
+        )
+        assert result.offset_at_creation == 0
+
+    def test_summary_result_accepts_custom_offset_at_creation(self):
+        """SummaryResult stores any non-zero offset_at_creation passed explicitly."""
+        from amplifier_module_context_managed import SummaryResult
+
+        result = SummaryResult(
+            summary_text="text",
+            turn_range=(1, 2),
+            source_message_range=(38, 45),
+            offset_at_creation=38,
+        )
+        assert result.offset_at_creation == 38
+
+    @pytest.mark.asyncio
+    async def test_perform_summarization_stores_offset_at_creation(self):
+        """_perform_summarization() records _transcript_message_offset as offset_at_creation."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager()
+        mgr._transcript_message_offset = 38  # Simulate a prior swap having occurred
+        mgr._messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+        ]
+
+        mock_block = MagicMock()
+        mock_block.text = "Summary"
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+        mock_provider = MagicMock()
+        mock_provider.complete = AsyncMock(return_value=mock_response)
+        mgr._cached_provider = mock_provider
+
+        result = await mgr._perform_summarization((0, 2))
+
+        # offset_at_creation must capture the offset at compute time
+        assert result.offset_at_creation == 38
+        # source_message_range is still offset-based absolute
+        assert result.source_message_range == (38, 40)  # 38+0, 38+2
+
+    @pytest.mark.asyncio
+    async def test_stale_summary_discarded_when_offset_drifted(self):
+        """Pending summary with offset_at_creation < current offset is discarded gracefully.
+
+        This is the exact scenario from session 29acaa25:
+          - Summary computed when offset = 0  → source_range=(0, 45), offset_at_creation=0
+          - Prior swap happened               → _transcript_message_offset = 38
+          - Swap attempt would produce        → start_local = 0 - 38 = -38 (INVALID)
+          Fix: detect drift=38, discard at INFO, no negative index, no crash.
+        """
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryResult,
+        )
+
+        mgr = ManagedContextManager()
+        messages = [{"role": "user", "content": f"message {i}"} for i in range(10)]
+        mgr._messages = list(messages)
+        initial_estimate = mgr._estimate_tokens(messages)
+        mgr._running_token_estimate = initial_estimate
+
+        # Prior swap has already moved the offset to 38
+        mgr._transcript_message_offset = 38
+
+        # Pending summary was computed when offset was 0 — now stale
+        mgr._pending_summary = SummaryResult(
+            summary_text="A stale summary",
+            turn_range=(1, 5),
+            source_message_range=(0, 45),  # abs boundary when offset=0
+            compression_passes=1,
+            offset_at_creation=0,  # captured before prior swap
+        )
+
+        await mgr.get_messages_for_request()
+
+        # Stale summary discarded
+        assert mgr._pending_summary is None
+        # No tier created
+        assert len(mgr._summary_tiers) == 0
+        # Messages unchanged
+        assert len(mgr._messages) == len(messages)
+        # Token estimate unchanged
+        assert mgr._running_token_estimate == initial_estimate
+        # Offset unchanged (stale discard doesn't advance the offset)
+        assert mgr._transcript_message_offset == 38
+
+    @pytest.mark.asyncio
+    async def test_stale_discard_does_not_increment_summarization_failures(self):
+        """Discarding a stale summary due to offset drift is NOT a summarization failure.
+
+        _summarization_failures counts LLM call failures and gates emergency fallback.
+        A stale boundary is a structural consequence of timing, not an LLM error.
+        """
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryResult,
+        )
+
+        mgr = ManagedContextManager()
+        mgr._messages = [{"role": "user", "content": "hi"}]
+        mgr._running_token_estimate = 10
+        mgr._transcript_message_offset = 10
+        mgr._summarization_failures = 2  # Pre-existing failures
+
+        # Stale: offset_at_creation=0, but current offset=10
+        mgr._pending_summary = SummaryResult(
+            summary_text="stale",
+            turn_range=(1, 1),
+            source_message_range=(0, 5),
+            offset_at_creation=0,
+        )
+
+        await mgr.get_messages_for_request()
+
+        # Failures counter must remain unchanged (not incremented)
+        assert mgr._summarization_failures == 2
+
+    @pytest.mark.asyncio
+    async def test_stale_discard_does_not_modify_messages(self):
+        """Stale summary discard leaves self._messages completely untouched."""
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryResult,
+        )
+
+        mgr = ManagedContextManager()
+        original_messages = [
+            {"role": "user", "content": "msg A"},
+            {"role": "assistant", "content": "msg B"},
+            {"role": "user", "content": "msg C"},
+        ]
+        mgr._messages = list(original_messages)
+        mgr._running_token_estimate = mgr._estimate_tokens(original_messages)
+        mgr._transcript_message_offset = 5  # Drift of 5 from offset_at_creation=0
+
+        mgr._pending_summary = SummaryResult(
+            summary_text="stale summary text",
+            turn_range=(1, 2),
+            source_message_range=(0, 10),
+            offset_at_creation=0,
+        )
+
+        await mgr.get_messages_for_request()
+
+        assert mgr._messages == original_messages
+
+    @pytest.mark.asyncio
+    async def test_valid_summary_still_swaps_when_offset_matches(self):
+        """Regression: summary with offset_at_creation matching current offset swaps normally.
+
+        Ensures the offset_drift check (offset_drift > 0 path) does not prevent
+        normal swaps when the offset hasn't changed since the boundary was computed.
+        """
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryResult,
+        )
+
+        mgr = ManagedContextManager()
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "World"},
+            {"role": "user", "content": "More"},
+            {"role": "assistant", "content": "Content"},
+        ]
+        mgr._messages = list(messages)
+        mgr._running_token_estimate = mgr._estimate_tokens(messages)
+        mgr._transcript_message_offset = 10  # Some prior offset
+
+        # Valid: offset_at_creation matches current offset → no drift
+        mgr._pending_summary = SummaryResult(
+            summary_text="Valid summary of first two messages",
+            turn_range=(1, 1),
+            source_message_range=(10, 12),  # abs: offset(10) + local[0:2]
+            compression_passes=1,
+            offset_at_creation=10,  # matches current offset exactly
+        )
+
+        await mgr.get_messages_for_request()
+
+        # Summary WAS swapped in (tier created, messages reduced)
+        assert mgr._pending_summary is None
+        assert len(mgr._summary_tiers) == 1
+        assert mgr._summary_tiers[0].content == "Valid summary of first two messages"
+        # Messages 0 and 1 (local) removed → only messages 2 and 3 remain
+        assert len(mgr._messages) == 2
+        assert mgr._messages[0]["content"] == "More"
+        assert mgr._messages[1]["content"] == "Content"
+        # Offset advanced by 2 (the number of messages removed)
+        assert mgr._transcript_message_offset == 12
+
+    @pytest.mark.asyncio
+    async def test_is_summarizing_false_after_stale_discard_allows_new_trigger(self):
+        """After a stale summary is discarded, _is_summarizing=False so a new cycle can start.
+
+        _is_summarizing is reset by _run_summarization()'s finally block, not by the
+        discard path — this test confirms the overall system state allows re-triggering.
+        """
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryResult,
+        )
+
+        mgr = ManagedContextManager()
+        mgr._messages = [{"role": "user", "content": "hi"}]
+        mgr._running_token_estimate = 10
+        mgr._transcript_message_offset = 5
+
+        # _is_summarizing is already False (task finished, summary stored)
+        mgr._is_summarizing = False
+
+        mgr._pending_summary = SummaryResult(
+            summary_text="stale",
+            turn_range=(1, 1),
+            source_message_range=(0, 3),
+            offset_at_creation=0,  # stale
+        )
+
+        await mgr.get_messages_for_request()
+
+        # After discard, _is_summarizing remains False — future add_message() can trigger
+        assert mgr._is_summarizing is False
+        assert mgr._pending_summary is None
