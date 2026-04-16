@@ -1278,6 +1278,7 @@ class ManagedContextManager:
 
         # Step 2: Remove oldest non-protected messages
         original_count = len(self._messages)
+        removed_messages_info: list[dict[str, str]] = []
         while self._running_token_estimate > conversation_target:
             removable_idx = None
             for i, msg in enumerate(self._messages):
@@ -1288,6 +1289,10 @@ class ManagedContextManager:
                 break  # Only protected messages remain
             removed = self._messages.pop(removable_idx)
             self._running_token_estimate -= self._estimate_tokens_single(removed)
+            removed_messages_info.append({
+                "role": removed.get("role", "unknown"),
+                "content_preview": str(removed.get("content", ""))[:100],
+            })
 
         # Update transcript offset by the number of messages removed.  Without
         # this, any pending summary that was computed before the fallback will
@@ -1298,6 +1303,63 @@ class ManagedContextManager:
         removed_count = original_count - len(self._messages)
         if removed_count > 0:
             self._transcript_message_offset += removed_count
+
+        # Step 3: Insert a mechanical summary marker so the model knows what
+        # happened.  compression_passes=0 distinguishes mechanical summaries
+        # (no LLM call) from LLM-generated summaries (compression_passes >= 1).
+        # The marker is appended as a SummaryTier so it is handled consistently
+        # by get_messages_for_request() assembly and persisted to the transcript.
+        if removed_count > 0:
+            role_counts: dict[str, int] = {}
+            user_previews: list[str] = []
+            for info in removed_messages_info:
+                role = info["role"]
+                role_counts[role] = role_counts.get(role, 0) + 1
+                if role == "user":
+                    user_previews.append(info["content_preview"])
+
+            role_summary = ", ".join(
+                f"{count} {role}" for role, count in sorted(role_counts.items())
+            )
+            turn_start = self._summarized_through_turn + 1
+            user_count = role_counts.get("user", 0)
+            turn_end = self._summarized_through_turn + max(user_count, 1)
+
+            marker_lines: list[str] = [
+                f"[Emergency context compaction — {removed_count} messages removed ({role_summary})]",
+                "",
+                "This is a mechanical summary, not LLM-generated. Details may be incomplete.",
+                "",
+            ]
+            if user_previews:
+                marker_lines.append("User topics covered:")
+                for preview in user_previews:
+                    marker_lines.append(f"  - {preview}")
+                marker_lines.append("")
+            marker_lines.extend([
+                f"For full details of turns {turn_start}-{turn_end}, use: read_transcript(start_turn={turn_start}, end_turn={turn_end})",
+                "",
+                "Treat this summary as approximate. Verify against the actual codebase before acting on any specifics.",
+            ])
+            marker_content = "\n".join(marker_lines)
+
+            marker_token_estimate = self._estimate_tokens_single(
+                {"role": "system", "content": marker_content}
+            )
+            tier = SummaryTier(
+                content=marker_content,
+                turn_range=(turn_start, turn_end),
+                source_message_range=(
+                    self._transcript_message_offset - removed_count,
+                    self._transcript_message_offset,
+                ),
+                compression_passes=0,  # 0 = mechanical, not LLM-generated
+                token_estimate=marker_token_estimate,
+            )
+            self._summary_tiers.append(tier)
+            self._persist_summary_marker(tier)
+            self._summarized_through_turn = turn_end
+            self._running_token_estimate += marker_token_estimate
 
         # Invalidate any pending summary: the messages it was summarizing may
         # have been truncated (Step 1) or removed (Step 2) by this fallback,
@@ -1423,6 +1485,29 @@ class ManagedContextManager:
             if not removed:
                 # Only protected messages remain; cannot compact further.
                 break
+
+        # ── Step 3: insert an ephemeral compaction notice when messages were ──
+        # removed so the model knows a gap exists and where to look for details.
+        # This notice is NOT persisted and NOT a SummaryTier — it lives only in
+        # this assembled view, so it doesn't affect _messages or _summary_tiers.
+        messages_removed = original_count - len(compacted)
+        if messages_removed > 0:
+            notice: dict[str, Any] = {
+                "role": "system",
+                "content": (
+                    f"[Context compacted: {messages_removed} older messages were removed "
+                    f"to fit within budget. "
+                    f"Use read_transcript to retrieve details from earlier in the conversation. "
+                    f"Verify any specifics against the actual codebase.]"
+                ),
+                "metadata": {"source": "inline_compact", "type": "compaction_notice"},
+            }
+            # Insert after any leading system messages but before the conversation body
+            insert_idx = next(
+                (i for i, m in enumerate(compacted) if m.get("role") != "system"),
+                len(compacted),
+            )
+            compacted.insert(insert_idx, notice)
 
         compacted_tokens = self._estimate_tokens(compacted)
         await self._emit_event(

@@ -357,9 +357,14 @@ class TestEmergencyFallbackPrefixAdjustedTarget:
 
         await ctx._emergency_mechanical_fallback()
 
-        assert ctx._running_token_estimate <= conversation_target, (
-            f"Expected _running_token_estimate <= {conversation_target} "
-            f"(prefix-adjusted target), but got {ctx._running_token_estimate}. "
+        # Check the message-based tokens (excluding the mechanical marker tier) are
+        # at or below the prefix-adjusted target.  _running_token_estimate now includes
+        # the marker's tokens, so we verify compaction correctness via the message list
+        # directly.
+        msg_tokens_after = ctx._estimate_tokens(ctx._messages)
+        assert msg_tokens_after <= conversation_target, (
+            f"Expected message tokens <= {conversation_target} "
+            f"(prefix-adjusted target), but got {msg_tokens_after}. "
             "Without the fix the fallback would stop at target_tokens=100, leaving "
             "total context at 160 — still over budget."
         )
@@ -386,9 +391,12 @@ class TestEmergencyFallbackPrefixAdjustedTarget:
 
         await ctx._emergency_mechanical_fallback()
 
-        assert ctx._running_token_estimate <= legacy_target, (
+        # Check the message-based tokens (excluding the mechanical marker tier) are
+        # at or below the target.  _running_token_estimate now includes the marker.
+        msg_tokens_after = ctx._estimate_tokens(ctx._messages)
+        assert msg_tokens_after <= legacy_target, (
             f"With zero prefix, fallback must behave exactly as before "
-            f"(stop at {legacy_target}), got {ctx._running_token_estimate}."
+            f"(stop at {legacy_target}), got {msg_tokens_after}."
         )
 
     @pytest.mark.asyncio

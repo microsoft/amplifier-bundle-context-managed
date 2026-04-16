@@ -536,3 +536,159 @@ class TestGetMessagesHardBudgetGate:
             f"Regression: get_messages_for_request returned {actual} tokens "
             f"against a budget of 300 (session-944d882e overshoot fix)"
         )
+
+
+# ---------------------------------------------------------------------------
+# _inline_compact — compaction notice (Step 3)
+# ---------------------------------------------------------------------------
+
+
+class TestInlineCompactNotice:
+    """Verify the ephemeral compaction notice inserted when messages are removed.
+
+    When Step 2 removes messages, _inline_compact() inserts a system message with
+    metadata.source='inline_compact' so the model knows a context gap exists and
+    can use read_transcript to retrieve details.  The notice lives only in the
+    assembled view — self._messages is not mutated.
+    """
+
+    @pytest.mark.asyncio
+    async def test_notice_inserted_when_messages_removed(self):
+        """_inline_compact() inserts a notice when Step 2 removes messages."""
+        ctx = ManagedContextManager(max_tokens=100, emergency_target_usage=0.50)
+        msgs = [
+            _make_msg("system", "sys"),
+            _make_msg("user", "A" * 2000),
+            _make_msg("user", "latest"),  # last user — protected
+        ]
+        result = await ctx._inline_compact(msgs, budget=100)
+
+        notices = [
+            m
+            for m in result
+            if (m.get("metadata") or {}).get("source") == "inline_compact"
+        ]
+        assert len(notices) >= 1
+
+    @pytest.mark.asyncio
+    async def test_notice_metadata_source_and_type(self):
+        """The compaction notice has metadata.source='inline_compact' and type='compaction_notice'."""
+        ctx = ManagedContextManager(max_tokens=100, emergency_target_usage=0.50)
+        msgs = [
+            _make_msg("user", "B" * 2000),
+            _make_msg("user", "latest"),
+        ]
+        result = await ctx._inline_compact(msgs, budget=100)
+
+        notices = [
+            m
+            for m in result
+            if (m.get("metadata") or {}).get("source") == "inline_compact"
+        ]
+        if notices:
+            assert notices[0]["metadata"]["type"] == "compaction_notice"
+            assert notices[0]["role"] == "system"
+
+    @pytest.mark.asyncio
+    async def test_notice_not_inserted_when_no_messages_removed(self):
+        """No notice is inserted when _inline_compact() removes no messages."""
+        ctx = ManagedContextManager(max_tokens=100_000, emergency_target_usage=0.50)
+        msgs = [
+            _make_msg("system", "sys"),
+            _make_msg("user", "short message"),
+            _make_msg("user", "latest"),
+        ]
+        # Very large budget — nothing gets removed
+        result = await ctx._inline_compact(msgs, budget=100_000)
+
+        notices = [
+            m
+            for m in result
+            if (m.get("metadata") or {}).get("source") == "inline_compact"
+        ]
+        assert len(notices) == 0
+
+    @pytest.mark.asyncio
+    async def test_notice_content_mentions_removed_count(self):
+        """The compaction notice content mentions how many messages were removed."""
+        ctx = ManagedContextManager(max_tokens=100, emergency_target_usage=0.50)
+        msgs = [
+            _make_msg("system", "sys"),
+            _make_msg("user", "C" * 2000),
+            _make_msg("user", "latest"),
+        ]
+        result = await ctx._inline_compact(msgs, budget=100)
+
+        notices = [
+            m
+            for m in result
+            if (m.get("metadata") or {}).get("source") == "inline_compact"
+        ]
+        if notices:
+            content = notices[0]["content"]
+            assert "message" in content.lower()
+
+    @pytest.mark.asyncio
+    async def test_notice_includes_read_transcript_pointer(self):
+        """The compaction notice mentions read_transcript so the model knows how to recover."""
+        ctx = ManagedContextManager(max_tokens=100, emergency_target_usage=0.50)
+        msgs = [
+            _make_msg("user", "D" * 2000),
+            _make_msg("user", "latest"),
+        ]
+        result = await ctx._inline_compact(msgs, budget=100)
+
+        notices = [
+            m
+            for m in result
+            if (m.get("metadata") or {}).get("source") == "inline_compact"
+        ]
+        if notices:
+            assert "read_transcript" in notices[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_notice_inserted_after_system_messages(self):
+        """The compaction notice appears after leading system messages, before conversation."""
+        ctx = ManagedContextManager(max_tokens=100, emergency_target_usage=0.50)
+        msgs = [
+            _make_msg("system", "system prompt"),
+            _make_msg("user", "E" * 2000),
+            _make_msg("user", "latest"),
+        ]
+        result = await ctx._inline_compact(msgs, budget=100)
+
+        notices = [
+            (i, m)
+            for i, m in enumerate(result)
+            if (m.get("metadata") or {}).get("source") == "inline_compact"
+        ]
+        if notices:
+            notice_idx, _ = notices[0]
+            # Find the first non-notice system message
+            non_notice_system_idx = next(
+                (
+                    i
+                    for i, m in enumerate(result)
+                    if m.get("role") == "system"
+                    and (m.get("metadata") or {}).get("source") != "inline_compact"
+                ),
+                None,
+            )
+            if non_notice_system_idx is not None:
+                assert notice_idx > non_notice_system_idx
+
+    @pytest.mark.asyncio
+    async def test_notice_does_not_mutate_self_messages(self):
+        """The compaction notice lives only in the assembled view; self._messages is untouched."""
+        ctx = ManagedContextManager(max_tokens=100, emergency_target_usage=0.50)
+        ctx._messages = [
+            _make_msg("user", "F" * 2000),
+            _make_msg("user", "latest"),
+        ]
+        ctx._running_token_estimate = ctx._estimate_tokens(ctx._messages)
+        snapshot = list(ctx._messages)
+
+        msgs = list(ctx._messages)
+        await ctx._inline_compact(msgs, budget=100)
+
+        assert ctx._messages == snapshot

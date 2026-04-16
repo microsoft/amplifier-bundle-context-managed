@@ -1301,8 +1301,11 @@ class TestEmergencyFallback:
 
     @pytest.mark.asyncio
     async def test_fallback_reduces_token_estimate(self):
-        """_emergency_mechanical_fallback() reduces _running_token_estimate
-        by removing non-protected messages.
+        """_emergency_mechanical_fallback() removes messages and reduces message-based tokens.
+
+        After the fallback, some messages are removed to reach the conversation target.
+        _running_token_estimate is then updated with the marker's tokens added back in,
+        so we verify compaction correctness by checking the remaining messages directly.
         """
         from amplifier_module_context_managed import ManagedContextManager
 
@@ -1318,6 +1321,7 @@ class TestEmergencyFallback:
             {"role": "assistant", "content": "B" * 200},
             {"role": "user", "content": "C" * 200},
         ]
+        initial_msg_count = len(mgr._messages)
         initial_estimate = mgr._estimate_tokens(mgr._messages)
         mgr._running_token_estimate = initial_estimate
         mgr._summarization_failures = 1
@@ -1331,7 +1335,18 @@ class TestEmergencyFallback:
 
         await mgr._emergency_mechanical_fallback()
 
-        assert mgr._running_token_estimate < initial_estimate
+        # The fallback must have removed at least one message
+        assert len(mgr._messages) < initial_msg_count, (
+            "Expected at least one message to be removed by the fallback"
+        )
+        # The message-based tokens (excluding the mechanical summary marker) must
+        # be at or below the target.  _running_token_estimate now includes the
+        # marker tokens, so we check the message list directly.
+        msg_tokens = mgr._estimate_tokens(mgr._messages)
+        assert msg_tokens <= target_tokens, (
+            f"Expected message tokens <= {target_tokens} after fallback, "
+            f"but got {msg_tokens}"
+        )
 
     @pytest.mark.asyncio
     async def test_fallback_does_not_fire_below_failure_threshold(self):
@@ -1756,6 +1771,156 @@ class TestEmergencyFallbackOffsetTracking:
         # No removable messages → offset unchanged, messages unchanged
         assert mgr._transcript_message_offset == 5
         assert len(mgr._messages) == 2
+
+
+class TestEmergencyFallbackMarker:
+    """Tests for the mechanical summary marker inserted when emergency fallback removes messages.
+
+    When _emergency_mechanical_fallback() removes messages from self._messages, it now
+    inserts a SummaryTier with compression_passes=0 so the model knows what happened
+    and can use read_transcript to retrieve details.  This prevents hallucination and
+    repeated work when the model's context window suddenly has a gap.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fallback_inserts_summary_tier_with_compression_passes_zero(self):
+        """Emergency fallback inserts a SummaryTier with compression_passes=0."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(max_tokens=1000, emergency_target_usage=0.10)
+        mgr._messages = [
+            {"role": "user", "content": "A" * 300},
+            {"role": "assistant", "content": "B" * 300},
+            {"role": "user", "content": "C" * 300},
+        ]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+
+        assert len(mgr._summary_tiers) == 0
+        await mgr._emergency_mechanical_fallback()
+
+        assert len(mgr._summary_tiers) == 1
+        tier = mgr._summary_tiers[0]
+        assert tier.compression_passes == 0
+
+    @pytest.mark.asyncio
+    async def test_fallback_marker_includes_user_topic_previews(self):
+        """Emergency fallback marker content includes previews of user messages."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        user_content = "Tell me about the authentication module in detail"
+        mgr = ManagedContextManager(max_tokens=1000, emergency_target_usage=0.10)
+        mgr._messages = [
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": "B" * 300},
+        ]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+
+        await mgr._emergency_mechanical_fallback()
+
+        assert len(mgr._summary_tiers) >= 1
+        marker_content = mgr._summary_tiers[0].content
+        # Either the user content preview or a "User topics" section header should appear
+        assert user_content[:100] in marker_content or "User topics" in marker_content
+
+    @pytest.mark.asyncio
+    async def test_fallback_marker_includes_read_transcript_pointer(self):
+        """Emergency fallback marker content includes the read_transcript pointer."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(max_tokens=1000, emergency_target_usage=0.10)
+        mgr._messages = [
+            {"role": "user", "content": "A" * 300},
+            {"role": "assistant", "content": "B" * 300},
+        ]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+
+        await mgr._emergency_mechanical_fallback()
+
+        assert len(mgr._summary_tiers) >= 1
+        marker_content = mgr._summary_tiers[0].content
+        assert "read_transcript" in marker_content
+
+    @pytest.mark.asyncio
+    async def test_fallback_marker_persisted_via_persist_summary_marker(self, tmp_path):
+        """Emergency fallback calls _persist_summary_marker() with the mechanical tier."""
+        from unittest.mock import patch
+
+        from amplifier_module_context_managed import ManagedContextManager, SummaryTier
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_target_usage=0.10,
+            session_dir=tmp_path,
+        )
+        mgr._messages = [
+            {"role": "user", "content": "A" * 300},
+            {"role": "assistant", "content": "B" * 300},
+        ]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+
+        persisted_tiers: list[SummaryTier] = []
+
+        def capture_persist(tier: SummaryTier) -> None:
+            persisted_tiers.append(tier)
+
+        with patch.object(mgr, "_persist_summary_marker", side_effect=capture_persist):
+            await mgr._emergency_mechanical_fallback()
+
+        assert len(persisted_tiers) == 1
+        assert persisted_tiers[0].compression_passes == 0
+
+    @pytest.mark.asyncio
+    async def test_fallback_no_marker_when_no_messages_removed(self):
+        """No SummaryTier is inserted when the emergency fallback removes no messages."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_target_usage=0.90,  # Very high target — no removal needed
+        )
+        mgr._messages = [{"role": "user", "content": "hello"}]
+        mgr._running_token_estimate = 1  # Well below any reasonable target
+
+        await mgr._emergency_mechanical_fallback()
+
+        assert len(mgr._summary_tiers) == 0
+
+    @pytest.mark.asyncio
+    async def test_fallback_marker_running_token_estimate_includes_marker(self):
+        """After emergency fallback, _running_token_estimate includes the marker's tokens."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(max_tokens=1000, emergency_target_usage=0.10)
+        mgr._messages = [
+            {"role": "user", "content": "A" * 300},
+            {"role": "assistant", "content": "B" * 300},
+        ]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+
+        await mgr._emergency_mechanical_fallback()
+
+        assert len(mgr._summary_tiers) == 1
+        tier = mgr._summary_tiers[0]
+        # Running estimate must be at least the marker's own token count
+        assert mgr._running_token_estimate >= tier.token_estimate
+
+    @pytest.mark.asyncio
+    async def test_fallback_marker_advances_summarized_through_turn(self):
+        """After inserting the mechanical marker, _summarized_through_turn advances."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(max_tokens=1000, emergency_target_usage=0.10)
+        mgr._summarized_through_turn = 5  # Already summarized through turn 5
+        mgr._messages = [
+            {"role": "user", "content": "A" * 300},
+            {"role": "user", "content": "B" * 300},
+        ]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+
+        await mgr._emergency_mechanical_fallback()
+
+        # With 2 user messages, turn_end = 5 + 2 = 7
+        assert mgr._summarized_through_turn > 5
 
 
 class TestSummaryPersistence:
