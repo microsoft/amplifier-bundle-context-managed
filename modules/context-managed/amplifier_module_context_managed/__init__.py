@@ -1277,6 +1277,7 @@ class ManagedContextManager:
             self._running_token_estimate -= old_tokens - new_tokens
 
         # Step 2: Remove oldest non-protected messages
+        original_count = len(self._messages)
         while self._running_token_estimate > conversation_target:
             removable_idx = None
             for i, msg in enumerate(self._messages):
@@ -1287,6 +1288,29 @@ class ManagedContextManager:
                 break  # Only protected messages remain
             removed = self._messages.pop(removable_idx)
             self._running_token_estimate -= self._estimate_tokens_single(removed)
+
+        # Update transcript offset by the number of messages removed.  Without
+        # this, any pending summary that was computed before the fallback will
+        # have abs_start = (old_offset + local_start).  When the swap later
+        # attempts start_local = abs_start - current_offset it gets 0 or a
+        # negative number even though offset_drift == 0, because the offset
+        # was never incremented to reflect the messages that were popped here.
+        removed_count = original_count - len(self._messages)
+        if removed_count > 0:
+            self._transcript_message_offset += removed_count
+
+        # Invalidate any pending summary: the messages it was summarizing may
+        # have been truncated (Step 1) or removed (Step 2) by this fallback,
+        # making its stored boundary stale regardless of whether offset_drift
+        # is zero.  A fresh summarization cycle will be triggered on the next
+        # _check_summarization_trigger() call.
+        if self._pending_summary is not None:
+            logger.info(
+                "Invalidating pending summary after emergency fallback: "
+                "messages were modified or removed (removed_count=%d)",
+                removed_count,
+            )
+            self._pending_summary = None
 
     def _is_protected_message(self, msg: dict[str, Any]) -> bool:
         """Return True if a message should not be removed during emergency compaction.

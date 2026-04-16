@@ -1551,6 +1551,213 @@ class TestEmergencyFallback:
         assert updated_content == "X" * 500 + "\n\n[truncated by emergency compaction]"
 
 
+class TestEmergencyFallbackOffsetTracking:
+    """Tests for the session-d8226471 fix: emergency fallback updates _transcript_message_offset
+    and invalidates _pending_summary.
+
+    Root cause: _emergency_mechanical_fallback() removed messages from self._messages via pop()
+    but never updated _transcript_message_offset.  When a pending summary (computed before the
+    fallback) later tried to swap, offset_drift was 0 (the offset hadn't changed), but the
+    local boundary indices were wrong because the messages they referenced had been removed.
+
+    Fix: after Step 2 removal, increment _transcript_message_offset by removed_count; also
+    clear _pending_summary so the stale boundary is never attempted.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fallback_updates_transcript_message_offset(self):
+        """_emergency_mechanical_fallback() increments _transcript_message_offset by the
+        number of messages removed from self._messages in Step 2.
+        """
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_target_usage=0.10,  # very low → forces aggressive removal
+        )
+        # 4 removable messages; give them enough tokens that removal is triggered
+        mgr._messages = [
+            {"role": "user", "content": "A" * 200},
+            {"role": "assistant", "content": "B" * 200},
+            {"role": "user", "content": "C" * 200},
+            {"role": "assistant", "content": "D" * 200},
+        ]
+        initial_count = len(mgr._messages)
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+        mgr._transcript_message_offset = 10  # Simulate a prior swap having already run
+
+        await mgr._emergency_mechanical_fallback()
+
+        removed_count = initial_count - len(mgr._messages)
+        # Offset must have advanced by exactly the number removed
+        assert removed_count > 0, (
+            "Test precondition: fallback must have removed at least 1 message"
+        )
+        assert mgr._transcript_message_offset == 10 + removed_count
+
+    @pytest.mark.asyncio
+    async def test_fallback_offset_zero_removal_no_change(self):
+        """_emergency_mechanical_fallback() does NOT change _transcript_message_offset when
+        no messages are removed (e.g., only protected messages remain or already at target).
+        """
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_target_usage=0.90,  # very high target → no removal needed
+        )
+        # Running estimate well below target → Step 2 loop never fires
+        mgr._messages = [
+            {"role": "user", "content": "hello"},
+        ]
+        mgr._running_token_estimate = 1  # Already below any reasonable target
+        mgr._transcript_message_offset = 7
+
+        await mgr._emergency_mechanical_fallback()
+
+        # No messages removed → offset unchanged
+        assert mgr._transcript_message_offset == 7
+
+    @pytest.mark.asyncio
+    async def test_fallback_invalidates_pending_summary(self):
+        """_emergency_mechanical_fallback() sets _pending_summary to None when one exists.
+
+        This is the core guard against the 'start_local=-52, end_local=0' invalid
+        boundary: even if offset_drift is 0 (because the prior fix didn't catch it),
+        the pending summary is invalidated before the swap is ever attempted.
+        """
+        from amplifier_module_context_managed import (
+            ManagedContextManager,
+            SummaryResult,
+        )
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_target_usage=0.10,
+        )
+        mgr._messages = [
+            {"role": "user", "content": "A" * 200},
+            {"role": "assistant", "content": "B" * 200},
+            {"role": "user", "content": "C" * 200},
+        ]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+        mgr._transcript_message_offset = 0
+
+        # Simulate a pending summary that was computed at offset 0
+        mgr._pending_summary = SummaryResult(
+            summary_text="pending summary",
+            turn_range=(1, 2),
+            source_message_range=(0, 45),
+            offset_at_creation=0,
+        )
+
+        await mgr._emergency_mechanical_fallback()
+
+        # Pending summary must be cleared
+        assert mgr._pending_summary is None
+
+    @pytest.mark.asyncio
+    async def test_fallback_no_pending_summary_leaves_it_none(self):
+        """_emergency_mechanical_fallback() does not crash when _pending_summary is already None."""
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_target_usage=0.10,
+        )
+        mgr._messages = [
+            {"role": "user", "content": "A" * 200},
+        ]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+        assert mgr._pending_summary is None  # already None
+
+        await mgr._emergency_mechanical_fallback()
+
+        # Still None, no error
+        assert mgr._pending_summary is None
+
+    @pytest.mark.asyncio
+    async def test_fallback_offset_update_prevents_stale_boundary(self):
+        """After emergency fallback, a subsequently computed summary has valid local indices.
+
+        Regression scenario from session d8226471:
+          1. _transcript_message_offset = 0, messages=[0..54] (55 messages)
+          2. Emergency fallback removes 52 messages, does NOT update offset → offset stays 0
+          3. New summary triggered with boundary (0, N) → abs_range = (0, N), offset_at_creation=0
+          4. get_messages_for_request() swap: start_local = 0 - 0 = 0 (correct)
+             … but old code left offset=0 even after removing 52, so messages[0] is now
+             what was messages[52] — any boundary referencing old abs indices is wrong.
+
+        With the fix: after fallback removes 52 messages, offset=52.  A new summary
+        triggered after that will compute abs_start = 52+0 = 52, offset_at_creation=52.
+        The swap will correctly get start_local = 52-52 = 0.
+        """
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_target_usage=0.10,
+        )
+        # Start with many messages so fallback removes a meaningful chunk
+        n_messages = 10
+        mgr._messages = [
+            {"role": "user", "content": f"msg {i} " + "X" * 50}
+            for i in range(n_messages)
+        ]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+        initial_offset = 0
+        mgr._transcript_message_offset = initial_offset
+
+        await mgr._emergency_mechanical_fallback()
+
+        removed = n_messages - len(mgr._messages)
+        new_offset = mgr._transcript_message_offset
+        assert new_offset == initial_offset + removed, (
+            f"Offset should be {initial_offset + removed}, got {new_offset}"
+        )
+
+        # Simulate the subsequent summarization computing a new boundary
+        # with the updated offset — local indices should be non-negative
+        remaining = len(mgr._messages)
+        if remaining > 0:
+            # A new boundary starting at local 0 should produce abs = new_offset + 0 = new_offset
+            # and when swapped: start_local = new_offset - new_offset = 0  (valid)
+            simulated_abs_start = new_offset + 0
+            start_local = simulated_abs_start - mgr._transcript_message_offset
+            assert start_local >= 0, (
+                f"start_local would be {start_local} (negative = invalid boundary)"
+            )
+
+    @pytest.mark.asyncio
+    async def test_fallback_with_only_protected_messages_offset_unchanged(self):
+        """_emergency_mechanical_fallback() does not change offset when only protected
+        messages remain (no messages are removed in Step 2).
+        """
+        from amplifier_module_context_managed import ManagedContextManager
+
+        mgr = ManagedContextManager(
+            max_tokens=1000,
+            emergency_target_usage=0.10,  # aggressive target
+        )
+        # All messages are protected
+        mgr._messages = [
+            {"role": "system", "content": "System prompt " + "X" * 200},
+            {
+                "role": "user",
+                "content": "Hook injected",
+                "metadata": {"source": "hook"},
+            },
+        ]
+        mgr._running_token_estimate = mgr._estimate_tokens(mgr._messages)
+        mgr._transcript_message_offset = 5
+
+        await mgr._emergency_mechanical_fallback()
+
+        # No removable messages → offset unchanged, messages unchanged
+        assert mgr._transcript_message_offset == 5
+        assert len(mgr._messages) == 2
+
+
 class TestSummaryPersistence:
     """Tests for summary marker persistence to transcript (task-11)."""
 
