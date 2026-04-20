@@ -11,7 +11,7 @@
 
 ## Project Status
 
-**EXPERIMENTAL EXPLORATION**
+**⚠️ EXPERIMENTAL EXPLORATION**
 
 This is experimental software shared openly but without any support infrastructure. See [README.md](README.md) for project details and warnings about using permissive AI tools.
 

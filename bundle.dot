@@ -1,0 +1,101 @@
+// Smart memory management for AI conversations: rolling LLM summaries, persistent transcripts, and budget-aware context tracking.
+digraph context_managed {
+    rankdir=LR
+    fontname="Helvetica"
+    fontsize=12
+    label="Smart Memory for AI Conversations\ncontext-managed v0.1.0"
+    labelloc=t
+    labeljust=c
+    nodesep=0.6
+    ranksep=0.7
+    bgcolor="white"
+    source_hash="3f5ae256210931a884c59d5e0df7e7e647f9ceea3e0f4a6c58086b2fcf9877e0"
+
+    node [fontname="Helvetica", fontsize=11, style="filled,rounded"]
+    edge [fontname="Helvetica", fontsize=9]
+
+    root_context_managed [label="Smart Memory for AI Conversations\ncontext-managed v0.1.0\n5 tools · 11 agents\n~1625 tok aggregate", shape=box, fillcolor="#80cbc4", style="filled,rounded,bold", penwidth=2]
+
+    subgraph cluster_modules {
+        label="Built-in Modules"
+        style="filled"
+        fillcolor="#f9f9f9"
+        color="#999999"
+
+        mod_context_managed [label="Memory & Summarization Engine\ncontext-managed", shape=box, fillcolor="#bbdefb", style="filled,rounded"]
+        mod_tool_transcript [label="Conversation History Lookup\ntool-transcript\n1 tool · ~89 tok", shape=box, fillcolor="#bbdefb", style="filled,rounded"]
+    }
+
+    subgraph cluster_context {
+        label="Shared Instructions"
+        style="filled"
+        fillcolor="#f9f9f9"
+        color="#999999"
+
+        ctx_summary_instructions_md [label="How to Use Summaries\nsummary-instructions.md\n~302 tok", shape=box, fillcolor="#e1bee7", style="filled,rounded"]
+    }
+
+    subgraph cluster_legend {
+        label="Legend"
+        style="filled"
+        fillcolor="white"
+        color="#cccccc"
+        fontsize=9
+
+        leg_root [label="Main Package", shape=box, fillcolor="#80cbc4", style="filled,rounded,bold", fontsize=9]
+        leg_behavior [label="Behavior Rule", shape=box, fillcolor="#e0f2f1", style="filled,rounded", fontsize=9]
+        leg_agent [label="Specialist Agent", shape=box, fillcolor="#c8e6c9", style="filled,rounded", fontsize=9]
+        leg_module [label="Reusable Module", shape=box, fillcolor="#bbdefb", style="filled,rounded", fontsize=9]
+        leg_provider [label="Service Provider", shape=box, fillcolor="#e0e0e0", style="filled,rounded", fontsize=9]
+        leg_context [label="Instruction File", shape=box, fillcolor="#e1bee7", style="filled,rounded", fontsize=9]
+        leg_standalone [label="Standalone Package", shape=box, fillcolor="#80cbc4", style="filled,rounded", fontsize=9]
+        leg_experiment [label="Experiment", shape=box, fillcolor="#e1bee7", style="filled,rounded", fontsize=9]
+        leg_ext_cost [label="External (adds cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2, fontsize=9]
+        leg_ext_muted [label="External (free)", shape=box, fillcolor="#f5f5f5", style="dashed", fontsize=9]
+    }
+
+    disclaimer [label="Solid border = local (counted in totals)\nDashed red = from another repo (hidden cost)\nDashed gray = from another repo (free)\n~4 chars per token estimate", shape=note, fillcolor="#eceff1", style="filled", fontsize=9]
+
+    ext_githttps___github_com_microsoft_amplifier_mainsubdirectorybehaviors_amplifier_expert_yaml [label="Amplifier Platform Knowledge\namplifier-expert.yaml\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_core_mainsubdirectorybehaviors_core_expert_yaml [label="Core Framework Knowledge\ncore-expert.yaml\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_foundation_behaviors_foundation_expert [label="Foundation Platform Knowledge\nfoundation-expert\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_foundation_behaviors_sessions [label="Session Lifecycle Management\nsessions\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_foundation_behaviors_status_context [label="Environment Awareness\nstatus-context\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_foundation_behaviors_redaction [label="Sensitive Data Protection\nredaction\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_foundation_behaviors_todo_reminder [label="Task Tracking Reminders\ntodo-reminder\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_foundation_behaviors_streaming_ui [label="Real-time Output Display\nstreaming-ui\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_foundation_behaviors_agents [label="Agent Delegation & Orchestration\nagents\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_bundle_recipes_mainsubdirectorybehaviors_recipes_yaml [label="Multi-step Workflow Automation\nrecipes.yaml\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_bundle_design_intelligence_mainsubdirectorybehaviors_design_intelligence_yaml [label="Design & Architecture Guidance\ndesign-intelligence.yaml\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_bundle_python_dev_main [label="Python Development Toolkit\namplifier-bundle-python-dev\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_bundle_shadow_main [label="Background Quality Monitoring\namplifier-bundle-shadow\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_bundle_skills_mainsubdirectorybehaviors_skills_yaml [label="Reusable Knowledge Library\nskills.yaml\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_bundle_browser_tester_mainsubdirectorybehaviors_browser_tester_yaml [label="Browser Testing Automation\nbrowser-tester.yaml\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_bundle_superpowers_mainsubdirectorybehaviors_superpowers_methodology_yaml [label="Advanced Problem-Solving Methods\nsuperpowers-methodology.yaml\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_module_hook_shell_mainsubdirectorybehaviors_hook_shell_yaml [label="Shell Command Hooks\nhook-shell.yaml\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_module_tool_mcp_mainsubdirectorybehaviors_mcp_yaml [label="External Tool Connections (MCP)\nmcp.yaml\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_bundle_filesystem_mainsubdirectorybehaviors_apply_patch_yaml [label="File Editing & Patching\napply-patch.yaml\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_bundle_routing_matrix_main [label="AI Model Selection & Routing\namplifier-bundle-routing-matrix\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_mainsubdirectorybehaviors_amplifier_expert_yaml [style=dashed]
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_core_mainsubdirectorybehaviors_core_expert_yaml [style=dashed]
+    root_context_managed -> ext_foundation_behaviors_foundation_expert [style=dashed]
+    root_context_managed -> ext_foundation_behaviors_sessions [style=dashed]
+    root_context_managed -> ext_foundation_behaviors_status_context [style=dashed]
+    root_context_managed -> ext_foundation_behaviors_redaction [style=dashed]
+    root_context_managed -> ext_foundation_behaviors_todo_reminder [style=dashed]
+    root_context_managed -> ext_foundation_behaviors_streaming_ui [style=dashed]
+    root_context_managed -> ext_foundation_behaviors_agents [style=dashed]
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_bundle_recipes_mainsubdirectorybehaviors_recipes_yaml [style=dashed]
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_bundle_design_intelligence_mainsubdirectorybehaviors_design_intelligence_yaml [style=dashed]
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_bundle_python_dev_main [style=dashed]
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_bundle_shadow_main [style=dashed]
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_bundle_skills_mainsubdirectorybehaviors_skills_yaml [style=dashed]
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_bundle_browser_tester_mainsubdirectorybehaviors_browser_tester_yaml [style=dashed]
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_bundle_superpowers_mainsubdirectorybehaviors_superpowers_methodology_yaml [style=dashed]
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_module_hook_shell_mainsubdirectorybehaviors_hook_shell_yaml [style=dashed]
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_module_tool_mcp_mainsubdirectorybehaviors_mcp_yaml [style=dashed]
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_bundle_filesystem_mainsubdirectorybehaviors_apply_patch_yaml [style=dashed]
+    root_context_managed -> ext_githttps___github_com_microsoft_amplifier_bundle_routing_matrix_main [style=dashed]
+    root_context_managed -> ctx_summary_instructions_md [style=dotted, color=purple]
+}
