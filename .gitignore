@@ -2,10 +2,13 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.ruff_cache/
 *.egg-info/
 dist/
 build/
 .venv/
 uv.lock
 .uv/
+.DS_Store
+._*
 amplifier-bundle-context-managed/
