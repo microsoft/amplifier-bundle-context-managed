@@ -36,6 +36,11 @@ class BoundaryContextManager:
         self.last_budget = {}
         self.active_operations = None
         self.summary_provider = None
+        self.checkpoint_identity = None
+        self.preserve_evidence = None
+        self.summary_identity = None
+        self.evidence_refs = []
+        self.checkpoint_status = {"status": "empty"}
 
     async def add_message(self, message):
         self.messages.append(copy.deepcopy(message))
@@ -50,6 +55,21 @@ class BoundaryContextManager:
         self.messages = copy.deepcopy(messages)
         self.revision += 1
         self.summary = None
+        self.summary_identity = None
+        self.evidence_refs = []
+        self.checkpoint_status = {"status": "invalidated", "reason": "Canonical history was replaced.", "originalsAvailable": True}
+
+    def checkpoint_configuration(self):
+        from .checkpoint import digest
+        return digest({"config": self.config, "prompt": SUMMARY_PROMPT})
+
+    def export_checkpoint(self, identity):
+        from .checkpoint import export_checkpoint
+        return export_checkpoint(self, identity)
+
+    def restore_checkpoint(self, record, identity):
+        from .checkpoint import restore_checkpoint
+        return restore_checkpoint(self, record, identity)
 
     async def clear(self):
         await self.set_messages([])
@@ -120,6 +140,14 @@ class BoundaryContextManager:
 
     async def _prepare(self, provider, token_budget, retain):
         messages, revision = copy.deepcopy(self.messages), self.revision
+        # An opted-in host commits originals before any fitted view can clip
+        # tool output. References point to its existing evidence/transcript store.
+        if self.config.get("durable_checkpoints") and self.preserve_evidence:
+            self.evidence_refs = await self.preserve_evidence(copy.deepcopy(messages))
+        identity = self.checkpoint_identity() if self.checkpoint_identity else None
+        if self.summary and self.config.get("durable_checkpoints") and self.summary_identity != identity:
+            self.summary = None
+            self.checkpoint_status = {"status": "stale", "reason": "Provider/model identity changed.", "originalsAvailable": True}
         fitter = self._fitter()
         if self.summary and any(isinstance(row.get("content"), str) and row["content"] in retain
                                 for row in messages[:self.summary[0]]):
@@ -159,6 +187,8 @@ class BoundaryContextManager:
                 if fitter._estimate_tokens(candidate) >= fitter._estimate_tokens(assembled):
                     raise ValueError("Compaction did not reduce the request")
                 self.summary = (end, text)
+                self.summary_identity = copy.deepcopy(identity)
+                self.checkpoint_status = {"status": "ready", "throughMessage": end, "originalsAvailable": True}
                 assembled, outcome = candidate, "completed"
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -217,6 +247,17 @@ async def mount_boundary(coordinator, config):
         getter = coordinator.get_capability("context.active_operations")
         return getter() if callable(getter) else None
     context.active_operations = operations
+    if config.get("durable_checkpoints"):
+        context.checkpoint_identity = lambda: (coordinator.get_capability("context.checkpoint_identity") or (lambda: None))()
+        async def preserve(messages):
+            callback = coordinator.get_capability("context.preserve_evidence")
+            if callback is None:
+                raise RuntimeError("Durable checkpoints require a host context.preserve_evidence callback before request fitting")
+            return await callback(messages)
+        context.preserve_evidence = preserve
+        coordinator.register_capability("context.checkpoint.export", context.export_checkpoint)
+        coordinator.register_capability("context.checkpoint.restore", context.restore_checkpoint)
+        coordinator.register_capability("context.checkpoint.status", lambda: copy.deepcopy(context.checkpoint_status))
     # Hosts may provide an isolated utility provider without coupling this module
     # to provider SDKs. Resolve lazily because providers mount after context.
     if config.get("separate_summary_provider"):
