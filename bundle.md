@@ -1,6 +1,7 @@
 ---
 bundle:
   name: context-managed
+  display_name: Context Managed
   version: 0.1.0
   description: |
     Foundation bundle with LLM-powered rolling context summarization.
