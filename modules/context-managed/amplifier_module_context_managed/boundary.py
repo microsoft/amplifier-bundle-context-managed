@@ -73,7 +73,10 @@ class BoundaryContextManager:
 
     @staticmethod
     def _human(message):
-        return message.get("role") == "user" and not (message.get("metadata") or {}).get("ephemeral")
+        metadata = message.get("metadata") or {}
+        origin = metadata.get("amplifier_input") or {}
+        service = isinstance(origin, dict) and origin.get("version") == 1 and origin.get("kind") == "service"
+        return message.get("role") == "user" and not metadata.get("ephemeral") and not service
 
     def _boundary(self, messages, retain):
         turns = [i for i, row in enumerate(messages) if self._human(row)]

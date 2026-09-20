@@ -274,3 +274,17 @@ async def test_reads_host_canonical_history_without_transcript_file():
     result = await tool.execute({"search": "original"})
     assert result.success
     assert "Exact original answer" in result.output
+
+
+@pytest.mark.asyncio
+async def test_host_history_groups_service_report_in_its_existing_human_turn():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    capabilities = {"context.history_authority": "host", "context.history": AsyncMock(return_value=[
+        {"role": "user", "content": "Task"},
+        {"role": "user", "content": "Worker observation", "metadata": {"amplifier_input": {
+            "version": 1, "kind": "service", "source": "worker", "id": "report"}}},
+        {"role": "assistant", "content": "Verified answer"}])}
+    result = await ReadTranscriptTool(SimpleNamespace(get_capability=capabilities.get)).execute({"start_turn": 1, "end_turn": 1})
+    assert result.success and "Verified answer" in result.output
+    assert "Turn 2" not in result.output

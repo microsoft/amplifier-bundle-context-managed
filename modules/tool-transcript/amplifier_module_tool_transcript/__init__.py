@@ -106,7 +106,10 @@ class ReadTranscriptTool:
         if self._coordinator.get_capability("context.history_authority") == "host" and callable(history):
             turns = []
             for message in await history():
-                if message.get("role") == "user" and not (message.get("metadata") or {}).get("ephemeral"):
+                metadata = message.get("metadata") or {}
+                origin = metadata.get("amplifier_input") or {}
+                service = isinstance(origin, dict) and origin.get("version") == 1 and origin.get("kind") == "service"
+                if message.get("role") == "user" and not metadata.get("ephemeral") and not service:
                     turns.append([])
                 if turns:
                     turns[-1].append(message)

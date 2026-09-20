@@ -14,6 +14,16 @@ def conversation():
         ("user", "Use the revised requirement")]]
 
 
+def test_structured_service_observations_do_not_become_human_turn_boundaries():
+    context = BoundaryContextManager()
+    observation = {"role": "user", "content": "External observation: result", "metadata": {
+        "amplifier_input": {"version": 1, "kind": "service", "source": "worker", "id": "report"}}}
+    assert not context._human(observation)
+    # A user quoting the same text remains a human input; text is not provenance.
+    assert context._human({"role": "user", "content": observation["content"]})
+    assert context._boundary([{"role": "user", "content": "Original task"}, observation, observation], []) == 0
+
+
 def provider(complete=None):
     response = SimpleNamespace(content=[SimpleNamespace(type="text", text="Objective: report. Keep local files. Earlier research complete.")])
     return SimpleNamespace(complete=complete or AsyncMock(return_value=response))
