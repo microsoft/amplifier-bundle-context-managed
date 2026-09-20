@@ -7,6 +7,20 @@ import pytest
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode, measured", [("actual", True), ("estimate", False)])
+async def test_mount_advertises_provider_count_only_in_actual_mode(mode, measured):
+    from amplifier_module_context_managed.boundary import mount_boundary
+    capabilities = {}
+    coordinator = SimpleNamespace(mount=AsyncMock(), hooks=None,
+        get_capability=capabilities.get,
+        register_capability=lambda name, value: capabilities.__setitem__(name, value),
+        register_contributor=lambda *args: None)
+    await mount_boundary(coordinator, {"token_meter": mode})
+    assert ("context.measured_request_view" in capabilities) is measured
+    assert callable(capabilities["context.request_retention"])
+
+
 def conversation():
     return [{"role": role, "content": text} for role, text in [
         ("user", "Build a report"), ("assistant", "Evidence from earlier research. " * 500),

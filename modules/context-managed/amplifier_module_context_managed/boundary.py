@@ -228,7 +228,8 @@ async def mount_boundary(coordinator, config):
         context.summary_provider = summarizer
     await coordinator.mount("context", context)
     coordinator.register_capability("context.request_retention", context.get_messages_for_request_retaining)
-    coordinator.register_capability("context.measured_request_view", context.get_measured_request_view)
+    if context.config["token_meter"] == "actual":
+        coordinator.register_capability("context.measured_request_view", context.get_measured_request_view)
     coordinator.register_capability("context.compacting", lambda: context.is_compacting)
     coordinator.register_capability("context.history_authority", "host")
     coordinator.register_capability("context.history", context.get_messages)
