@@ -32,6 +32,12 @@ async def mount(coordinator: Any, config: dict[str, Any] | None = None) -> None:
     rate_limit = (config or {}).get("rate_limit_per_turn", 3)
     tool = ReadTranscriptTool(coordinator, rate_limit_per_turn=rate_limit)
     await coordinator.mount("tools", tool, name=tool.name)
+    async def reset(event, data):
+        from amplifier_core import HookResult
+        tool.reset_rate_limit()
+        return HookResult()
+    if getattr(coordinator, "hooks", None):
+        coordinator.hooks.register("prompt:submit", reset, name="transcript-rate-limit")
     logger.info("tool-transcript mounted: registered 'read_transcript'")
 
 
@@ -96,7 +102,18 @@ class ReadTranscriptTool:
         transcript_path = self._coordinator.get_capability(
             "context-managed.transcript_path"
         )
-        if transcript_path is None:
+        history = self._coordinator.get_capability("context.history")
+        if self._coordinator.get_capability("context.history_authority") == "host" and callable(history):
+            turns = []
+            for message in await history():
+                metadata = message.get("metadata") or {}
+                origin = metadata.get("amplifier_input") or {}
+                service = isinstance(origin, dict) and origin.get("version") == 1 and origin.get("kind") == "service"
+                if message.get("role") == "user" and not metadata.get("ephemeral") and not service:
+                    turns.append([])
+                if turns:
+                    turns[-1].append(message)
+        elif transcript_path is None:
             return ToolResult(
                 success=False,
                 output="No transcript available.",
@@ -104,7 +121,8 @@ class ReadTranscriptTool:
             )
 
         # Parse transcript into turns
-        turns = self._parse_transcript(transcript_path)
+        else:
+            turns = self._parse_transcript(transcript_path)
 
         # Empty transcript — return success with empty output
         if not turns:
