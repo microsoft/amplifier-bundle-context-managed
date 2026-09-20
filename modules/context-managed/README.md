@@ -21,3 +21,10 @@ It never restores/replays a tool or changes original messages. `set_messages`
 always invalidates derived state; an explicit compatible restore can follow it.
 The continuation note remains labelled untrusted reference history, not fresh
 instructions or authorization. This module does not own task lifecycle or storage.
+
+Required persisted ephemeral user reminders supplied through `retain_contents`
+remain verbatim, including metadata, in each assembled request even when their
+canonical position falls inside a summarized prefix. They do not permanently
+freeze later compaction boundaries. Ordinary required messages and unresolved
+tool calls still prevent crossing their boundary. Summaries never replace the
+required reminder text or grant authority from historical content.
