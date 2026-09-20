@@ -263,3 +263,14 @@ class TestExecuteGracefulFailure:
         assert result.success is True
         # No real content — output should be empty or minimal
         assert result.output is not None
+@pytest.mark.asyncio
+async def test_reads_host_canonical_history_without_transcript_file():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from amplifier_module_tool_transcript import ReadTranscriptTool
+    capabilities = {"context.history_authority": "host", "context.history": AsyncMock(return_value=[
+        {"role": "user", "content": "Earlier question"}, {"role": "assistant", "content": "Exact original answer"}])}
+    tool = ReadTranscriptTool(SimpleNamespace(get_capability=capabilities.get))
+    result = await tool.execute({"search": "original"})
+    assert result.success
+    assert "Exact original answer" in result.output

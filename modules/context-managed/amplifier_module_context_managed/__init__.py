@@ -109,6 +109,9 @@ async def mount(coordinator: Any, config: dict[str, Any] | None = None):
         Optional cleanup function
     """
     config = config or {}
+    if config.get("engine", "legacy") == "boundary":
+        from .boundary import mount_boundary
+        return await mount_boundary(coordinator, config)
 
     # Resolve session directory using coordinator.session_id + CLI slug algorithm.
     # AmplifierSession has no session_dir attribute — the correct approach is to

@@ -7,7 +7,9 @@ requires-python = ">=3.11"
 authors = [
     { name = "bkrabach" },
 ]
-dependencies = []
+dependencies = [
+    "amplifier-module-context-simple @ git+https://github.com/microsoft/amplifier-module-context-simple@2bc8b15770f4ecb49bd6216a8b5336e9c36adfc6",
+]
 
 [project.entry-points."amplifier.modules"]
 context-managed = "amplifier_module_context_managed:mount"
