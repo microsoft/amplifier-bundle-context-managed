@@ -129,6 +129,105 @@ async def test_measured_request_preserves_active_jobs_and_exact_dispatch():
 
 
 @pytest.mark.asyncio
+async def test_measured_output_fit_preserves_counted_dispatch_and_canonical_history():
+    context = BoundaryContextManager({"max_tokens": 1000, "compaction_notice_enabled": False})
+    original = [{"role": "developer", "content": "Keep every protected instruction."},
+                {"role": "user", "content": "Complete the original objective."}]
+    await context.set_messages(original)
+    attempts = []
+    limit = 800
+
+    async def count_view(view):
+        assert [{key: row[key] for key in ("role", "content")} for row in view] == original
+        attempt = {"dispatch": object(), "budget_decision": {
+            "estimated_input_tokens": 900, "input_limit_tokens": limit,
+            "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 900}}}
+        attempts.append(attempt)
+        return attempt
+
+    async def fit_output(view, attempt):
+        nonlocal limit
+        assert attempt is attempts[-1]
+        limit = 1000
+        fitted = await count_view(view)
+        fitted["count_calls"] = 1
+        return fitted
+
+    result = await context.get_measured_request_view(provider=None, retain_contents=[],
+        count_view=count_view, fit_output=fit_output)
+    assert result["outcome"] == "reduced_output"
+    assert result["final_attempt"] is attempts[-1]
+    assert result["final_attempt"]["dispatch"] is attempts[-1]["dispatch"]
+    assert result["count_calls"] == len(attempts) == 2
+    assert result["transaction"] is None
+    assert await context.get_messages() == original
+
+
+@pytest.mark.asyncio
+async def test_measured_without_output_fit_still_refuses_protected_oversize():
+    from amplifier_core.llm_errors import ContextLengthError
+
+    context = BoundaryContextManager({"max_tokens": 1000, "compaction_notice_enabled": False})
+    original = [{"role": "user", "content": "Required objective"}]
+    await context.set_messages(original)
+
+    async def count_view(view):
+        return {"dispatch": object(), "budget_decision": {
+            "estimated_input_tokens": 900, "input_limit_tokens": 800,
+            "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 900}}}
+
+    with pytest.raises(ContextLengthError):
+        await context.get_measured_request_view(provider=None, retain_contents=[], count_view=count_view)
+    assert await context.get_messages() == original
+
+
+@pytest.mark.asyncio
+async def test_history_replacement_during_output_fit_rolls_back_actual_fitter(monkeypatch):
+    from amplifier_module_context_simple import SimpleContextManager
+
+    context = BoundaryContextManager({"max_tokens": 1000, "compaction_notice_enabled": False,
+        "protected_recent": 1, "summarize_trigger": 100})
+    original = [{"role": "user", "content": "Original objective"}]
+    for index in range(6):
+        original.extend([{"role": "assistant", "content": f"Earlier result {index} " * 300},
+                         {"role": "user", "content": f"Continue step {index}"}])
+    await context.set_messages(original)
+    fitter = context._fitter()
+    monkeypatch.setattr(context, "_fitter", lambda: fitter)
+    measured = SimpleContextManager.get_measured_request_view
+    results = []
+
+    async def capture_result(self, **kwargs):
+        result = await measured(self, **kwargs)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(SimpleContextManager, "get_measured_request_view", capture_result)
+    replacement = [{"role": "user", "content": "Restored authoritative history"}]
+
+    async def count_view(view):
+        return {"dispatch": object(), "budget_decision": {
+            "estimated_input_tokens": 900, "input_limit_tokens": 800,
+            "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 900}}}
+
+    async def fit_output(view, attempt):
+        await context.set_messages(replacement)
+        return {"dispatch": object(), "budget_decision": {
+            "estimated_input_tokens": 900, "input_limit_tokens": 1000,
+            "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 900}},
+            "count_calls": 1}
+
+    with pytest.raises(RuntimeError, match="History changed during request preparation"):
+        await context.get_measured_request_view(provider=None, retain_contents=[],
+            count_view=count_view, fit_output=fit_output)
+    assert results[0]["transaction"] is not None
+    assert not fitter._removed_seqs and not fitter._truncated_seqs and not fitter._stubbed_seqs
+    assert fitter._last_compaction_stats is None
+    assert await context.get_messages() == replacement
+    assert context.summary is None
+
+
+@pytest.mark.asyncio
 async def test_required_persisted_reminder_survives_two_compactions_and_restore():
     reminder = {"role": "user", "content": "Required policy\r\nKeep originals — 保留.\n",
                 "metadata": {"ephemeral": True, "persisted": True, "reminder_placement": "pre_user"}}

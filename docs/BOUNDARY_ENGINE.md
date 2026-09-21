@@ -23,11 +23,14 @@ continuation note is reference data at user-message priority, never a new system
 instruction. Unknown or queued tool calls restrict semantic summary boundaries.
 Original tool outputs are retained even when the request fitter clips its view.
 
-Request fitting delegates to the pinned context-simple implementation. Its
+Request fitting delegates to context-simple's tracked `main` branch. Its
 provider-count callback accounts for the complete assembled request, including
 tools and injected context. The semantic-summary trigger itself uses an estimate;
 final request validation uses provider measurement when available. Oversized
 protected content can still fail rather than silently vanish.
+The optional request-owner `fit_output` callback is forwarded unchanged, allowing
+the shared fitter to try a smaller output reserve after context reduction while
+retaining the counted dispatch and canonical history.
 
 The summarizer is awaited at a request boundary and uses no tools. Conventional
 providers can supply the same instance while no foreground inference runs. A
@@ -37,8 +40,10 @@ and `separate_summary_provider: true`. Summary traffic is marked with
 from public text streams. Summary failure falls back to the existing request
 fitter. History changes invalidate in-flight summaries and request views.
 
-Current limits: continuation notes are derived in-memory state and are recomputed
-after restore; there is no provider-opaque compaction backend or durable summary
-checkpoint. The engine reuses pinned context-simple budget helpers as well as its
-public optional capabilities; upstream changes need contract validation. It is an
-experimental portable implementation, not a claim of ChatGPT quality parity.
+Continuation notes remain derived state. With `durable_checkpoints: true`, a host
+can preserve and restore a validated summary checkpoint alongside its canonical
+history. Otherwise, summaries are recomputed after restore. There is no
+provider-opaque compaction backend. The engine reuses context-simple budget
+helpers as well as its public optional capabilities; record the resolved revision
+and validate the contract when updating the tracked branch. It is an experimental
+portable implementation, not a claim of ChatGPT quality parity.

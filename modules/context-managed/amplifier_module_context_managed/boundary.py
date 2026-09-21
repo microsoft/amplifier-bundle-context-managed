@@ -241,11 +241,12 @@ class BoundaryContextManager:
                 raise RuntimeError("History changed during request preparation")
             return result
 
-    async def get_measured_request_view(self, *, provider, retain_contents, count_view):
+    async def get_measured_request_view(self, *, provider, retain_contents, count_view, fit_output=None):
         async with self.lock:
             revision = self.revision
             fitter, retain = await self._prepare(provider, None, retain_contents)
-            result = await fitter.get_measured_request_view(provider=provider, retain_contents=retain, count_view=count_view)
+            result = await fitter.get_measured_request_view(provider=provider, retain_contents=retain,
+                count_view=count_view, fit_output=fit_output)
             if revision != self.revision:
                 if result.get("transaction"):
                     result["transaction"].rollback()

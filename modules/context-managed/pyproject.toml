@@ -8,7 +8,7 @@ authors = [
     { name = "bkrabach" },
 ]
 dependencies = [
-    "amplifier-module-context-simple @ git+https://github.com/microsoft/amplifier-module-context-simple@2bc8b15770f4ecb49bd6216a8b5336e9c36adfc6",
+    "amplifier-module-context-simple @ git+https://github.com/microsoft/amplifier-module-context-simple@main",
 ]
 
 [project.entry-points."amplifier.modules"]
