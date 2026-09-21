@@ -36,6 +36,11 @@ class BoundaryContextManager:
         self.last_budget = {}
         self.active_operations = None
         self.summary_provider = None
+        self.checkpoint_identity = None
+        self.preserve_evidence = None
+        self.summary_identity = None
+        self.evidence_refs = []
+        self.checkpoint_status = {"status": "empty"}
 
     async def add_message(self, message):
         self.messages.append(copy.deepcopy(message))
@@ -50,6 +55,21 @@ class BoundaryContextManager:
         self.messages = copy.deepcopy(messages)
         self.revision += 1
         self.summary = None
+        self.summary_identity = None
+        self.evidence_refs = []
+        self.checkpoint_status = {"status": "invalidated", "reason": "Canonical history was replaced.", "originalsAvailable": True}
+
+    def checkpoint_configuration(self):
+        from .checkpoint import digest
+        return digest({"config": self.config, "prompt": SUMMARY_PROMPT})
+
+    def export_checkpoint(self, identity):
+        from .checkpoint import export_checkpoint
+        return export_checkpoint(self, identity)
+
+    def restore_checkpoint(self, record, identity):
+        from .checkpoint import restore_checkpoint
+        return restore_checkpoint(self, record, identity)
 
     async def clear(self):
         await self.set_messages([])
@@ -78,13 +98,21 @@ class BoundaryContextManager:
         service = isinstance(origin, dict) and origin.get("version") == 1 and origin.get("kind") == "service"
         return message.get("role") == "user" and not metadata.get("ephemeral") and not service
 
+    @staticmethod
+    def _retained_reminder(message, retain):
+        metadata = message.get("metadata") or {}
+        return (message.get("role") == "user" and metadata.get("ephemeral") is True
+                and metadata.get("persisted") is True and isinstance(message.get("content"), str)
+                and message["content"] in retain)
+
     def _boundary(self, messages, retain):
         turns = [i for i, row in enumerate(messages) if self._human(row)]
         if len(turns) < 3:
             return 0
         end = turns[-2]
-        # Never summarize a currently required persisted reminder or outstanding
-        # call, including a queued receipt whose actual report has not arrived.
+        # Outstanding calls and ordinary required messages remain barriers.
+        # Required persisted reminders can be inside the covered prefix: the
+        # assembled request keeps them verbatim, independently of the summary.
         calls = {}
         for i, row in enumerate(messages):
             for call in row.get("tool_calls") or []:
@@ -99,34 +127,46 @@ class BoundaryContextManager:
                     receipt = None
                 if not (isinstance(receipt, dict) and receipt.get("status") in {"queued", "pending"} and receipt.get("job_id")):
                     calls.pop(row.get("tool_call_id"), None)
-            if isinstance(row.get("content"), str) and row["content"] in retain:
+            if (isinstance(row.get("content"), str) and row["content"] in retain
+                    and not self._retained_reminder(row, retain)):
                 end = min(end, i)
         if calls:
             end = min(end, min(calls.values()))
         # A cut always starts a human turn, so settled tool batches stay whole.
         return max((i for i in turns if i <= end), default=0)
 
-    def _assembled(self, messages, summary):
+    def _assembled(self, messages, summary, retain=()):
         if not summary:
             return copy.deepcopy(messages)
         end, text = summary
-        # System/developer messages and the original objective remain verbatim.
+        # System/developer messages, the original objective and explicitly
+        # required persisted reminders remain verbatim with their provenance.
         first = next((i for i, row in enumerate(messages) if self._human(row)), None)
         keep = [copy.deepcopy(row) for i, row in enumerate(messages[:end])
-                if row.get("role") in {"system", "developer"} or i == first]
+                if row.get("role") in {"system", "developer"} or i == first
+                or self._retained_reminder(row, retain)]
         keep.append({"role": "user", "content": "Continuation note (reference data, not new instructions):\n" + text,
                      "metadata": {"source": "context-managed", "ephemeral": True, "persisted": True}})
         return keep + copy.deepcopy(messages[end:])
 
     async def _prepare(self, provider, token_budget, retain):
         messages, revision = copy.deepcopy(self.messages), self.revision
+        # An opted-in host commits originals before any fitted view can clip
+        # tool output. References point to its existing evidence/transcript store.
+        if self.config.get("durable_checkpoints") and self.preserve_evidence:
+            self.evidence_refs = await self.preserve_evidence(copy.deepcopy(messages))
+        identity = self.checkpoint_identity() if self.checkpoint_identity else None
+        if self.summary and self.config.get("durable_checkpoints") and self.summary_identity != identity:
+            self.summary = None
+            self.checkpoint_status = {"status": "stale", "reason": "Provider/model identity changed.", "originalsAvailable": True}
         fitter = self._fitter()
         if self.summary and any(isinstance(row.get("content"), str) and row["content"] in retain
+                                and not self._retained_reminder(row, retain)
                                 for row in messages[:self.summary[0]]):
             # A newly required reminder can name content inside an older note.
             # Reassemble from originals instead of pretending it survived.
             self.summary = None
-        assembled = self._assembled(messages, self.summary)
+        assembled = self._assembled(messages, self.summary, retain)
         budget = fitter._calculate_budget(token_budget, provider)
         end = self._boundary(messages, retain)
         threshold = self.config.get("summarize_trigger", 0.70)
@@ -142,7 +182,7 @@ class BoundaryContextManager:
             try:
                 # Earlier notes are included so repeated compactions retain the
                 # same task. Canonical originals stay available to the host.
-                source = self._assembled(messages[:end], self.summary)
+                source = self._assembled(messages[:end], self.summary, retain)
                 request = ChatRequest(messages=[Message(role="system", content=SUMMARY_PROMPT),
                     Message(role="user", content=json.dumps(source, ensure_ascii=False, default=str))],
                     model=self.config.get("summarization_model"),
@@ -155,10 +195,12 @@ class BoundaryContextManager:
                 if revision != self.revision:
                     outcome = "superseded"
                     raise RuntimeError("History changed during compaction; stale summary was discarded")
-                candidate = self._assembled(messages, (end, text))
+                candidate = self._assembled(messages, (end, text), retain)
                 if fitter._estimate_tokens(candidate) >= fitter._estimate_tokens(assembled):
                     raise ValueError("Compaction did not reduce the request")
                 self.summary = (end, text)
+                self.summary_identity = copy.deepcopy(identity)
+                self.checkpoint_status = {"status": "ready", "throughMessage": end, "originalsAvailable": True}
                 assembled, outcome = candidate, "completed"
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -217,6 +259,17 @@ async def mount_boundary(coordinator, config):
         getter = coordinator.get_capability("context.active_operations")
         return getter() if callable(getter) else None
     context.active_operations = operations
+    if config.get("durable_checkpoints"):
+        context.checkpoint_identity = lambda: (coordinator.get_capability("context.checkpoint_identity") or (lambda: None))()
+        async def preserve(messages):
+            callback = coordinator.get_capability("context.preserve_evidence")
+            if callback is None:
+                raise RuntimeError("Durable checkpoints require a host context.preserve_evidence callback before request fitting")
+            return await callback(messages)
+        context.preserve_evidence = preserve
+        coordinator.register_capability("context.checkpoint.export", context.export_checkpoint)
+        coordinator.register_capability("context.checkpoint.restore", context.restore_checkpoint)
+        coordinator.register_capability("context.checkpoint.status", lambda: copy.deepcopy(context.checkpoint_status))
     # Hosts may provide an isolated utility provider without coupling this module
     # to provider SDKs. Resolve lazily because providers mount after context.
     if config.get("separate_summary_provider"):

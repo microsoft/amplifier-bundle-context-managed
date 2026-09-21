@@ -126,3 +126,58 @@ async def test_measured_request_preserves_active_jobs_and_exact_dispatch():
     result = await context.get_measured_request_view(provider=None, retain_contents=[], count_view=count_view)
     assert result["final_attempt"]["dispatch"] is dispatch
     assert len(await context.get_messages()) == 1
+
+
+@pytest.mark.asyncio
+async def test_required_persisted_reminder_survives_two_compactions_and_restore():
+    reminder = {"role": "user", "content": "Required policy\r\nKeep originals — 保留.\n",
+                "metadata": {"ephemeral": True, "persisted": True, "reminder_placement": "pre_user"}}
+    config = {"max_tokens": 6000, "summarize_trigger": .1, "durable_checkpoints": True}
+    context = BoundaryContextManager(config)
+    identity = {"provider": "configured", "model": "unchanged"}
+    context.checkpoint_identity = lambda: identity
+    original = conversation()
+    original.insert(2, reminder)
+    await context.set_messages(original)
+    model = provider()
+    retain = [reminder["content"]]
+    view = await context.get_messages_for_request_retaining(provider=model, retain_contents=retain)
+    first_boundary = context.summary[0]
+    assert first_boundary > 2
+    assert [row for row in view if row.get("content") == reminder["content"]] == [reminder]
+    appended = [{"role": "assistant", "content": "More verified research " * 500},
+                {"role": "user", "content": "Retain the correction and continue"}]
+    for row in appended:
+        await context.add_message(row)
+    view = await context.get_messages_for_request_retaining(provider=model, retain_contents=retain)
+    assert model.complete.await_count == 2
+    assert context.summary[0] > first_boundary
+    assert [row for row in view if row.get("content") == reminder["content"]] == [reminder]
+    assert await context.get_messages() == original + appended
+    saved = context.export_checkpoint(identity)
+    restored = BoundaryContextManager(config)
+    restored.checkpoint_identity = lambda: identity
+    await restored.set_messages(original + appended)
+    assert restored.restore_checkpoint(saved, identity)["status"] == "restored"
+    view = await restored.get_messages_for_request_retaining(retain_contents=retain)
+    assert restored.summary == context.summary
+    assert [row for row in view if row.get("content") == reminder["content"]] == [reminder]
+    assert await restored.get_messages() == original + appended
+
+
+@pytest.mark.parametrize("metadata", [{}, {"ephemeral": True}, {"persisted": True},
+                                     {"ephemeral": "true", "persisted": True}])
+def test_required_ordinary_or_unproven_reminder_still_blocks_boundary(metadata):
+    context = BoundaryContextManager()
+    messages = conversation()
+    messages.insert(2, {"role": "user", "content": "Required policy", "metadata": metadata})
+    assert context._boundary(messages, ["Required policy"]) <= 2
+
+
+def test_preserved_reminder_does_not_release_unresolved_tool_call_barrier():
+    context = BoundaryContextManager()
+    messages = conversation()
+    messages[1:1] = [{"role": "assistant", "content": "", "tool_calls": [{"id": "pending", "name": "delegate", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "pending", "content": '{"status":"queued","job_id":"job"}'},
+        {"role": "user", "content": "Required policy", "metadata": {"ephemeral": True, "persisted": True}}]
+    assert context._boundary(messages, ["Required policy"]) == 0
