@@ -185,3 +185,14 @@ invocations, five intact call/result pairs, five public assistant messages, and
 no leaked auxiliary summary messages. The opaque path observed three separately
 labelled auxiliary calls; the portable path observed twelve. These timings are
 individual runs, not a statistical performance estimate.
+
+## Reviewable implementation
+
+- [Context manager and this acceptance report](https://github.com/microsoft/amplifier-bundle-context-managed/pull/6)
+- [OpenAI canonical compaction transport and validation](https://github.com/microsoft/amplifier-module-provider-openai/pull/105), tested source `6e99b8cabb5d7819f31f9f0005c983e763f6b076`
+- [Unified auxiliary-call observation and safe diagnostics](https://github.com/microsoft/amplifier-unified/pull/108), tested source `e745eb9a6d79e2de090bbdb01f99cab542f1be47`
+
+The evidence JSON records these companion source revisions and SHA-256 hashes
+of the context implementation files. Install the provider capability before or
+with the context update; the Unified observer is independent. These PRs were
+published for review without a production installation or restart.
