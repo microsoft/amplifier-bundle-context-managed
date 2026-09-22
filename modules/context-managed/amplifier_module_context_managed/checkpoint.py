@@ -24,7 +24,8 @@ def export_checkpoint(context, identity):
     record = {"format": FORMAT, "identity": copy.deepcopy(identity),
               "configuration": context.checkpoint_configuration(),
               "sourceRevision": {"messages": through, "sha256": digest(context.messages[:through])},
-              "summary": {"throughMessage": through, "text": text},
+              "summary": {"throughMessage": through, **({"message": copy.deepcopy(text), "kind": "native"}
+                          if isinstance(text, dict) else {"text": text})},
               "evidenceRefs": copy.deepcopy(context.evidence_refs)}
     record["sha256"] = digest(record)
     return record
@@ -52,11 +53,21 @@ def restore_checkpoint(context, record, identity):
             raise ValueError("Checkpoint source boundary is incompatible")
         if source["sha256"] != digest(context.messages[:end]):
             raise ValueError("Canonical source prefix changed")
-        if not isinstance(summary["text"], str) or not summary["text"].strip():
-            raise ValueError("Checkpoint summary is empty")
+        if summary.get("kind") == "native":
+            text = summary.get("message")
+            if (not isinstance(text, dict) or text.get("role") != "user" or not text.get("content")
+                    or not isinstance(text.get("metadata"), dict)
+                    or text["metadata"].get("source") != "context-managed"
+                    or text["metadata"].get("ephemeral") is not True
+                    or text["metadata"].get("persisted") is not True):
+                raise ValueError("Native checkpoint message is invalid")
+        else:
+            text = summary.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("Checkpoint summary is empty")
         if not isinstance(record.get("evidenceRefs", []), list):
             raise ValueError("Checkpoint evidence references are invalid")
-        context.summary = (end, summary["text"])
+        context.summary = (end, copy.deepcopy(text))
         context.summary_identity = copy.deepcopy(identity)
         context.evidence_refs = copy.deepcopy(record.get("evidenceRefs", []))
     except (ValueError, TypeError, KeyError, AttributeError) as exc:

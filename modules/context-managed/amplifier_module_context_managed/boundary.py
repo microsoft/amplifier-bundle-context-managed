@@ -7,9 +7,14 @@ import asyncio
 import copy
 import json
 import logging
+import time
+import inspect
 
 from amplifier_core import ChatRequest, Message
 from amplifier_module_context_simple import SimpleContextManager
+
+from .checkpoint import digest
+from .summary import add_usage, public_messages, request_fits, source_fragments, summary_request
 
 
 SUMMARY_PROMPT = """Prepare a factual continuation note from the supplied conversation data.
@@ -41,6 +46,7 @@ class BoundaryContextManager:
         self.summary_identity = None
         self.evidence_refs = []
         self.checkpoint_status = {"status": "empty"}
+        self.summary_failure = None
 
     async def add_message(self, message):
         self.messages.append(copy.deepcopy(message))
@@ -57,6 +63,7 @@ class BoundaryContextManager:
         self.summary = None
         self.summary_identity = None
         self.evidence_refs = []
+        self.summary_failure = None
         self.checkpoint_status = {"status": "invalidated", "reason": "Canonical history was replaced.", "originalsAvailable": True}
 
     def checkpoint_configuration(self):
@@ -139,6 +146,13 @@ class BoundaryContextManager:
         if not summary:
             return copy.deepcopy(messages)
         end, text = summary
+        if isinstance(text, dict):
+            # The provider owns the complete native canonical window, including
+            # retained user/developer items. Keep it intact and append only new
+            # conversation messages. System prompts travel separately.
+            systems = [copy.deepcopy(row) for row in messages[:end]
+                       if row.get("role") == "system" or self._retained_reminder(row, retain)]
+            return systems + [copy.deepcopy(text)] + copy.deepcopy(messages[end:])
         # System/developer messages, the original objective and explicitly
         # required persisted reminders remain verbatim with their provenance.
         first = next((i for i, row in enumerate(messages) if self._human(row)), None)
@@ -149,14 +163,82 @@ class BoundaryContextManager:
                      "metadata": {"source": "context-managed", "ephemeral": True, "persisted": True}})
         return keep + copy.deepcopy(messages[end:])
 
+    async def _summarize(self, summarizer, source, revision, stats):
+        """Build a note incrementally; commit happens only after every fragment."""
+        from amplifier_core.llm_errors import ContextLengthError
+
+        limit = int(self.config.get("summary_max_source_chars", 512000))
+        # Providers without exact preflight still advertise a context budget.
+        # One source character per token is deliberately conservative; an
+        # authoritative overflow below causes further splitting, never replay.
+        limit = min(limit, max(256, SimpleContextManager()._calculate_budget(None, summarizer) // 2))
+        max_calls = int(self.config.get("summary_max_calls", 16))
+        if limit < 256 or max_calls < 1:
+            raise ValueError("Summary source limit and call limit must be positive")
+        pending = list(source_fragments(public_messages(source), limit))
+        text = ""
+        while pending:
+            fragment = pending.pop(0)
+            request = summary_request(SUMMARY_PROMPT, fragment, text, self.config)
+            fits, budget = await request_fits(summarizer, request)
+            if budget:
+                stats["last_request_budget"] = budget
+            if not fits:
+                if len(fragment) < 512:
+                    raise ContextLengthError("Continuation note and required instructions exceed summary input allowance")
+                middle = len(fragment) // 2
+                pending[:0] = [fragment[:middle], fragment[middle:]]
+                continue
+            if stats["calls"] >= max_calls:
+                raise ValueError("Summary call limit reached before the covered prefix was complete")
+            stats["calls"] += 1
+            try:
+                response = await summarizer.complete(request)
+            except ContextLengthError:
+                if len(fragment) < 512:
+                    raise
+                middle = len(fragment) // 2
+                pending[:0] = [fragment[:middle], fragment[middle:]]
+                continue
+            add_usage(stats, getattr(response, "usage", None))
+            text = "\n".join(block.text for block in response.content
+                if getattr(block, "type", None) == "text" and getattr(block, "text", None))
+            if not text.strip():
+                raise ValueError("Compaction returned an empty continuation note")
+            if revision != self.revision:
+                raise RuntimeError("History changed during compaction; stale summary was discarded")
+        return text
+
+    async def _native_view_tokens(self, provider, messages):
+        """Opaque windows require a real count of the entire assembled input."""
+        check = getattr(provider, "request_budget", None)
+        if not callable(check):
+            return None
+        try:
+            request = ChatRequest(messages=[Message(**row) for row in messages])
+            decision = check(request, context_estimate=0)
+            if inspect.isawaitable(decision):
+                decision = await decision
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+        if not isinstance(decision, dict):
+            return None
+        measured = decision.get("measurement") or {}
+        count = measured.get("input_tokens")
+        return count if measured.get("kind") == "provider_count" and type(count) is int and count >= 0 else None
+
     async def _prepare(self, provider, token_budget, retain):
         messages, revision = copy.deepcopy(self.messages), self.revision
         # An opted-in host commits originals before any fitted view can clip
         # tool output. References point to its existing evidence/transcript store.
         if self.config.get("durable_checkpoints") and self.preserve_evidence:
             self.evidence_refs = await self.preserve_evidence(copy.deepcopy(messages))
-        identity = self.checkpoint_identity() if self.checkpoint_identity else None
-        if self.summary and self.config.get("durable_checkpoints") and self.summary_identity != identity:
+        identity = self.checkpoint_identity() if self.checkpoint_identity else {
+            "provider": getattr(provider, "name", type(provider).__name__),
+            "model": getattr(provider, "default_model", None)}
+        if self.summary and self.summary_identity != identity:
             self.summary = None
             self.checkpoint_status = {"status": "stale", "reason": "Provider/model identity changed.", "originalsAvailable": True}
         fitter = self._fitter()
@@ -167,53 +249,138 @@ class BoundaryContextManager:
             # Reassemble from originals instead of pretending it survived.
             self.summary = None
         assembled = self._assembled(messages, self.summary, retain)
+        native = getattr(provider, "supports_native_compaction", None)
+        validate_native = getattr(provider, "validate_compacted_context", None)
+        use_native = (self.config.get("native_compaction", True) and callable(native) and native()
+                      and callable(validate_native))
+        if self.summary and isinstance(self.summary[1], dict):
+            try:
+                valid_native = use_native and validate_native(self.summary[1])
+            except Exception:
+                valid_native = False
+            if not valid_native:
+                self.summary = None
+                self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint transport is unavailable or invalid.", "originalsAvailable": True}
+                assembled = self._assembled(messages, None, retain)
+        measured_tokens = await self._native_view_tokens(provider, assembled) if use_native else None
+        if self.summary and isinstance(self.summary[1], dict) and measured_tokens is None:
+            # Never budget an opaque checkpoint by its short visible label.
+            # Preserve originals and use the portable path when the continuation
+            # provider cannot authoritatively count this native state.
+            self.summary = None
+            self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint could not be measured by the continuation provider.", "originalsAvailable": True}
+            assembled = self._assembled(messages, None, retain)
+        use_native = use_native and measured_tokens is not None
+        assembled_tokens = measured_tokens if use_native else fitter._estimate_tokens(assembled)
         budget = fitter._calculate_budget(token_budget, provider)
         end = self._boundary(messages, retain)
         threshold = self.config.get("summarize_trigger", 0.70)
         should_summarize = (provider is not None and end > (self.summary[0] if self.summary else 0)
-                            and fitter._estimate_tokens(assembled) >= budget * threshold)
+                            and assembled_tokens >= budget * threshold)
+        if should_summarize and use_native and self.summary and isinstance(self.summary[1], dict):
+            # Large recent turns may trigger the full-window threshold even
+            # though only a few new words are eligible behind the safe boundary.
+            # Recompacting that tiny prefix costs a call and can enlarge state.
+            added = public_messages(messages[self.summary[0]:end])
+            should_summarize = (assembled_tokens >= budget or
+                                fitter._estimate_tokens(added) >= self.config.get("native_min_new_tokens", 500))
         if should_summarize:
             summarizer = self.summary_provider() if self.summary_provider else provider
+            # Current-turn tool results change the revision but not the covered
+            # prefix. A failed unchanged prefix must not create a retry storm.
+            source = self._assembled(messages[:end], self.summary, retain)
+            fingerprint = digest({"source": source, "identity": identity,
+                "provider": getattr(summarizer, "name", type(summarizer).__name__),
+                "model": getattr(summarizer, "default_model", None), "config": self.config})
+            failure = self.summary_failure
+            if failure and failure["fingerprint"] == fingerprint:
+                should_summarize = failure["retryable"] and failure["attempts"] < 3 and time.monotonic() >= failure["retry_after"]
+        if should_summarize:
             if getattr(summarizer, "native_bundle_live", False):
                 raise RuntimeError("Native live providers require a separate context.summary_provider for compaction")
             self.is_compacting = True
             await self._emit("context:compaction_started", revision=revision, through_message=end)
             outcome = "failed"
+            stats = {"calls": 0}
+            started = time.monotonic()
             try:
                 # Earlier notes are included so repeated compactions retain the
                 # same task. Canonical originals stay available to the host.
-                source = self._assembled(messages[:end], self.summary, retain)
-                request = ChatRequest(messages=[Message(role="system", content=SUMMARY_PROMPT),
-                    Message(role="user", content=json.dumps(source, ensure_ascii=False, default=str))],
-                    model=self.config.get("summarization_model"),
-                    max_output_tokens=self.config.get("summary_target_tokens", 1500), stream=False,
-                    metadata={"purpose": "context-compaction"})
-                response = await asyncio.wait_for(summarizer.complete(request), self.config.get("summary_timeout", 120))
-                text = "\n".join(block.text for block in response.content if getattr(block, "type", None) == "text" and getattr(block, "text", None))
-                if not text.strip():
-                    raise ValueError("Compaction returned an empty continuation note")
+                async def prepare_note():
+                    if use_native:
+                        stats["calls"] += 1
+                        try:
+                            # Required persisted reminders stay verbatim outside the
+                            # native window, so they must not also enter it.
+                            native_source = [row for row in source if not self._retained_reminder(row, retain)]
+                            request = ChatRequest(messages=[Message(**row) for row in native_source],
+                                max_output_tokens=self.config.get("summary_target_tokens", 1500),
+                                metadata={"purpose": "context-compaction", "stream": False})
+                            # The continuation provider owns opaque state. A
+                            # separate utility provider/model is only for the
+                            # portable semantic fallback, never native compact.
+                            result = await provider.compact_context(request)
+                            add_usage(stats, result.get("usage"))
+                            if result.get("kind") != "native" or not isinstance(result.get("message"), dict):
+                                raise ValueError("Native compaction returned an invalid checkpoint")
+                            if not validate_native(result["message"]):
+                                raise ValueError("Native compaction returned an invalid transport envelope")
+                            native_candidate = self._assembled(messages, (end, result["message"]), retain)
+                            candidate_tokens = await self._native_view_tokens(provider, native_candidate)
+                            stats["native_input_tokens_after"] = candidate_tokens
+                            if candidate_tokens is None or candidate_tokens >= assembled_tokens:
+                                raise ValueError("Native compaction did not produce a measured reduction")
+                            stats["method"] = "native"
+                            stats["input_tokens_before"] = assembled_tokens
+                            stats["input_tokens_after"] = candidate_tokens
+                            return result["message"]
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            stats["native_failure"] = {"type": type(exc).__name__}
+                    stats["method"] = "semantic"
+                    # If native state cannot be continued, rebuild semantic
+                    # evidence from originals, not an opaque-state placeholder.
+                    semantic_source = messages[:end] if self.summary and isinstance(self.summary[1], dict) else source
+                    return await self._summarize(summarizer, semantic_source, revision, stats)
+
+                text = await asyncio.wait_for(prepare_note(), self.config.get("summary_timeout", 120))
                 if revision != self.revision:
                     outcome = "superseded"
                     raise RuntimeError("History changed during compaction; stale summary was discarded")
                 candidate = self._assembled(messages, (end, text), retain)
-                if fitter._estimate_tokens(candidate) >= fitter._estimate_tokens(assembled):
+                portable_baseline = messages if self.summary and isinstance(self.summary[1], dict) else assembled
+                if stats.get("method") != "native" and fitter._estimate_tokens(candidate) >= fitter._estimate_tokens(portable_baseline):
                     raise ValueError("Compaction did not reduce the request")
                 self.summary = (end, text)
+                self.summary_failure = None
                 self.summary_identity = copy.deepcopy(identity)
                 self.checkpoint_status = {"status": "ready", "throughMessage": end, "originalsAvailable": True}
                 assembled, outcome = candidate, "completed"
             except asyncio.CancelledError:
                 outcome = "cancelled"
                 raise
-            except Exception:
+            except Exception as exc:
                 if revision != self.revision:
+                    outcome = "superseded"
                     raise
                 # The shared fitter can still prepare a bounded request. Never
                 # commit an empty/failed summary or discard canonical history.
                 outcome = "fallback"
+                previous = self.summary_failure
+                attempts = previous["attempts"] + 1 if previous and previous["fingerprint"] == fingerprint else 1
+                retryable = bool(getattr(exc, "retryable", isinstance(exc, (TimeoutError, ConnectionError))))
+                self.summary_failure = {"fingerprint": fingerprint, "attempts": attempts, "retryable": retryable,
+                    "retry_after": time.monotonic() + float(self.config.get("summary_retry_delay", 60)) * 2 ** (attempts - 1)}
+                # Raw SDK exceptions can contain request data or credentials.
+                # Preserve a safe category and budget evidence, not their repr.
+                stats["failure"] = {"type": type(exc).__name__, "retryable": retryable,
+                                    "attempt": attempts, "retry_suppressed": not retryable or attempts >= 3}
+                self.checkpoint_status = {"status": "fallback", "failure": stats["failure"], "originalsAvailable": True}
             finally:
                 self.is_compacting = False
-                await self._emit("context:compaction_finished", revision=revision, outcome=outcome)
+                await self._emit("context:compaction_finished", revision=revision, outcome=outcome,
+                                 elapsed_ms=round((time.monotonic() - started) * 1000), **stats)
         protected = list(retain)
         if self.summary:
             protected.append(next(row["content"] for row in assembled if (row.get("metadata") or {}).get("source") == "context-managed"))

@@ -1,0 +1,912 @@
+{
+  "model": "gpt-6-astra",
+  "synthetic_only": true,
+  "production_sessions_touched": false,
+  "cases": [
+    {
+      "acceptance_level": "real Core + loop-live with actual fixture execution",
+      "path": "native",
+      "turns": [
+        {
+          "turn": 1,
+          "verified_receipts": 1,
+          "source_prefix_unchanged": true,
+          "paired_calls": 1,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 6.697
+        },
+        {
+          "turn": 2,
+          "verified_receipts": 2,
+          "source_prefix_unchanged": true,
+          "paired_calls": 2,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 13.912
+        },
+        {
+          "turn": 3,
+          "verified_receipts": 3,
+          "source_prefix_unchanged": true,
+          "paired_calls": 3,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 6.801
+        },
+        {
+          "turn": 4,
+          "verified_receipts": 4,
+          "source_prefix_unchanged": true,
+          "paired_calls": 4,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 20.781
+        },
+        {
+          "turn": 5,
+          "verified_receipts": 5,
+          "source_prefix_unchanged": true,
+          "paired_calls": 5,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 19.393
+        }
+      ],
+      "restart_resume": true,
+      "in_flight_steering": true,
+      "passed": true,
+      "compactions": [
+        {
+          "calls": 1,
+          "elapsed_ms": 7781,
+          "input_tokens_after": 1067,
+          "input_tokens_before": 7507,
+          "method": "native",
+          "native_input_tokens_after": 1067,
+          "outcome": "completed",
+          "parent_id": null,
+          "revision": 7,
+          "session_id": "9f9c63d4-f4d6-42f7-9064-ad9ec99a285b",
+          "timestamp": "2026-09-22T07:04:23.541288+00:00",
+          "usage": {
+            "cache_read_tokens": 6859,
+            "cache_write_tokens": 0,
+            "input_tokens": 6880,
+            "output_tokens": 310,
+            "total_tokens": 7190
+          },
+          "usage_calls": 1
+        },
+        {
+          "calls": 1,
+          "elapsed_ms": 13487,
+          "input_tokens_after": 8373,
+          "input_tokens_before": 14915,
+          "method": "native",
+          "native_input_tokens_after": 8373,
+          "outcome": "completed",
+          "parent_id": null,
+          "revision": 2,
+          "session_id": "1397bd49-49cb-437e-b6ef-8b457bf759b5",
+          "timestamp": "2026-09-22T07:04:50.587785+00:00",
+          "usage": {
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "input_tokens": 7456,
+            "output_tokens": 668,
+            "total_tokens": 8124
+          },
+          "usage_calls": 1
+        },
+        {
+          "calls": 1,
+          "elapsed_ms": 10438,
+          "input_tokens_after": 8291,
+          "input_tokens_before": 15294,
+          "method": "native",
+          "native_input_tokens_after": 8291,
+          "outcome": "completed",
+          "parent_id": null,
+          "revision": 6,
+          "session_id": "1397bd49-49cb-437e-b6ef-8b457bf759b5",
+          "timestamp": "2026-09-22T07:05:08.152538+00:00",
+          "usage": {
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "input_tokens": 7841,
+            "output_tokens": 492,
+            "total_tokens": 8333
+          },
+          "usage_calls": 1
+        }
+      ],
+      "observed_model_calls": [
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 793,
+            "outputTokens": 18,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalTokens": 811,
+            "reasoningTokens": 0,
+            "costUsd": 0.00883,
+            "costType": "reported",
+            "grossInputTokens": 793,
+            "grossTotalTokens": 811
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 7567,
+            "outputTokens": 71,
+            "cacheReadTokens": 7564,
+            "cacheWriteTokens": 0,
+            "totalTokens": 7638,
+            "reasoningTokens": 0,
+            "costUsd": 0.011144,
+            "costType": "reported",
+            "grossInputTokens": 7567,
+            "grossTotalTokens": 7638
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 6880,
+            "outputTokens": 310,
+            "cacheReadTokens": 6859,
+            "cacheWriteTokens": 0,
+            "totalTokens": 7190,
+            "costType": "unavailable",
+            "grossInputTokens": 6880,
+            "grossTotalTokens": 7190
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 19,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 1291,
+            "totalTokens": 22,
+            "reasoningTokens": 0,
+            "costUsd": 0.0171175,
+            "costType": "reported",
+            "grossInputTokens": 1294,
+            "grossTotalTokens": 1313
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 1294,
+            "outputTokens": 71,
+            "cacheReadTokens": 1291,
+            "cacheWriteTokens": 6754,
+            "totalTokens": 1365,
+            "reasoningTokens": 0,
+            "costUsd": 0.089296,
+            "costType": "reported",
+            "grossInputTokens": 8048,
+            "grossTotalTokens": 8119
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 8048,
+            "outputTokens": 19,
+            "cacheReadTokens": 8045,
+            "cacheWriteTokens": 173,
+            "totalTokens": 8067,
+            "reasoningTokens": 0,
+            "costUsd": 0.0111875,
+            "costType": "reported",
+            "grossInputTokens": 8221,
+            "grossTotalTokens": 8240
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 8221,
+            "outputTokens": 71,
+            "cacheReadTokens": 8218,
+            "cacheWriteTokens": 6754,
+            "totalTokens": 8292,
+            "reasoningTokens": 0,
+            "costUsd": 0.096223,
+            "costType": "reported",
+            "grossInputTokens": 14975,
+            "grossTotalTokens": 15046
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 7456,
+            "outputTokens": 668,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalTokens": 8124,
+            "costType": "unavailable",
+            "grossInputTokens": 7456,
+            "grossTotalTokens": 8124
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 19,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 8597,
+            "totalTokens": 22,
+            "reasoningTokens": 0,
+            "costUsd": 0.1084425,
+            "costType": "reported",
+            "grossInputTokens": 8600,
+            "grossTotalTokens": 8619
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 8600,
+            "outputTokens": 71,
+            "cacheReadTokens": 8597,
+            "cacheWriteTokens": 6754,
+            "totalTokens": 8671,
+            "reasoningTokens": 0,
+            "costUsd": 0.096602,
+            "costType": "reported",
+            "grossInputTokens": 15354,
+            "grossTotalTokens": 15425
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 7841,
+            "outputTokens": 492,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalTokens": 8333,
+            "costType": "unavailable",
+            "grossInputTokens": 7841,
+            "grossTotalTokens": 8333
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 19,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 8515,
+            "totalTokens": 22,
+            "reasoningTokens": 0,
+            "costUsd": 0.1074175,
+            "costType": "reported",
+            "grossInputTokens": 8518,
+            "grossTotalTokens": 8537
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 8518,
+            "outputTokens": 71,
+            "cacheReadTokens": 8515,
+            "cacheWriteTokens": 6754,
+            "totalTokens": 8589,
+            "reasoningTokens": 0,
+            "costUsd": 0.09652,
+            "costType": "reported",
+            "grossInputTokens": 15272,
+            "grossTotalTokens": 15343
+          }
+        }
+      ],
+      "auxiliary_calls": 3,
+      "public_assistant_messages": 5,
+      "invocation_counts": {
+        "initial": 1,
+        "stage2": 1,
+        "stage3": 1,
+        "stage4": 1,
+        "stage5": 1
+      },
+      "immutable_prefix_checks": 5,
+      "checkpoints": [
+        {
+          "messages": 4,
+          "sha256": "c0ffea6f88995d0b2af80e73f9b57853f35ea8cc402e31b0ea8c71361d6b27b5"
+        }
+      ]
+    },
+    {
+      "acceptance_level": "real Core + loop-live with actual fixture execution",
+      "path": "semantic",
+      "turns": [
+        {
+          "turn": 1,
+          "verified_receipts": 1,
+          "source_prefix_unchanged": true,
+          "paired_calls": 1,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 10.177
+        },
+        {
+          "turn": 2,
+          "verified_receipts": 2,
+          "source_prefix_unchanged": true,
+          "paired_calls": 2,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 47.043
+        },
+        {
+          "turn": 3,
+          "verified_receipts": 3,
+          "source_prefix_unchanged": true,
+          "paired_calls": 3,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 19.953
+        },
+        {
+          "turn": 4,
+          "verified_receipts": 4,
+          "source_prefix_unchanged": true,
+          "paired_calls": 4,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 79.155
+        },
+        {
+          "turn": 5,
+          "verified_receipts": 5,
+          "source_prefix_unchanged": true,
+          "paired_calls": 5,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 82.447
+        }
+      ],
+      "restart_resume": true,
+      "in_flight_steering": true,
+      "passed": true,
+      "compactions": [
+        {
+          "calls": 3,
+          "elapsed_ms": 39206,
+          "last_request_budget": {
+            "input_limit_tokens": 913808,
+            "input_tokens": 3124,
+            "output_reserve": 4096
+          },
+          "method": "semantic",
+          "outcome": "completed",
+          "parent_id": null,
+          "priced_calls": 3,
+          "revision": 7,
+          "session_id": "60ace4cf-e537-4851-9d49-fa4589ac841d",
+          "timestamp": "2026-09-22T07:00:08.449930+00:00",
+          "usage": {
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 8142,
+            "cost_usd": "0.1724650",
+            "input_tokens": 829,
+            "output_tokens": 1248,
+            "reasoning_tokens": 22,
+            "total_tokens": 2077
+          },
+          "usage_calls": 3
+        },
+        {
+          "calls": 1,
+          "elapsed_ms": 11329,
+          "last_request_budget": {
+            "input_limit_tokens": 913808,
+            "input_tokens": 1502,
+            "output_reserve": 4096
+          },
+          "method": "semantic",
+          "outcome": "completed",
+          "parent_id": null,
+          "priced_calls": 1,
+          "revision": 11,
+          "session_id": "60ace4cf-e537-4851-9d49-fa4589ac841d",
+          "timestamp": "2026-09-22T07:00:27.621606+00:00",
+          "usage": {
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 1499,
+            "cost_usd": "0.0410675",
+            "input_tokens": 3,
+            "output_tokens": 446,
+            "reasoning_tokens": 0,
+            "total_tokens": 449
+          },
+          "usage_calls": 1
+        },
+        {
+          "calls": 4,
+          "elapsed_ms": 71248,
+          "last_request_budget": {
+            "input_limit_tokens": 913808,
+            "input_tokens": 1024,
+            "output_reserve": 4096
+          },
+          "method": "semantic",
+          "outcome": "completed",
+          "parent_id": null,
+          "priced_calls": 4,
+          "revision": 2,
+          "session_id": "1439cf8a-2756-4ddb-a2e9-362a673bc02c",
+          "timestamp": "2026-09-22T07:01:47.600405+00:00",
+          "usage": {
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 10330,
+            "cost_usd": "0.2849550",
+            "input_tokens": 1033,
+            "output_tokens": 2910,
+            "reasoning_tokens": 0,
+            "total_tokens": 3943
+          },
+          "usage_calls": 4
+        },
+        {
+          "calls": 4,
+          "elapsed_ms": 75900,
+          "last_request_budget": {
+            "input_limit_tokens": 913808,
+            "input_tokens": 1128,
+            "output_reserve": 4096
+          },
+          "method": "semantic",
+          "outcome": "completed",
+          "parent_id": null,
+          "priced_calls": 4,
+          "revision": 6,
+          "session_id": "1439cf8a-2756-4ddb-a2e9-362a673bc02c",
+          "timestamp": "2026-09-22T07:03:11.407090+00:00",
+          "usage": {
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 12025,
+            "cost_usd": "0.3215325",
+            "input_tokens": 12,
+            "output_tokens": 3422,
+            "reasoning_tokens": 0,
+            "total_tokens": 3434
+          },
+          "usage_calls": 4
+        }
+      ],
+      "observed_model_calls": [
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 793,
+            "outputTokens": 18,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalTokens": 811,
+            "reasoningTokens": 0,
+            "costUsd": 0.00883,
+            "costType": "reported",
+            "grossInputTokens": 793,
+            "grossTotalTokens": 811
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 7567,
+            "outputTokens": 71,
+            "cacheReadTokens": 7564,
+            "cacheWriteTokens": 0,
+            "totalTokens": 7638,
+            "reasoningTokens": 0,
+            "costUsd": 0.011144,
+            "costType": "reported",
+            "grossInputTokens": 7567,
+            "grossTotalTokens": 7638
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 823,
+            "outputTokens": 339,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalTokens": 1162,
+            "reasoningTokens": 22,
+            "costUsd": 0.02518,
+            "costType": "reported",
+            "grossInputTokens": 823,
+            "grossTotalTokens": 1162
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 407,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 5021,
+            "totalTokens": 410,
+            "reasoningTokens": 0,
+            "costUsd": 0.0831425,
+            "costType": "reported",
+            "grossInputTokens": 5024,
+            "grossTotalTokens": 5431
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 502,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 3121,
+            "totalTokens": 505,
+            "reasoningTokens": 0,
+            "costUsd": 0.0641425,
+            "costType": "reported",
+            "grossInputTokens": 3124,
+            "grossTotalTokens": 3626
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 19,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 1491,
+            "totalTokens": 22,
+            "reasoningTokens": 0,
+            "costUsd": 0.0196175,
+            "costType": "reported",
+            "grossInputTokens": 1494,
+            "grossTotalTokens": 1513
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 1494,
+            "outputTokens": 71,
+            "cacheReadTokens": 1491,
+            "cacheWriteTokens": 6754,
+            "totalTokens": 1565,
+            "reasoningTokens": 0,
+            "costUsd": 0.089496,
+            "costType": "reported",
+            "grossInputTokens": 8248,
+            "grossTotalTokens": 8319
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 446,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 1499,
+            "totalTokens": 449,
+            "reasoningTokens": 0,
+            "costUsd": 0.0410675,
+            "costType": "reported",
+            "grossInputTokens": 1502,
+            "grossTotalTokens": 1948
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 19,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 8267,
+            "totalTokens": 22,
+            "reasoningTokens": 0,
+            "costUsd": 0.1043175,
+            "costType": "reported",
+            "grossInputTokens": 8270,
+            "grossTotalTokens": 8289
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 8270,
+            "outputTokens": 71,
+            "cacheReadTokens": 8267,
+            "cacheWriteTokens": 6754,
+            "totalTokens": 8341,
+            "reasoningTokens": 0,
+            "costUsd": 0.096272,
+            "costType": "reported",
+            "grossInputTokens": 15024,
+            "grossTotalTokens": 15095
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 647,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 1462,
+            "totalTokens": 650,
+            "reasoningTokens": 0,
+            "costUsd": 0.050655,
+            "costType": "reported",
+            "grossInputTokens": 1465,
+            "grossTotalTokens": 2112
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 800,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 5353,
+            "totalTokens": 803,
+            "reasoningTokens": 0,
+            "costUsd": 0.1069425,
+            "costType": "reported",
+            "grossInputTokens": 5356,
+            "grossTotalTokens": 6156
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 780,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 3515,
+            "totalTokens": 783,
+            "reasoningTokens": 0,
+            "costUsd": 0.0829675,
+            "costType": "reported",
+            "grossInputTokens": 3518,
+            "grossTotalTokens": 4298
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 1024,
+            "outputTokens": 683,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalTokens": 1707,
+            "reasoningTokens": 0,
+            "costUsd": 0.04439,
+            "costType": "reported",
+            "grossInputTokens": 1024,
+            "grossTotalTokens": 1707
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 19,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 8504,
+            "totalTokens": 22,
+            "reasoningTokens": 0,
+            "costUsd": 0.10728,
+            "costType": "reported",
+            "grossInputTokens": 8507,
+            "grossTotalTokens": 8526
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 8507,
+            "outputTokens": 71,
+            "cacheReadTokens": 8504,
+            "cacheWriteTokens": 6754,
+            "totalTokens": 8578,
+            "reasoningTokens": 0,
+            "costUsd": 0.096509,
+            "costType": "reported",
+            "grossInputTokens": 15261,
+            "grossTotalTokens": 15332
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 811,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 1721,
+            "totalTokens": 814,
+            "reasoningTokens": 0,
+            "costUsd": 0.0620925,
+            "costType": "reported",
+            "grossInputTokens": 1724,
+            "grossTotalTokens": 2535
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 949,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 5515,
+            "totalTokens": 952,
+            "reasoningTokens": 0,
+            "costUsd": 0.1164175,
+            "costType": "reported",
+            "grossInputTokens": 5518,
+            "grossTotalTokens": 6467
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 884,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 3664,
+            "totalTokens": 887,
+            "reasoningTokens": 0,
+            "costUsd": 0.09003,
+            "costType": "reported",
+            "grossInputTokens": 3667,
+            "grossTotalTokens": 4551
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Context compaction",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 778,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 1125,
+            "totalTokens": 781,
+            "reasoningTokens": 0,
+            "costUsd": 0.0529925,
+            "costType": "reported",
+            "grossInputTokens": 1128,
+            "grossTotalTokens": 1906
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 19,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 8593,
+            "totalTokens": 22,
+            "reasoningTokens": 0,
+            "costUsd": 0.1083925,
+            "costType": "reported",
+            "grossInputTokens": 8596,
+            "grossTotalTokens": 8615
+          }
+        },
+        {
+          "kind": "llm",
+          "label": "Model call",
+          "phase": "completed",
+          "usage": {
+            "inputTokens": 8596,
+            "outputTokens": 71,
+            "cacheReadTokens": 8593,
+            "cacheWriteTokens": 6754,
+            "totalTokens": 8667,
+            "reasoningTokens": 0,
+            "costUsd": 0.096598,
+            "costType": "reported",
+            "grossInputTokens": 15350,
+            "grossTotalTokens": 15421
+          }
+        }
+      ],
+      "auxiliary_calls": 12,
+      "public_assistant_messages": 5,
+      "invocation_counts": {
+        "initial": 1,
+        "stage2": 1,
+        "stage3": 1,
+        "stage4": 1,
+        "stage5": 1
+      },
+      "immutable_prefix_checks": 5,
+      "checkpoints": [
+        {
+          "messages": 6,
+          "sha256": "2cdbcf3cd67690f5a493114cdded1454bdbb68820eca88bcafa927e2b0c16dd1"
+        }
+      ]
+    }
+  ],
+  "source_revisions": {
+    "provider": "6e99b8cabb5d7819f31f9f0005c983e763f6b076",
+    "unified": "e745eb9a6d79e2de090bbdb01f99cab542f1be47",
+    "context_base": "b2f62791d61cd52195e21c301450b1e3b65ab954"
+  },
+  "context_source_sha256": {
+    "modules/context-managed/amplifier_module_context_managed/boundary.py": "ca50cb1400001aaef097fc453b588d7e86aa16f38b531e490e087914e69d31c3",
+    "modules/context-managed/amplifier_module_context_managed/checkpoint.py": "e03713f7e4d27194548ff5e7c512e1f4a57848c5720488090dcbee474b108921",
+    "modules/context-managed/amplifier_module_context_managed/summary.py": "b34f3f86ac23f71153e618cd8e71caac01665b19acfa67fbf709f79a477f69a5"
+  },
+  "limits": "Synthetic Astra-only continuity evaluation; no production restart/install/mutation; native compact cost unavailable."
+}
