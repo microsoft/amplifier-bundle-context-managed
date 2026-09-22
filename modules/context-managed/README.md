@@ -28,3 +28,22 @@ canonical position falls inside a summarized prefix. They do not permanently
 freeze later compaction boundaries. Ordinary required messages and unresolved
 tool calls still prevent crossing their boundary. Summaries never replace the
 required reminder text or grant authority from historical content.
+
+### Bounded and native compaction
+
+The boundary engine now prefers a continuation provider's optional native
+compaction contract: `supports_native_compaction()`,
+`validate_compacted_context(message)`, `compact_context(request)`, and a
+`request_budget` result with an authoritative full-window count. Native state
+travels in message metadata and is validated before use, including after resume.
+An unavailable or invalid transport rebuilds the request from original history.
+The utility summary provider/model is used only for portable notes.
+
+Portable notes consume ordered bounded fragments, preflight input/output budgets,
+commit atomically, and suppress repeated unchanged-prefix failures. Explicit
+`context:compaction_finished` evidence identifies the method, safe failure
+category, elapsed time, call count and usage, including cache buckets. Raw
+provider exception bodies are not copied to these events.
+
+See the [research, acceptance evidence and configuration](../../docs/COMPACTION_ACCEPTANCE.md)
+for actual live test limits and dependency integration order.

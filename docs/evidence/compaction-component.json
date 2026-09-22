@@ -1,0 +1,359 @@
+{
+  "model": "gpt-6-astra",
+  "synthetic_only": true,
+  "production_sessions_touched": false,
+  "sources": [
+    "https://developers.openai.com/api/docs/guides/compaction"
+  ],
+  "cases": [
+    {
+      "path": "native",
+      "cycles": [
+        {
+          "cycle": 1,
+          "source_messages": 9,
+          "source_sha256": "a3274f11b60ab4462d6bcae9493287faff6be0257fdc29e4628fb3465847a531",
+          "through_message": 6,
+          "source_unchanged": true,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 11.533,
+          "main_usage": {
+            "input_tokens": 458,
+            "output_tokens": 71,
+            "total_tokens": 529,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cost_usd": "0.00813"
+          },
+          "checkpoint_kind": "native"
+        },
+        {
+          "cycle": 2,
+          "source_messages": 13,
+          "source_sha256": "3de7970fa69aeb6664d54ff94a772de4cf7feaf7a493c78f37224b0eb264b877",
+          "through_message": 10,
+          "source_unchanged": true,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 12.582,
+          "main_usage": {
+            "input_tokens": 3,
+            "output_tokens": 71,
+            "total_tokens": 74,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 2295,
+            "cost_usd": "0.0322675"
+          },
+          "checkpoint_kind": "native"
+        },
+        {
+          "cycle": 3,
+          "source_messages": 17,
+          "source_sha256": "d5055e80682d4bbc3fe553f2d79d352395320a4eae9f5c805a4349df16dd4d76",
+          "through_message": 14,
+          "source_unchanged": true,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 15.382,
+          "main_usage": {
+            "input_tokens": 3,
+            "output_tokens": 71,
+            "total_tokens": 74,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 2425,
+            "cost_usd": "0.0338925"
+          },
+          "checkpoint_kind": "native"
+        },
+        {
+          "cycle": 4,
+          "source_messages": 21,
+          "source_sha256": "e0323d997c64b53f9a5262c8f63509d06ef5b0f0083081878e1b42306ed17433",
+          "through_message": 18,
+          "source_unchanged": true,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 18.089,
+          "main_usage": {
+            "input_tokens": 3,
+            "output_tokens": 71,
+            "total_tokens": 74,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 2603,
+            "cost_usd": "0.0361175"
+          },
+          "checkpoint_kind": "native"
+        }
+      ],
+      "tools_enabled": false,
+      "acceptance_level": "component continuity; no orchestration/tool execution",
+      "restart_resume": true,
+      "compactions": [
+        {
+          "revision": 1,
+          "outcome": "completed",
+          "elapsed_ms": 8633,
+          "calls": 1,
+          "usage_calls": 1,
+          "usage": {
+            "input_tokens": 7007,
+            "output_tokens": 271,
+            "total_tokens": 7278,
+            "cache_read_tokens": 6971,
+            "cache_write_tokens": 0
+          },
+          "native_input_tokens_after": 458,
+          "method": "native",
+          "input_tokens_before": 7083,
+          "input_tokens_after": 458
+        },
+        {
+          "revision": 5,
+          "outcome": "completed",
+          "elapsed_ms": 9301,
+          "calls": 1,
+          "usage_calls": 1,
+          "usage": {
+            "input_tokens": 3350,
+            "output_tokens": 437,
+            "total_tokens": 3787,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "native_input_tokens_after": 2298,
+          "method": "native",
+          "input_tokens_before": 5015,
+          "input_tokens_after": 2298
+        },
+        {
+          "revision": 5,
+          "outcome": "completed",
+          "elapsed_ms": 11303,
+          "calls": 1,
+          "usage_calls": 1,
+          "usage": {
+            "input_tokens": 5190,
+            "output_tokens": 496,
+            "total_tokens": 5686,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "native_input_tokens_after": 2428,
+          "method": "native",
+          "input_tokens_before": 6850,
+          "input_tokens_after": 2428
+        },
+        {
+          "revision": 9,
+          "outcome": "completed",
+          "elapsed_ms": 13780,
+          "calls": 1,
+          "usage_calls": 1,
+          "usage": {
+            "input_tokens": 5320,
+            "output_tokens": 603,
+            "total_tokens": 5923,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "native_input_tokens_after": 2606,
+          "method": "native",
+          "input_tokens_before": 6980,
+          "input_tokens_after": 2606
+        }
+      ],
+      "passed": true
+    },
+    {
+      "path": "semantic",
+      "cycles": [
+        {
+          "cycle": 1,
+          "source_messages": 9,
+          "source_sha256": "a3274f11b60ab4462d6bcae9493287faff6be0257fdc29e4628fb3465847a531",
+          "through_message": 6,
+          "source_unchanged": true,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 61.748,
+          "main_usage": {
+            "input_tokens": 741,
+            "output_tokens": 111,
+            "total_tokens": 852,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cost_usd": "0.01296"
+          },
+          "checkpoint_kind": "semantic"
+        },
+        {
+          "cycle": 2,
+          "source_messages": 13,
+          "source_sha256": "7bb13577e2c1f0a4f3e6ce1a21c5b8df4eef1e5ff29850a3634ba3087e6a5b9a",
+          "through_message": 10,
+          "source_unchanged": true,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 34.031,
+          "main_usage": {
+            "input_tokens": 3,
+            "output_tokens": 124,
+            "total_tokens": 127,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 2476,
+            "cost_usd": "0.03718"
+          },
+          "checkpoint_kind": "semantic"
+        },
+        {
+          "cycle": 3,
+          "source_messages": 17,
+          "source_sha256": "91838af391fcfb23ae053f363ed053416b39d4b835decee0582a633653dbfbc3",
+          "through_message": 14,
+          "source_unchanged": true,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 39.437,
+          "main_usage": {
+            "input_tokens": 3,
+            "output_tokens": 146,
+            "total_tokens": 149,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 2568,
+            "cost_usd": "0.03943"
+          },
+          "checkpoint_kind": "semantic"
+        },
+        {
+          "cycle": 4,
+          "source_messages": 21,
+          "source_sha256": "53d5fc9af68e9aff75ee67f69f673c17b10e8cab100976bac2f49827b6acc5d2",
+          "through_message": 18,
+          "source_unchanged": true,
+          "continuity_assertions": 8,
+          "elapsed_seconds": 38.83,
+          "main_usage": {
+            "input_tokens": 3,
+            "output_tokens": 146,
+            "total_tokens": 149,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 2619,
+            "cost_usd": "0.0400675"
+          },
+          "checkpoint_kind": "semantic"
+        }
+      ],
+      "tools_enabled": false,
+      "acceptance_level": "component continuity; no orchestration/tool execution",
+      "restart_resume": true,
+      "compactions": [
+        {
+          "revision": 1,
+          "outcome": "completed",
+          "elapsed_ms": 57768,
+          "calls": 5,
+          "method": "semantic",
+          "last_request_budget": {
+            "input_tokens": 695,
+            "input_limit_tokens": 913808,
+            "output_reserve": 4096
+          },
+          "usage_calls": 5,
+          "usage": {
+            "input_tokens": 976,
+            "output_tokens": 2371,
+            "total_tokens": 3347,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 9030,
+            "cost_usd": "0.2411850"
+          },
+          "priced_calls": 5
+        },
+        {
+          "revision": 5,
+          "outcome": "completed",
+          "elapsed_ms": 30651,
+          "calls": 2,
+          "method": "semantic",
+          "last_request_budget": {
+            "input_tokens": 3676,
+            "input_limit_tokens": 913808,
+            "output_reserve": 4096
+          },
+          "usage_calls": 2,
+          "usage": {
+            "input_tokens": 978,
+            "output_tokens": 1294,
+            "total_tokens": 2272,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 3673,
+            "cost_usd": "0.1203925"
+          },
+          "priced_calls": 2
+        },
+        {
+          "revision": 5,
+          "outcome": "completed",
+          "elapsed_ms": 35213,
+          "calls": 2,
+          "method": "semantic",
+          "last_request_budget": {
+            "input_tokens": 3776,
+            "input_limit_tokens": 913808,
+            "output_reserve": 4096
+          },
+          "usage_calls": 2,
+          "usage": {
+            "input_tokens": 6,
+            "output_tokens": 1478,
+            "total_tokens": 1484,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 6487,
+            "cost_usd": "0.1550475"
+          },
+          "priced_calls": 2
+        },
+        {
+          "revision": 9,
+          "outcome": "completed",
+          "elapsed_ms": 35029,
+          "calls": 2,
+          "method": "semantic",
+          "last_request_budget": {
+            "input_tokens": 3943,
+            "input_limit_tokens": 913808,
+            "output_reserve": 4096
+          },
+          "usage_calls": 2,
+          "usage": {
+            "input_tokens": 6,
+            "output_tokens": 1673,
+            "total_tokens": 1679,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 6754,
+            "cost_usd": "0.168135"
+          },
+          "priced_calls": 2
+        }
+      ],
+      "passed": true
+    }
+  ],
+  "source_revisions": {
+    "provider": "6e99b8cabb5d7819f31f9f0005c983e763f6b076",
+    "unified": "e745eb9a6d79e2de090bbdb01f99cab542f1be47",
+    "context_base": "b2f62791d61cd52195e21c301450b1e3b65ab954"
+  },
+  "context_source_sha256": {
+    "modules/context-managed/amplifier_module_context_managed/boundary.py": "ca50cb1400001aaef097fc453b588d7e86aa16f38b531e490e087914e69d31c3",
+    "modules/context-managed/amplifier_module_context_managed/checkpoint.py": "e03713f7e4d27194548ff5e7c512e1f4a57848c5720488090dcbee474b108921",
+    "modules/context-managed/amplifier_module_context_managed/summary.py": "b34f3f86ac23f71153e618cd8e71caac01665b19acfa67fbf709f79a477f69a5"
+  },
+  "limits": "Synthetic Astra-only continuity evaluation; no production restart/install/mutation; native compact cost unavailable."
+}
