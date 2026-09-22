@@ -150,9 +150,11 @@ class BoundaryContextManager:
             # The provider owns the complete native canonical window, including
             # retained user/developer items. Keep it intact and append only new
             # conversation messages. System prompts travel separately.
-            systems = [copy.deepcopy(row) for row in messages[:end]
-                       if row.get("role") == "system" or self._retained_reminder(row, retain)]
-            return systems + [copy.deepcopy(text)] + copy.deepcopy(messages[end:])
+            systems = [copy.deepcopy(row) for row in messages[:end] if row.get("role") == "system"]
+            reminders = [copy.deepcopy(row) for row in messages[:end] if self._retained_reminder(row, retain)]
+            # Signed checkpoints must be the first conversation item. Retained
+            # reminders are new input after that checkpoint, never before it.
+            return systems + [copy.deepcopy(text)] + reminders + copy.deepcopy(messages[end:])
         # System/developer messages, the original objective and explicitly
         # required persisted reminders remain verbatim with their provenance.
         first = next((i for i, row in enumerate(messages) if self._human(row)), None)
@@ -209,16 +211,19 @@ class BoundaryContextManager:
                 raise RuntimeError("History changed during compaction; stale summary was discarded")
         return text
 
-    async def _native_view_tokens(self, provider, messages):
+    async def _native_view_tokens(self, provider, messages, count_view=None):
         """Opaque windows require a real count of the entire assembled input."""
         check = getattr(provider, "request_budget", None)
-        if not callable(check):
+        if not callable(check) and count_view is None:
             return None
         try:
-            request = ChatRequest(messages=[Message(**row) for row in messages])
-            decision = check(request, context_estimate=0)
-            if inspect.isawaitable(decision):
-                decision = await decision
+            if count_view is not None:
+                decision = (await count_view(messages)).get("budget_decision")
+            else:
+                request = ChatRequest(messages=[Message(**row) for row in messages])
+                decision = check(request, context_estimate=0)
+                if inspect.isawaitable(decision):
+                    decision = await decision
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -229,7 +234,8 @@ class BoundaryContextManager:
         count = measured.get("input_tokens")
         return count if measured.get("kind") == "provider_count" and type(count) is int and count >= 0 else None
 
-    async def _prepare(self, provider, token_budget, retain):
+    async def _prepare(self, provider, token_budget, retain, *, native_count=None, native_request=None,
+                       system_factory=None):
         messages, revision = copy.deepcopy(self.messages), self.revision
         # An opted-in host commits originals before any fitted view can clip
         # tool output. References point to its existing evidence/transcript store.
@@ -252,7 +258,9 @@ class BoundaryContextManager:
         native = getattr(provider, "supports_native_compaction", None)
         validate_native = getattr(provider, "validate_compacted_context", None)
         use_native = (self.config.get("native_compaction", True) and callable(native) and native()
-                      and callable(validate_native))
+                      and callable(validate_native)
+                      and (not getattr(provider, "native_compaction_requires_request_context", False)
+                           or native_count is not None))
         if self.summary and isinstance(self.summary[1], dict):
             try:
                 valid_native = use_native and validate_native(self.summary[1])
@@ -262,7 +270,10 @@ class BoundaryContextManager:
                 self.summary = None
                 self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint transport is unavailable or invalid.", "originalsAvailable": True}
                 assembled = self._assembled(messages, None, retain)
-        measured_tokens = await self._native_view_tokens(provider, assembled) if use_native else None
+        measured_tokens = await self._native_view_tokens(provider, assembled, native_count) if use_native else None
+        if (getattr(provider, "native_compaction_requires_request_context", False)
+                and not isinstance((native_request or {}).get("dispatch"), ChatRequest)):
+            measured_tokens = None
         if self.summary and isinstance(self.summary[1], dict) and measured_tokens is None:
             # Never budget an opaque checkpoint by its short visible label.
             # Preserve originals and use the portable path when the continuation
@@ -313,9 +324,22 @@ class BoundaryContextManager:
                             # Required persisted reminders stay verbatim outside the
                             # native window, so they must not also enter it.
                             native_source = [row for row in source if not self._retained_reminder(row, retain)]
-                            request = ChatRequest(messages=[Message(**row) for row in native_source],
-                                max_output_tokens=self.config.get("summary_target_tokens", 1500),
-                                metadata={"purpose": "context-compaction", "stream": False})
+                            template = (native_request or {}).get("dispatch")
+                            if isinstance(template, ChatRequest):
+                                # The loop owns model/tool configuration. Reuse
+                                # that envelope and the current system prompt,
+                                # but compact only the eligible history prefix:
+                                # current-turn overlays must stay outside it.
+                                compact_messages = [row.model_copy(deep=True) for row in template.messages
+                                                    if row.role == "system"]
+                                compact_messages += [Message(**row) for row in native_source if row.get("role") != "system"]
+                                request = template.model_copy(deep=True, update={"messages": compact_messages})
+                            else:
+                                request = ChatRequest(messages=[Message(**row) for row in native_source])
+                            request = request.model_copy(update={
+                                "max_output_tokens": self.config.get("native_compaction_max_output_tokens", 4096),
+                                "metadata": {**(request.metadata or {}), "purpose": "context-compaction", "stream": False,
+                                             "native_compaction_request_context": isinstance(template, ChatRequest)}})
                             # The continuation provider owns opaque state. A
                             # separate utility provider/model is only for the
                             # portable semantic fallback, never native compact.
@@ -326,7 +350,7 @@ class BoundaryContextManager:
                             if not validate_native(result["message"]):
                                 raise ValueError("Native compaction returned an invalid transport envelope")
                             native_candidate = self._assembled(messages, (end, result["message"]), retain)
-                            candidate_tokens = await self._native_view_tokens(provider, native_candidate)
+                            candidate_tokens = await self._native_view_tokens(provider, native_candidate, native_count)
                             stats["native_input_tokens_after"] = candidate_tokens
                             if candidate_tokens is None or candidate_tokens >= assembled_tokens:
                                 raise ValueError("Native compaction did not produce a measured reduction")
@@ -391,8 +415,8 @@ class BoundaryContextManager:
                 "metadata": {"ephemeral": True, "persisted": True, "source": "context-managed-operations"}})
             protected.append(manifest)
         await fitter.set_messages(assembled)
-        if self.factory:
-            await fitter.set_system_prompt_factory(self.factory)
+        if system_factory or self.factory:
+            await fitter.set_system_prompt_factory(system_factory or self.factory)
         return fitter, protected
 
     async def get_messages_for_request(self, token_budget=None, provider=None):
@@ -411,7 +435,30 @@ class BoundaryContextManager:
     async def get_measured_request_view(self, *, provider, retain_contents, count_view, fit_output=None):
         async with self.lock:
             revision = self.revision
-            fitter, retain = await self._prepare(provider, None, retain_contents)
+            # Compaction and the final dispatch must see one system-prompt
+            # snapshot. The existing count callback constructs the actual
+            # ChatRequest, including tools and current-turn request overlays.
+            system_content = await self.factory() if self.factory else None
+
+            async def snapshot_factory():
+                return system_content
+
+            native_request = {}
+
+            async def native_count(messages):
+                working = copy.deepcopy(messages)
+                if self.factory:
+                    working = [{"role": "system", "content": system_content}] + [
+                        row for row in working if row.get("role") != "system"
+                        or (row.get("metadata") or {}).get("source") == "hook"]
+                attempt = await count_view(working)
+                if not native_request and isinstance(attempt.get("dispatch"), ChatRequest):
+                    native_request["dispatch"] = attempt["dispatch"].model_copy(deep=True)
+                return attempt
+
+            fitter, retain = await self._prepare(provider, None, retain_contents,
+                native_count=native_count, native_request=native_request,
+                system_factory=snapshot_factory if self.factory else None)
             result = await fitter.get_measured_request_view(provider=provider, retain_contents=retain,
                 count_view=count_view, fit_output=fit_output)
             if revision != self.revision:
