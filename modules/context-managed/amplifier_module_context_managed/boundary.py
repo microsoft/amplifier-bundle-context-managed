@@ -177,6 +177,7 @@ class BoundaryContextManager:
             raise ValueError("Summary source limit and call limit must be positive")
         pending = list(source_fragments(public_messages(source), limit))
         text = ""
+        summary_calls = 0
         while pending:
             fragment = pending.pop(0)
             request = summary_request(SUMMARY_PROMPT, fragment, text, self.config)
@@ -189,9 +190,10 @@ class BoundaryContextManager:
                 middle = len(fragment) // 2
                 pending[:0] = [fragment[:middle], fragment[middle:]]
                 continue
-            if stats["calls"] >= max_calls:
+            if summary_calls >= max_calls:
                 raise ValueError("Summary call limit reached before the covered prefix was complete")
             stats["calls"] += 1
+            summary_calls += 1
             try:
                 response = await summarizer.complete(request)
             except ContextLengthError:
@@ -319,7 +321,11 @@ class BoundaryContextManager:
                             # The continuation provider owns opaque state. A
                             # separate utility provider/model is only for the
                             # portable semantic fallback, never native compact.
-                            result = await provider.compact_context(request)
+                            # Waiting for a healthy provider is not a failure.
+                            # Only an explicitly configured deadline may stop it;
+                            # cancellation and real provider errors still propagate.
+                            native_timeout = self.config.get("native_compaction_timeout")
+                            result = await asyncio.wait_for(provider.compact_context(request), native_timeout)
                             add_usage(stats, result.get("usage"))
                             if result.get("kind") != "native" or not isinstance(result.get("message"), dict):
                                 raise ValueError("Native compaction returned an invalid checkpoint")
@@ -338,13 +344,17 @@ class BoundaryContextManager:
                             raise
                         except Exception as exc:
                             stats["native_failure"] = {"type": type(exc).__name__}
+                            if isinstance(exc, TimeoutError) and native_timeout is not None:
+                                stats["native_failure"].update(stage="native", timeout_seconds=native_timeout)
                     stats["method"] = "semantic"
                     # If native state cannot be continued, rebuild semantic
                     # evidence from originals, not an opaque-state placeholder.
                     semantic_source = messages[:end] if self.summary and isinstance(self.summary[1], dict) else source
-                    return await self._summarize(summarizer, semantic_source, revision, stats)
+                    return await asyncio.wait_for(
+                        self._summarize(summarizer, semantic_source, revision, stats),
+                        self.config.get("summary_timeout"))
 
-                text = await asyncio.wait_for(prepare_note(), self.config.get("summary_timeout", 120))
+                text = await prepare_note()
                 if revision != self.revision:
                     outcome = "superseded"
                     raise RuntimeError("History changed during compaction; stale summary was discarded")

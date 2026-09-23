@@ -37,13 +37,18 @@ providers can supply the same instance while no foreground inference runs. A
 native live provider requires a separate host-supplied `context.summary_provider`
 and `separate_summary_provider: true`. Summary traffic is marked with
 `metadata.purpose: context-compaction`; `context.compacting` lets hosts exclude it
-from public text streams. Summary failure falls back to the existing request
-fitter. History changes invalidate in-flight summaries and request views.
+from public text streams. Native compaction is preferred when the continuation
+provider exposes a validated and measured native contract. A native failure tries
+the portable text summary; only a failed summary or a still-oversized request
+falls back to fitting. Neither model phase has a default elapsed-time deadline.
+Explicit cancellation stops preparation without starting fallback work. History
+changes invalidate in-flight summaries and request views.
 
 Continuation notes remain derived state. With `durable_checkpoints: true`, a host
 can preserve and restore a validated summary checkpoint alongside its canonical
-history. Otherwise, summaries are recomputed after restore. There is no
-provider-opaque compaction backend. The engine reuses context-simple budget
+history. Otherwise, summaries are recomputed after restore. Provider-owned native
+checkpoints must pass transport and measurement validation before use; an invalid
+checkpoint falls back to originals. The engine reuses context-simple budget
 helpers as well as its public optional capabilities; record the resolved revision
 and validate the contract when updating the tracked branch. It is an experimental
 portable implementation, not a claim of ChatGPT quality parity.

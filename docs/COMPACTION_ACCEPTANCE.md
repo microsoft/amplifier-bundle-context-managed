@@ -117,16 +117,31 @@ Optional boundary-engine settings (existing trigger/output settings still apply)
 | `native_compaction` | `true` | Prefer the continuation provider's optional native contract. |
 | `native_min_new_tokens` | `500` | Avoid costly recompaction of a tiny eligible prefix, except when fitting is required. |
 | `summary_max_source_chars` | `512000` | Maximum source fragment; also bounded conservatively by provider context and exact request count. |
-| `summary_max_calls` | `16` | Bound total auxiliary attempts for one atomic summary. |
-| `summary_timeout` | `120` | Bound total elapsed time for one compaction attempt. |
+| `summary_max_calls` | `16` | Bound portable text-summary attempts for one atomic summary; the optional native attempt does not consume this allowance. |
+| `native_compaction_timeout` | unset | Optional caller-selected native-call deadline in seconds. By default wait until the provider completes, fails, or the user cancels. |
+| `summary_timeout` | unset | Optional caller-selected deadline for the portable summary phase only. Native compaction never consumes this budget. |
 | `summary_reasoning_effort` | `low` | Avoid spending the continuation model's high reasoning setting on routine notes. |
 | `summary_retry_delay` | `60` | Initial transient-failure cooldown in seconds; exponential backoff, three attempts. |
 
 `summary_target_tokens` still controls output reserve (default 1,500), and
 `summarization_model` now reaches the OpenAI request correctly. A source requiring
-more than the configured call/time limits falls back to the existing fitter;
+more than the configured call limit or an explicitly selected deadline falls back to the existing fitter;
 this is explicit failure, not a partial successful summary. Provider retries
 remain owned by the provider and are separate from this prefix-level cooldown.
+
+The fallback order is native compaction, then a portable text summary, then the
+request fitter as a last resort if summarization fails or cannot fit the request.
+Elapsed time alone does not trigger a fallback by default. Actual native provider
+errors still enter the summary phase, which gets its own optional deadline.
+User cancellation ends the operation without launching another model call.
+Canonical messages are preserved on every path. Provider transport settings must
+also permit long-running requests; this context-manager setting cannot override a
+provider's own SDK or transport deadline.
+
+The earlier shared 120-second default was incorrect for long native compaction:
+it cancelled the entire preparation coroutine and skipped the text-summary phase.
+The regression tests cover this ordering and cancellation with controlled providers;
+they do not establish the completion time of any production native request.
 
 No Core protocol change is required. Deploy the optional OpenAI provider transport
 before or with this context-manager update; older providers get portable notes.
