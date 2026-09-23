@@ -381,6 +381,151 @@ async def test_native_uses_continuation_provider_not_different_utility_model():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native_finishes", [True, False])
+async def test_native_and_semantic_compaction_have_independent_deadlines(native_finishes):
+    # Model the production full-window native call exceeding the portable
+    # summary timeout, without sending production history or waiting minutes.
+    manager = context(summary_timeout=0.01 if native_finishes else 1,
+                      native_compaction_timeout=1 if native_finishes else 0.01)
+    original = history()
+    await manager.set_messages(original)
+    manager.hooks = SimpleNamespace(emit=AsyncMock())
+    message = {"role":"user", "content":"Native continuation", "metadata":{
+        "source":"context-managed", "ephemeral":True, "persisted":True, "opaque":"fixture"}}
+    async def compact(request):
+        await asyncio.sleep(0.03)
+        return {"kind":"native", "message":message}
+    async def summarize(request):
+        await asyncio.sleep(0.03)
+        return response("ORBIT; budget $25; originals preserved; report pending.")
+    model = SimpleNamespace(
+        supports_native_compaction=lambda:True,
+        validate_compacted_context=lambda value:True,
+        compact_context=AsyncMock(side_effect=compact),
+        complete=AsyncMock(side_effect=summarize),
+        request_budget=lambda request, **kw:{"measurement":{"kind":"provider_count", "input_tokens":
+            100 if any((row.metadata or {}).get("opaque") for row in request.messages) else 9000}})
+    await manager.get_messages_for_request(provider=model)
+    assert await manager.get_messages() == original
+    assert manager.summary is not None
+    finished = next(call.args[1] for call in manager.hooks.emit.call_args_list
+                    if call.args[0] == "context:compaction_finished")
+    assert finished["outcome"] == "completed"
+    if native_finishes:
+        assert manager.summary[1] == message
+        model.complete.assert_not_awaited()
+        assert finished["method"] == "native"
+    else:
+        assert isinstance(manager.summary[1], str)
+        assert model.complete.await_count >= 1
+        assert finished["method"] == "semantic"
+        assert finished["native_failure"] == {"type":"TimeoutError", "stage":"native", "timeout_seconds":0.01}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [True, False])
+async def test_compaction_waits_for_provider_without_a_default_deadline(monkeypatch, native):
+    # Compress any accidentally restored finite deadline, so the old 120-second
+    # default fails this regression without spending two minutes in the test.
+    actual_wait_for = asyncio.wait_for
+    deadlines = []
+    async def accelerated_wait_for(awaitable, timeout):
+        deadlines.append(timeout)
+        return await actual_wait_for(awaitable, 0.001 if timeout is not None else None)
+    monkeypatch.setattr(asyncio, "wait_for", accelerated_wait_for)
+    manager = context()
+    original = history()
+    await manager.set_messages(original)
+    message = {"role":"user", "content":"Native continuation", "metadata":{
+        "source":"context-managed", "ephemeral":True, "persisted":True, "opaque":"fixture"}}
+    async def compact(request):
+        await asyncio.sleep(0.01)
+        return {"kind":"native", "message":message}
+    async def summarize(request):
+        await asyncio.sleep(0.01)
+        return response("ORBIT; budget $25; originals preserved; report pending.")
+    model = SimpleNamespace(
+        supports_native_compaction=lambda:native,
+        validate_compacted_context=lambda value:True,
+        compact_context=AsyncMock(side_effect=compact),
+        complete=AsyncMock(side_effect=summarize),
+        request_budget=lambda request, **kw:{"measurement":{"kind":"provider_count", "input_tokens":
+            100 if any((row.metadata or {}).get("opaque") for row in request.messages) else 9000}})
+    await manager.get_messages_for_request(provider=model)
+    assert deadlines and all(value is None for value in deadlines)
+    assert manager.summary is not None
+    assert await manager.get_messages() == original
+    if native:
+        model.complete.assert_not_awaited()
+        assert manager.summary[1] == message
+    else:
+        model.compact_context.assert_not_awaited()
+        assert isinstance(manager.summary[1], str)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("summary_fails", [False, True])
+async def test_native_failure_attempts_text_summary_before_last_resort_fitting(summary_fails):
+    calls = []
+    async def compact(request):
+        calls.append("native")
+        raise ConnectionError("provider connection failed")
+    async def summarize(request):
+        calls.append("summary")
+        if summary_fails:
+            raise LLMError("provider rejected summary", retryable=False)
+        return response("ORBIT; budget $25; originals preserved; report pending.")
+    model = SimpleNamespace(
+        supports_native_compaction=lambda:True,
+        validate_compacted_context=lambda value:True,
+        compact_context=compact, complete=summarize,
+        request_budget=lambda request, **kw:{"measurement":{"kind":"provider_count", "input_tokens":9000}})
+    manager = context(summary_max_calls=1)
+    manager.hooks = SimpleNamespace(emit=AsyncMock())
+    original = history()
+    await manager.set_messages(original)
+    result = await manager.get_messages_for_request(provider=model)
+    assert calls == ["native", "summary"]
+    assert await manager.get_messages() == original
+    finished = next(call.args[1] for call in manager.hooks.emit.call_args_list
+                    if call.args[0] == "context:compaction_finished")
+    assert finished["native_failure"]["type"] == "ConnectionError"
+    assert finished["method"] == "semantic"
+    if summary_fails:
+        assert manager.summary is None
+        assert finished["outcome"] == "fallback"
+        assert len(json.dumps(result)) < len(json.dumps(original))
+    else:
+        assert manager.summary is not None
+        assert finished["outcome"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [True, False])
+async def test_user_cancellation_during_compaction_does_not_start_fallback(native):
+    entered = asyncio.Event()
+    async def compact(request):
+        entered.set()
+        await asyncio.Event().wait()
+    model = SimpleNamespace(supports_native_compaction=lambda:native,
+        validate_compacted_context=lambda value:True, compact_context=AsyncMock(side_effect=compact),
+        complete=AsyncMock(side_effect=compact),
+        request_budget=lambda request, **kw:{"measurement":{"kind":"provider_count", "input_tokens":9000}})
+    manager = context()
+    original = history()
+    await manager.set_messages(original)
+    task = asyncio.create_task(manager.get_messages_for_request(provider=model))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert model.complete.await_count == (0 if native else 1)
+    assert model.compact_context.await_count == (1 if native else 0)
+    assert manager.summary is None
+    assert await manager.get_messages() == original
+
+
+@pytest.mark.asyncio
 async def test_large_retained_native_window_is_counted_not_its_small_label():
     manager = context(native_min_new_tokens=0)
     await manager.set_messages(history())
