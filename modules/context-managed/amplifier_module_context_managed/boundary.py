@@ -56,15 +56,29 @@ class BoundaryContextManager:
         return copy.deepcopy(self.messages)
 
     async def set_messages(self, messages):
-        # Restore, fork, tool-result replacement and ownership transfer are all
-        # authoritative. Invalidate every derived view, even at the same length.
-        self.messages = copy.deepcopy(messages)
+        replacement = copy.deepcopy(messages)
+        # A completed background job can replace a tool receipt in the recent
+        # tail. A checkpoint still describes the same evidence if its entire
+        # covered canonical prefix is unchanged. Use the durable checkpoint's
+        # exact JSON identity, including metadata and scalar types.
+        keep_summary = False
+        if self.summary:
+            end = self.summary[0]
+            if type(end) is int and 0 < end <= min(len(self.messages), len(replacement)):
+                try:
+                    keep_summary = digest(self.messages[:end]) == digest(replacement[:end])
+                except (TypeError, ValueError):
+                    pass  # Unverifiable history invalidates derived state.
+        self.messages = replacement
+        # Even a suffix-only change supersedes an in-flight request/compaction.
+        # Whole-history evidence references must be refreshed by the host.
         self.revision += 1
-        self.summary = None
-        self.summary_identity = None
         self.evidence_refs = []
         self.summary_failure = None
-        self.checkpoint_status = {"status": "invalidated", "reason": "Canonical history was replaced.", "originalsAvailable": True}
+        if not keep_summary:
+            self.summary = None
+            self.summary_identity = None
+            self.checkpoint_status = {"status": "invalidated", "reason": "Canonical history was replaced.", "originalsAvailable": True}
 
     def checkpoint_configuration(self):
         from .checkpoint import digest
