@@ -1,0 +1,366 @@
+{
+  "model": "gpt-6-astra",
+  "synthetic_only": true,
+  "app_session_created": false,
+  "response_deadline": null,
+  "cases": [
+    {
+      "path": "native",
+      "passed": true,
+      "cycles": [
+        {
+          "cycle": 1,
+          "checkpoint_kind": "native",
+          "assertions": {
+            "project": true,
+            "budget": true,
+            "launch_day": true,
+            "receipt": true,
+            "artifact": true,
+            "validator_receipt": true,
+            "pending_publication": true,
+            "production_changed": true,
+            "replay_completed_operations": true,
+            "delete_originals": true
+          },
+          "passed": true,
+          "source_sha256": "a7d502ef23d14d8d9bd47acf150fe669b8042e527e615abddc78ea2055e695bd",
+          "source_unchanged": true,
+          "elapsed_seconds": 13.795,
+          "usage": {
+            "input_tokens": 556,
+            "output_tokens": 109,
+            "total_tokens": 665,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cost_usd": "0.01101"
+          }
+        },
+        {
+          "cycle": 2,
+          "checkpoint_kind": "native",
+          "assertions": {
+            "project": true,
+            "budget": true,
+            "launch_day": true,
+            "receipt": true,
+            "artifact": true,
+            "validator_receipt": true,
+            "pending_publication": true,
+            "production_changed": true,
+            "replay_completed_operations": true,
+            "delete_originals": true
+          },
+          "passed": true,
+          "source_sha256": "870a96d89f5cace9b6ebba6483af83b72d2001ceaef09e9548470a6cd49ffe31",
+          "source_unchanged": true,
+          "elapsed_seconds": 18.24,
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 109,
+            "total_tokens": 112,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 4695,
+            "cost_usd": "0.0641675"
+          }
+        }
+      ],
+      "compactions": [
+        {
+          "revision": 1,
+          "outcome": "completed",
+          "elapsed_ms": 10181,
+          "calls": 1,
+          "usage_calls": 1,
+          "usage": {
+            "input_tokens": 22689,
+            "output_tokens": 398,
+            "total_tokens": 23087,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "native_input_tokens_after": 556,
+          "method": "native",
+          "input_tokens_before": 22754,
+          "input_tokens_after": 556
+        },
+        {
+          "revision": 5,
+          "outcome": "completed",
+          "elapsed_ms": 14705,
+          "calls": 1,
+          "usage_calls": 1,
+          "usage": {
+            "input_tokens": 3385,
+            "output_tokens": 629,
+            "total_tokens": 4014,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "native_input_tokens_after": 4698,
+          "method": "native",
+          "input_tokens_before": 7287,
+          "input_tokens_after": 4698
+        }
+      ],
+      "fresh_context_restore": true
+    },
+    {
+      "path": "semantic",
+      "passed": true,
+      "cycles": [
+        {
+          "cycle": 1,
+          "checkpoint_kind": "semantic",
+          "assertions": {
+            "project": true,
+            "budget": true,
+            "launch_day": true,
+            "receipt": true,
+            "artifact": true,
+            "validator_receipt": true,
+            "pending_publication": true,
+            "production_changed": true,
+            "replay_completed_operations": true,
+            "delete_originals": true
+          },
+          "passed": true,
+          "source_sha256": "a7d502ef23d14d8d9bd47acf150fe669b8042e527e615abddc78ea2055e695bd",
+          "source_unchanged": true,
+          "elapsed_seconds": 46.941,
+          "usage": {
+            "input_tokens": 807,
+            "output_tokens": 180,
+            "total_tokens": 987,
+            "reasoning_tokens": 69,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cost_usd": "0.01707"
+          }
+        },
+        {
+          "cycle": 2,
+          "checkpoint_kind": "semantic",
+          "assertions": {
+            "project": true,
+            "budget": true,
+            "launch_day": true,
+            "receipt": true,
+            "artifact": true,
+            "validator_receipt": true,
+            "pending_publication": true,
+            "production_changed": true,
+            "replay_completed_operations": true,
+            "delete_originals": true
+          },
+          "passed": true,
+          "source_sha256": "870a96d89f5cace9b6ebba6483af83b72d2001ceaef09e9548470a6cd49ffe31",
+          "source_unchanged": true,
+          "elapsed_seconds": 20.685,
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 132,
+            "total_tokens": 135,
+            "reasoning_tokens": 21,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 4873,
+            "cost_usd": "0.0675425"
+          }
+        }
+      ],
+      "compactions": [
+        {
+          "revision": 1,
+          "outcome": "completed",
+          "elapsed_ms": 41425,
+          "calls": 4,
+          "method": "semantic",
+          "last_request_budget": {
+            "input_tokens": 754,
+            "input_limit_tokens": 914904,
+            "output_reserve": 3000
+          },
+          "usage_calls": 4,
+          "usage": {
+            "input_tokens": 1015,
+            "output_tokens": 2059,
+            "total_tokens": 3074,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 24156,
+            "cost_usd": "0.4150500"
+          },
+          "priced_calls": 4
+        },
+        {
+          "revision": 5,
+          "outcome": "completed",
+          "elapsed_ms": 16879,
+          "calls": 1,
+          "method": "semantic",
+          "last_request_budget": {
+            "input_tokens": 4035,
+            "input_limit_tokens": 914904,
+            "output_reserve": 3000
+          },
+          "usage_calls": 1,
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 873,
+            "total_tokens": 876,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 4032,
+            "cost_usd": "0.09408"
+          },
+          "priced_calls": 1
+        }
+      ],
+      "fresh_context_restore": true
+    },
+    {
+      "path": "native-error-to-semantic",
+      "passed": true,
+      "cycles": [
+        {
+          "cycle": 1,
+          "checkpoint_kind": "semantic",
+          "assertions": {
+            "project": true,
+            "budget": true,
+            "launch_day": true,
+            "receipt": true,
+            "artifact": true,
+            "validator_receipt": true,
+            "pending_publication": true,
+            "production_changed": true,
+            "replay_completed_operations": true,
+            "delete_originals": true
+          },
+          "passed": true,
+          "source_sha256": "a7d502ef23d14d8d9bd47acf150fe669b8042e527e615abddc78ea2055e695bd",
+          "source_unchanged": true,
+          "elapsed_seconds": 44.126,
+          "usage": {
+            "input_tokens": 690,
+            "output_tokens": 109,
+            "total_tokens": 799,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cost_usd": "0.01235"
+          }
+        },
+        {
+          "cycle": 2,
+          "checkpoint_kind": "semantic",
+          "assertions": {
+            "project": true,
+            "budget": true,
+            "launch_day": true,
+            "receipt": true,
+            "artifact": true,
+            "validator_receipt": true,
+            "pending_publication": true,
+            "production_changed": true,
+            "replay_completed_operations": true,
+            "delete_originals": true
+          },
+          "passed": true,
+          "source_sha256": "870a96d89f5cace9b6ebba6483af83b72d2001ceaef09e9548470a6cd49ffe31",
+          "source_unchanged": true,
+          "elapsed_seconds": 18.349,
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 109,
+            "total_tokens": 112,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 4775,
+            "cost_usd": "0.0651675"
+          }
+        }
+      ],
+      "compactions": [
+        {
+          "revision": 1,
+          "outcome": "completed",
+          "elapsed_ms": 40065,
+          "calls": 5,
+          "native_failure": {
+            "type": "RuntimeError"
+          },
+          "method": "semantic",
+          "last_request_budget": {
+            "input_tokens": 663,
+            "input_limit_tokens": 914904,
+            "output_reserve": 3000
+          },
+          "usage_calls": 4,
+          "usage": {
+            "input_tokens": 924,
+            "output_tokens": 1784,
+            "total_tokens": 2708,
+            "reasoning_tokens": 34,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 24053,
+            "cost_usd": "0.3991025"
+          },
+          "priced_calls": 4
+        },
+        {
+          "revision": 5,
+          "outcome": "completed",
+          "elapsed_ms": 14805,
+          "calls": 2,
+          "native_failure": {
+            "type": "RuntimeError"
+          },
+          "method": "semantic",
+          "last_request_budget": {
+            "input_tokens": 3900,
+            "input_limit_tokens": 914904,
+            "output_reserve": 3000
+          },
+          "usage_calls": 1,
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 775,
+            "total_tokens": 778,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 3897,
+            "cost_usd": "0.0874925"
+          },
+          "priced_calls": 1
+        }
+      ],
+      "fresh_context_restore": true
+    }
+  ],
+  "recorded_at": "2026-09-23",
+  "sources": {
+    "amplifier-core": {
+      "version": "2.0.0",
+      "commit": "4f53e0f666aa370ec7e579bf282b7a4b6c96fbbc"
+    },
+    "amplifier-module-context-managed": {
+      "version": "0.1.0",
+      "commit": "8162dfa40089b758c5c8bfcec995dd3e5044063b"
+    },
+    "amplifier-module-provider-openai": {
+      "version": "1.0.0",
+      "commit": "5cabc7d0ab45c6dd28cd8e3118bdc6fa7ea83d81"
+    },
+    "openai": {
+      "version": "3.19.0",
+      "commit": null
+    }
+  },
+  "tested_script_sha256": "7bc68a0efce1aa05ab7cc78804785dae2b63f8b3f77a0c3c946206725f6539f6",
+  "published_script_sha256": "f49b527352992c8c6879062ae9a6725fe8d9a942d5375f7adefbbe92798a0fef",
+  "model_call_code_equivalence": "AST equal after normalizing module docstring and import grouping",
+  "boundary": "Real provider, synthetic standalone history and two compactions per mode; not a 900k-token production conversation or browser test."
+}
