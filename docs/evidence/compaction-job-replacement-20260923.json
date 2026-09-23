@@ -1,0 +1,83 @@
+{
+  "scope": "Offline actual loop-live job result synchronization; synthetic providers; no app or model access",
+  "baseline": {
+    "contextSource": {
+      "sha256": "83f8db08c26c5a7a68fec29dbdb8d4b1b0a9d637244bfdd1558a28cb8df6e890"
+    },
+    "loopSource": {
+      "sha256": "298aeed2211ee51bfdefc8cb0752dbd69538e5eec4b48d735a15687202880ddd"
+    },
+    "networkRequests": 0,
+    "modelRequests": 0,
+    "appAccessed": false,
+    "cases": [
+      {
+        "method": "native",
+        "sourceChars": 3600000,
+        "replacements": 50,
+        "initialCalls": 1,
+        "callsAfterReplacements": 51,
+        "callsAfterRestoredReplacement": 52,
+        "preservedWithoutRecompaction": false,
+        "changedCoveredPrefixInvalidates": true,
+        "allExactResultsRetained": true,
+        "replacementMedianMs": 0.17,
+        "replacementMaxMs": 0.327
+      },
+      {
+        "method": "semantic",
+        "sourceChars": 30000,
+        "replacements": 50,
+        "initialCalls": 1,
+        "callsAfterReplacements": 51,
+        "callsAfterRestoredReplacement": 52,
+        "preservedWithoutRecompaction": false,
+        "changedCoveredPrefixInvalidates": true,
+        "allExactResultsRetained": true,
+        "replacementMedianMs": 0.168,
+        "replacementMaxMs": 0.322
+      }
+    ],
+    "passed": false
+  },
+  "candidate": {
+    "contextSource": {
+      "sha256": "4cec218f038248f20418a4d7c0c164cd9d892d64f9d0e053cec712ba5c241d22"
+    },
+    "loopSource": {
+      "sha256": "298aeed2211ee51bfdefc8cb0752dbd69538e5eec4b48d735a15687202880ddd"
+    },
+    "networkRequests": 0,
+    "modelRequests": 0,
+    "appAccessed": false,
+    "cases": [
+      {
+        "method": "native",
+        "sourceChars": 3600000,
+        "replacements": 50,
+        "initialCalls": 1,
+        "callsAfterReplacements": 1,
+        "callsAfterRestoredReplacement": 1,
+        "preservedWithoutRecompaction": true,
+        "changedCoveredPrefixInvalidates": true,
+        "allExactResultsRetained": true,
+        "replacementMedianMs": 20.015,
+        "replacementMaxMs": 20.695
+      },
+      {
+        "method": "semantic",
+        "sourceChars": 30000,
+        "replacements": 50,
+        "initialCalls": 1,
+        "callsAfterReplacements": 1,
+        "callsAfterRestoredReplacement": 1,
+        "preservedWithoutRecompaction": true,
+        "changedCoveredPrefixInvalidates": true,
+        "allExactResultsRetained": true,
+        "replacementMedianMs": 0.312,
+        "replacementMaxMs": 0.454
+      }
+    ],
+    "passed": true
+  }
+}
