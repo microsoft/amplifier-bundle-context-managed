@@ -8,6 +8,10 @@ DNS resolution are denied during the checks. Tools only update an in-process
 counter. No credentials, paid model calls, user history or production service are
 needed.
 
+For a separate explicitly authorized real-provider check of native, semantic, and
+failed-native-to-semantic retention, see
+[COMPACTION_LIVE_RETENTION.md](COMPACTION_LIVE_RETENTION.md).
+
 They establish transport, orchestration, history and fallback behavior. They do
 not establish real model summary quality, production deployment, browser behavior
 or how long OpenAI will actually take to compact a production request.
