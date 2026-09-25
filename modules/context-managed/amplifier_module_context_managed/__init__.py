@@ -24,6 +24,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ._text_estimate import estimate_messages
+
 logger = logging.getLogger(__name__)
 
 # Format version for transcript.jsonl header
@@ -526,11 +528,16 @@ class ManagedContextManager:
                     {
                         "usage_fraction": usage_fraction,
                         "token_count": conversation_tokens,
+                        "estimate_scope": (
+                            "text_only"
+                            if estimate_messages(assembled).has_unmeasured_images
+                            else "all_text"
+                        ),
                         "budget": available,
                     },
                 )
 
-        # Hard budget enforcement — never return more tokens than the budget allows.
+        # Text-budget enforcement; unmeasured images require provider validation.
         # The async LLM summarization is the preferred path (produces proper summaries),
         # but this is the last gate before the provider call.  It operates on the
         # assembled view so self._messages and self._running_token_estimate are left
@@ -695,12 +702,12 @@ class ManagedContextManager:
     # ── Token Estimation ──────────────────────────────────────────────────────
 
     def _estimate_tokens(self, messages: list[dict[str, Any]]) -> int:
-        """Rough token estimation (chars / 4) for a list of messages."""
-        return sum(len(str(msg)) // 4 for msg in messages)
+        """Text estimate; typed image cost remains unknown to this heuristic."""
+        return estimate_messages(messages).tokens
 
     def _estimate_tokens_single(self, message: dict[str, Any]) -> int:
         """Rough token estimation for a single message."""
-        return len(str(message)) // 4
+        return estimate_messages([message]).tokens
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
