@@ -94,3 +94,7 @@ Any use of third-party trademarks or logos are subject to those third-party's po
 Boundary-engine hosts can opt into [durable compaction checkpoints](modules/context-managed/README.md).
 The host retains original transcripts and provides storage; the module validates
 compatible derived summaries without replaying work.
+
+See the [native provider audit](docs/NATIVE_PROVIDER_AUDIT.md) for supported
+mechanisms, request-context requirements, qualification results, and transport
+limitations across the Microsoft provider modules.

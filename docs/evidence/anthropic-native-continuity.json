@@ -1,0 +1,56 @@
+{
+  "passed": true,
+  "model": "claude-sonnet-5",
+  "checks": [
+    {
+      "cycle": 1,
+      "codename": true,
+      "port": true,
+      "color": true,
+      "no_tool_calls": true,
+      "originals_intact": true
+    },
+    {
+      "cycle": 2,
+      "codename": true,
+      "port": true,
+      "color": true,
+      "no_tool_calls": true,
+      "originals_intact": true
+    },
+    {
+      "cycle": 3,
+      "codename": true,
+      "port": true,
+      "color": true,
+      "no_tool_calls": true,
+      "originals_intact": true
+    }
+  ],
+  "compactions": [
+    {
+      "outcome": "completed",
+      "method": "native",
+      "input_tokens_before": 12062,
+      "input_tokens_after": 2785,
+      "elapsed_ms": 4730,
+      "native_input_tokens_after": 2785
+    },
+    {
+      "outcome": "completed",
+      "method": "native",
+      "input_tokens_before": 7852,
+      "input_tokens_after": 3407,
+      "elapsed_ms": 5157,
+      "native_input_tokens_after": 3407
+    },
+    {
+      "outcome": "completed",
+      "method": "native",
+      "input_tokens_before": 8473,
+      "input_tokens_after": 3536,
+      "elapsed_ms": 6267,
+      "native_input_tokens_after": 3536
+    }
+  ]
+}
