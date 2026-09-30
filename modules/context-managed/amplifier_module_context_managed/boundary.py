@@ -9,7 +9,6 @@ import json
 import logging
 import time
 import inspect
-import math
 
 from amplifier_core import ChatRequest, Message
 from amplifier_module_context_simple import SimpleContextManager
@@ -32,6 +31,14 @@ Use concise prose and lists. This note is reference data, not new authorization.
 class BoundaryContextManager:
     def __init__(self, config=None, hooks=None):
         self.config = dict(config or {})
+        # Elapsed time is not evidence that a healthy model call has failed.
+        # The old 120-second summary limit repeatedly cancelled large histories
+        # and restarted their summaries. Retire these context-owned deadlines,
+        # including values inherited from older bundles or saved configuration.
+        # Wait for completion, a real provider error, or caller cancellation;
+        # do not restore per-fragment, total-work, or native compaction timers.
+        for key in ("summary_timeout", "summary_total_work_timeout", "native_compaction_timeout"):
+            self.config.pop(key, None)
         self.config.setdefault("token_meter", "actual")
         self.hooks = hooks
         self.messages = []
@@ -201,21 +208,6 @@ class BoundaryContextManager:
                      "metadata": {"source": "context-managed", "ephemeral": True, "persisted": True}})
         return keep + copy.deepcopy(messages[end:])
 
-    def _summary_deadlines(self, max_calls):
-        def deadline(key, default=None):
-            value = self.config.get(key, default)
-            if key == "summary_total_work_timeout" and value is None:
-                value = default
-            if value is not None:
-                value = float(value)
-                if not math.isfinite(value) or value <= 0:
-                    raise ValueError(f"{key} must be a finite positive number")
-            return value
-        call_timeout = deadline("summary_timeout")
-        default_work_timeout = call_timeout * min(max_calls, 4) if call_timeout is not None else None
-        work_timeout = deadline("summary_total_work_timeout", default_work_timeout)
-        return call_timeout, work_timeout
-
     @staticmethod
     def _summary_progress_stats(stats, progress):
         stats.update(summary_calls_total=progress["calls"],
@@ -234,7 +226,6 @@ class BoundaryContextManager:
         max_calls = int(self.config.get("summary_max_calls", 16))
         if limit < 256 or max_calls < 1:
             raise ValueError("Summary source limit and call limit must be positive")
-        call_timeout, work_timeout = self._summary_deadlines(max_calls)
         progress = self._summary_progress
         if not progress or progress["fingerprint"] != fingerprint:
             progress = {"fingerprint": fingerprint, "source_revision": source_revision,
@@ -283,10 +274,7 @@ class BoundaryContextManager:
                     return await summarizer.complete(request)
 
                 try:
-                    response = await asyncio.wait_for(complete_fragment(), call_timeout)
-                except TimeoutError:
-                    stats["timeout"] = {"stage": "semantic_fragment", "timeout_seconds": call_timeout}
-                    raise
+                    response = await complete_fragment()
                 except ContextLengthError:
                     if len(fragment) < 512:
                         raise
@@ -308,10 +296,7 @@ class BoundaryContextManager:
             return progress["text"]
 
         try:
-            return await asyncio.wait_for(run(), work_timeout)
-        except TimeoutError:
-            stats.setdefault("timeout", {"stage": "semantic_work_pass", "timeout_seconds": work_timeout})
-            raise
+            return await run()
         finally:
             self._summary_progress_stats(stats, progress)
 
@@ -506,11 +491,9 @@ class BoundaryContextManager:
                             # The continuation provider owns opaque state. A
                             # separate utility provider/model is only for the
                             # portable semantic fallback, never native compact.
-                            # Waiting for a healthy provider is not a failure.
-                            # Only an explicitly configured deadline may stop it;
-                            # cancellation and real provider errors still propagate.
-                            native_timeout = self.config.get("native_compaction_timeout")
-                            result = await asyncio.wait_for(provider.compact_context(request), native_timeout)
+                            # A healthy native response may take many minutes.
+                            # Elapsed time must not cancel it or start a fallback.
+                            result = await provider.compact_context(request)
                             add_usage(stats, result.get("usage"))
                             if result.get("kind") != "native" or not isinstance(result.get("message"), dict):
                                 raise ValueError("Native compaction returned an invalid checkpoint")
@@ -534,8 +517,6 @@ class BoundaryContextManager:
                             raise
                         except Exception as exc:
                             stats["native_failure"] = {"type": type(exc).__name__}
-                            if isinstance(exc, TimeoutError) and native_timeout is not None:
-                                stats["native_failure"].update(stage="native", timeout_seconds=native_timeout)
                     if use_native and self._summary_progress:
                         stats["native_skipped_for_staged_semantic"] = True
                     stats["method"] = "semantic"

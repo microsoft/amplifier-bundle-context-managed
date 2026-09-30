@@ -109,7 +109,6 @@ async def run_case(native):
         "summarize_trigger": 0.12,
         "summary_target_tokens": 4096,
         "summary_max_source_chars": 18000,
-        "summary_timeout": 180,
         "durable_checkpoints": True,
         "native_compaction": native,
     }
@@ -153,7 +152,7 @@ async def run_case(native):
                 stream=False,
                 metadata={"stream": False},
             )
-            answer = await asyncio.wait_for(model.complete(request), 120)
+            answer = await model.complete(request)
             text = "\n".join(
                 block.text
                 for block in answer.content
@@ -259,7 +258,7 @@ async def main(args):
     for mode in args.mode:
         try:
             report["cases"].append(
-                await asyncio.wait_for(run_case(mode == "native"), 900)
+                await run_case(mode == "native")
             )
         except Exception as exc:  # noqa: BLE001 - redact arbitrary SDK errors in the evidence report
             report["cases"].append(

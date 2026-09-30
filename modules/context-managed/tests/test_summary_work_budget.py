@@ -44,8 +44,8 @@ def finished(manager):
 
 
 @pytest.mark.asyncio
-async def test_each_fragment_gets_its_deadline_and_full_note_commits_once():
-    manager = await context(summary_timeout=.10)
+async def test_legacy_fragment_and_work_timers_do_not_interrupt_healthy_summary():
+    manager = await context(summary_timeout=.001, summary_total_work_timeout=.001)
     requests = []
 
     async def complete(request):
@@ -55,7 +55,7 @@ async def test_each_fragment_gets_its_deadline_and_full_note_commits_once():
 
     original = await manager.get_messages()
     await manager._prepare(SimpleNamespace(complete=complete), None, [])
-    assert len(requests) >= 4  # The whole phase exceeds the per-fragment deadline.
+    assert len(requests) >= 4  # Every healthy fragment exceeds the retired timers.
     assert manager.summary[0] == 3
     assert manager._summary_progress is None
     assert await manager.get_messages() == original
@@ -67,30 +67,25 @@ async def test_each_fragment_gets_its_deadline_and_full_note_commits_once():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("deadline", ["fragment", "work_pass"])
-async def test_timeout_resumes_completed_fragments_without_exporting_partial_note(deadline):
-    manager = await context(summary_timeout=.05 if deadline == "fragment" else .5,
-                            summary_total_work_timeout=.08 if deadline == "work_pass" else .5)
-    requests, cancelled = [], []
+@pytest.mark.parametrize("failure", [TimeoutError("transport timeout"), LLMError("provider unavailable", retryable=True)])
+async def test_provider_failure_resumes_completed_fragments_without_exporting_partial_note(failure):
+    manager = await context()
+    requests = []
 
     async def complete(request):
         requests.append(request)
         if len(requests) == 2:
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                cancelled.append(True)
-                raise
+            raise failure
         return response("FIRST fragment verified; originals preserved.")
 
     model = SimpleNamespace(complete=complete)
     original = await manager.get_messages()
     await manager._prepare(model, None, [])
-    assert cancelled == [True]
     assert manager.summary is None and manager.export_checkpoint(IDENTITY) is None
     assert manager._summary_progress["completed"] == 1
     first_event = finished(manager)[-1]
-    assert first_event["timeout"]["stage"] == "semantic_" + deadline
+    assert first_event["failure"]["type"] == type(failure).__name__
+    assert "timeout" not in first_event  # No fabricated context-owned deadline.
     assert first_event["completed_fragments"] == 1
     assert first_event["remaining_fragments"] > 0
     await manager._prepare(model, None, [])
@@ -219,9 +214,12 @@ async def test_draft_invalidates_on_changed_summary_contract(change):
 
 
 @pytest.mark.asyncio
-async def test_default_work_budget_is_bounded_even_if_explicit_null_is_supplied():
-    manager = await context(summary_timeout=.5, summary_total_work_timeout=None)
-    assert manager._summary_deadlines(16) == (.5, 2)
+@pytest.mark.parametrize("value", [None, .001, 120, 600])
+async def test_saved_legacy_deadlines_are_retired_without_configuration_failure(value):
+    manager = await context(summary_timeout=value, summary_total_work_timeout=value,
+                            native_compaction_timeout=value)
+    for key in ("summary_timeout", "summary_total_work_timeout", "native_compaction_timeout"):
+        assert key not in manager.config
 
 
 @pytest.mark.asyncio

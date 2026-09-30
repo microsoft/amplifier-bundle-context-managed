@@ -207,13 +207,10 @@ async def run_work_budget_cases():
     """Exercise installed Core mounts and logical SDK calls on an unchanged prefix."""
     reports = []
     for mode in ("slow-fragments", "auto-continuations", "resume-work", "stalled-replacements"):
-        events, requests, cancellations = [], [], []
+        events, requests, provider_failures = [], [], []
         config = {"engine": "boundary", "durable_checkpoints": True,
             "max_tokens": 10000, "summarize_trigger": .01, "native_compaction": False,
-            "summary_max_source_chars": 6000, "summary_retry_delay": 0,
-            "summary_timeout": .12, "summary_total_work_timeout": .5}
-        if mode == "resume-work":
-            config.update(summary_timeout=.5, summary_total_work_timeout=.06)
+            "summary_max_source_chars": 6000, "summary_retry_delay": 0}
         session = AmplifierSession({"session": {
             "orchestrator": {"module": "loop-live", "config": {"configured_bundle": True}},
             "context": {"module": "context-managed", "config": config}},
@@ -238,11 +235,10 @@ async def run_work_budget_cases():
             assert "Prepare a factual continuation note" in body.get("instructions", "")
             requests.append(copy.deepcopy(body))
             if mode == "stalled-replacements" or (mode == "resume-work" and len(requests) == 2):
-                try:
-                    await asyncio.Event().wait()
-                except asyncio.CancelledError:
-                    cancellations.append(len(requests))
-                    raise
+                # Inject a genuine transport failure, not a context timer.
+                # Healthy model work must never be cancelled by elapsed time.
+                provider_failures.append(len(requests))
+                raise httpx.ReadTimeout("Synthetic provider transport failure", request=request)
             if mode in {"slow-fragments", "auto-continuations"}:
                 await asyncio.sleep(.03)
             if mode == "auto-continuations" and len(requests) % 2:
@@ -282,7 +278,10 @@ async def run_work_budget_cases():
                 assert manager._summary_progress["completed"] == staged
                 await manager._prepare(provider, None, [])
                 assert requests[first_calls]["input"] == requests[first_calls-1]["input"]
-                assert events[0]["timeout"]["stage"] == "semantic_work_pass"
+                # The provider maps SDK transport timeouts to a retryable
+                # kernel LLMError; the context manager adds no timer of its own.
+                assert events[0]["failure"]["type"] == "LLMError"
+                assert events[0]["failure"]["retryable"] is True
                 assert events[-1]["resumed_fragments"] == staged
             elif mode == "stalled-replacements":
                 for number in range(8):
@@ -293,7 +292,7 @@ async def run_work_budget_cases():
                     await BundleLiveOrchestrator._synchronize_job_results(
                         SimpleNamespace(native_job=lambda call: job), manager)
                     await manager._prepare(provider, None, [])
-                assert len(requests) == 3 and len(cancellations) == 3
+                assert len(requests) == 3 and len(provider_failures) == 3
                 assert manager.summary is None and manager.summary_failure["attempts"] == 3
             if mode != "stalled-replacements":
                 assert manager.summary and manager._summary_progress is None
@@ -312,7 +311,7 @@ async def run_work_budget_cases():
             reports.append({"mode": mode, "passed": True,
                 "summary_http_requests": len(requests),
                 "logical_summary_calls": sum(event["calls"] for event in events),
-                "cancelled_requests": len(cancellations),
+                "provider_failures": len(provider_failures),
                 "elapsed_seconds": round(time.monotonic()-started, 3),
                 "canonical_prefix_sha256": checksum(canonical[:2]), "covered_prefix_unchanged": True,
                 "checkpoint_round_trip": mode != "stalled-replacements", "events": events})
