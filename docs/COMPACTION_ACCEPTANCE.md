@@ -117,17 +117,49 @@ Optional boundary-engine settings (existing trigger/output settings still apply)
 | `native_compaction` | `true` | Prefer the continuation provider's optional native contract. |
 | `native_min_new_tokens` | `500` | Avoid costly recompaction of a tiny eligible prefix, except when fitting is required. |
 | `summary_max_source_chars` | `512000` | Maximum source fragment; also bounded conservatively by provider context and exact request count. |
-| `summary_max_calls` | `16` | Bound portable text-summary attempts for one atomic summary; the optional native attempt does not consume this allowance. |
+| `summary_max_calls` | `16` | Bound portable logical provider calls across all retries of one exact prefix/identity/configuration. Failed calls consume this allowance; exhaustion suppresses retries until source or contract changes. Native attempts do not consume it. |
 | `native_compaction_timeout` | unset | Optional caller-selected native-call deadline in seconds. By default wait until the provider completes, fails, or the user cancels. |
-| `summary_timeout` | unset | Optional caller-selected deadline for the portable summary phase only. Native compaction never consumes this budget. |
+| `summary_timeout` | unset | Optional deadline in seconds for each portable fragment's preflight and logical provider call, including provider auto-continuations. Native compaction never consumes it. |
+| `summary_total_work_timeout` | unset, or `summary_timeout * min(summary_max_calls, 4)` | Bound each portable work pass. An explicit positive value overrides the calculated default. A null value preserves the default. Without either deadline, wait for healthy providers as before. |
 | `summary_reasoning_effort` | `low` | Avoid spending the continuation model's high reasoning setting on routine notes. |
-| `summary_retry_delay` | `60` | Initial transient-failure cooldown in seconds; exponential backoff, three attempts. |
+| `summary_retry_delay` | `60` | Initial transient-failure cooldown in seconds; exponential backoff and three stalled attempts. Successful fragment progress resets the stalled-attempt count; the total call limit still applies. |
 
 `summary_target_tokens` still controls output reserve (default 1,500), and
 `summarization_model` now reaches the OpenAI request correctly. A source requiring
 more than the configured call limit or an explicitly selected deadline falls back to the existing fitter;
 this is explicit failure, not a partial successful summary. Provider retries
 remain owned by the provider and are separate from this prefix-level cooldown.
+
+`summary_timeout` formerly covered the entire sequential portable phase. It now
+applies independently to each fragment so several healthy calls can complete a
+large prefix. Use `summary_total_work_timeout` to retain an explicit whole-pass
+deadline. The calculated default bounds total waiting whenever a fragment
+deadline is configured.
+
+Completed fragments remain private in-memory work after a retryable failure and
+can resume for the exact same prefix, provider/model identity, and configuration.
+They are never exported as a checkpoint or used in a request before the complete
+prefix has been covered and the final note validated. Suffix-only background
+result replacements preserve this work and failure suppression; an in-flight
+request still aborts on any history replacement. Changes to covered evidence or
+the summary contract, permanent failures, and explicit cancellation discard the
+draft. A resumed portable draft skips another already-failed native attempt.
+
+In the measured request path, the semantic trigger now uses the loop's complete
+request preflight, including instructions, tool definitions, request options and
+pending-operation observations. An identical final view reuses that preflight;
+changed views are counted again. Provider estimates remain explicitly labelled
+when native counts are unavailable. The legacy path uses the public message
+projection for its semantic estimate, excluding private/duplicate transcript
+fields; the shared fitter still owns hard input safety, media and opaque state.
+`context:compaction_started` records the trigger, count kind and policy budget.
+Finished events record completed/resumed/remaining fragments, total summary
+calls and the timeout stage. No prompt or exception body is added to these fields.
+
+Before publishing a completed note, history revision, checkpoint identity,
+configuration and provider/model identity are checked again after final
+measurement. A changed contract aborts preparation rather than dispatching an
+old request or accepting a stale note. Canonical history remains the authority.
 
 The fallback order is native compaction, then a portable text summary, then the
 request fitter as a last resort if summarization fails or cannot fit the request.
