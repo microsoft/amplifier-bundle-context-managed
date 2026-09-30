@@ -9,11 +9,13 @@ import json
 import logging
 import time
 import inspect
+import math
 
 from amplifier_core import ChatRequest, Message
 from amplifier_module_context_simple import SimpleContextManager
 
 from .checkpoint import digest
+from .measurement import RequestMeasurement, estimate_pressure
 from .summary import add_usage, public_messages, request_fits, source_fragments, summary_request
 
 
@@ -47,6 +49,20 @@ class BoundaryContextManager:
         self.evidence_refs = []
         self.checkpoint_status = {"status": "empty"}
         self.summary_failure = None
+        # Private, uncommitted work. Checkpoints and request views only expose a
+        # completed summary that covers the entire chosen canonical prefix.
+        self._summary_progress = None
+
+    @staticmethod
+    def _same_prefix(record, messages):
+        source = (record or {}).get("source_revision") or {}
+        end = source.get("messages")
+        if type(end) is not int or not 0 < end <= len(messages):
+            return False
+        try:
+            return digest(messages[:end]) == source.get("sha256")
+        except (TypeError, ValueError):
+            return False
 
     async def add_message(self, message):
         self.messages.append(copy.deepcopy(message))
@@ -74,7 +90,13 @@ class BoundaryContextManager:
         # Whole-history evidence references must be refreshed by the host.
         self.revision += 1
         self.evidence_refs = []
-        self.summary_failure = None
+        if not self._same_prefix(self.summary_failure, replacement):
+            self.summary_failure = None
+        # A suffix replacement invalidates an in-flight result through the
+        # revision guard, while already completed fragments still cover exactly
+        # the same prefix. No result completed after replacement can be staged.
+        if not self._same_prefix(self._summary_progress, replacement):
+            self._summary_progress = None
         if not keep_summary:
             self.summary = None
             self.summary_identity = None
@@ -90,6 +112,8 @@ class BoundaryContextManager:
 
     def restore_checkpoint(self, record, identity):
         from .checkpoint import restore_checkpoint
+        self._summary_progress = None
+        self.summary_failure = None
         return restore_checkpoint(self, record, identity)
 
     async def clear(self):
@@ -177,7 +201,28 @@ class BoundaryContextManager:
                      "metadata": {"source": "context-managed", "ephemeral": True, "persisted": True}})
         return keep + copy.deepcopy(messages[end:])
 
-    async def _summarize(self, summarizer, source, revision, stats):
+    def _summary_deadlines(self, max_calls):
+        def deadline(key, default=None):
+            value = self.config.get(key, default)
+            if key == "summary_total_work_timeout" and value is None:
+                value = default
+            if value is not None:
+                value = float(value)
+                if not math.isfinite(value) or value <= 0:
+                    raise ValueError(f"{key} must be a finite positive number")
+            return value
+        call_timeout = deadline("summary_timeout")
+        default_work_timeout = call_timeout * min(max_calls, 4) if call_timeout is not None else None
+        work_timeout = deadline("summary_total_work_timeout", default_work_timeout)
+        return call_timeout, work_timeout
+
+    @staticmethod
+    def _summary_progress_stats(stats, progress):
+        stats.update(summary_calls_total=progress["calls"],
+                     completed_fragments=progress["completed"],
+                     remaining_fragments=len(progress["pending"]))
+
+    async def _summarize(self, summarizer, source, revision, stats, *, fingerprint, source_revision, identity):
         """Build a note incrementally; commit happens only after every fragment."""
         from amplifier_core.llm_errors import ContextLengthError
 
@@ -189,41 +234,86 @@ class BoundaryContextManager:
         max_calls = int(self.config.get("summary_max_calls", 16))
         if limit < 256 or max_calls < 1:
             raise ValueError("Summary source limit and call limit must be positive")
-        pending = list(source_fragments(public_messages(source), limit))
-        text = ""
-        summary_calls = 0
-        while pending:
-            fragment = pending.pop(0)
-            request = summary_request(SUMMARY_PROMPT, fragment, text, self.config)
-            fits, budget = await request_fits(summarizer, request)
-            if budget:
-                stats["last_request_budget"] = budget
-            if not fits:
-                if len(fragment) < 512:
-                    raise ContextLengthError("Continuation note and required instructions exceed summary input allowance")
-                middle = len(fragment) // 2
-                pending[:0] = [fragment[:middle], fragment[middle:]]
-                continue
-            if summary_calls >= max_calls:
-                raise ValueError("Summary call limit reached before the covered prefix was complete")
-            stats["calls"] += 1
-            summary_calls += 1
-            try:
-                response = await summarizer.complete(request)
-            except ContextLengthError:
-                if len(fragment) < 512:
-                    raise
-                middle = len(fragment) // 2
-                pending[:0] = [fragment[:middle], fragment[middle:]]
-                continue
-            add_usage(stats, getattr(response, "usage", None))
-            text = "\n".join(block.text for block in response.content
-                if getattr(block, "type", None) == "text" and getattr(block, "text", None))
-            if not text.strip():
-                raise ValueError("Compaction returned an empty continuation note")
+        call_timeout, work_timeout = self._summary_deadlines(max_calls)
+        progress = self._summary_progress
+        if not progress or progress["fingerprint"] != fingerprint:
+            progress = {"fingerprint": fingerprint, "source_revision": source_revision,
+                        "identity": copy.deepcopy(identity),
+                        "configuration": self.checkpoint_configuration(),
+                        "config": copy.deepcopy(self.config),
+                        "provider": (getattr(summarizer, "name", type(summarizer).__name__),
+                                     getattr(summarizer, "default_model", None)),
+                        "pending": list(source_fragments(public_messages(source), limit)),
+                        "text": "", "calls": 0, "completed": 0}
+            self._summary_progress = progress
+        pending = progress["pending"]
+        stats["resumed_fragments"] = progress["completed"]
+        stats["completed_fragments_this_pass"] = 0
+        self._summary_progress_stats(stats, progress)
+
+        def check_source():
             if revision != self.revision:
                 raise RuntimeError("History changed during compaction; stale summary was discarded")
-        return text
+            current_identity = self.checkpoint_identity() if self.checkpoint_identity else identity
+            current_provider = (getattr(summarizer, "name", type(summarizer).__name__),
+                                getattr(summarizer, "default_model", None))
+            if (progress["configuration"] != self.checkpoint_configuration()
+                    or progress["identity"] != current_identity or progress["provider"] != current_provider):
+                self._summary_progress = None
+                raise RuntimeError("Summary contract changed during compaction; stale summary was discarded")
+
+        async def run():
+            while pending:
+                check_source()
+                if progress["calls"] >= max_calls:
+                    stats["work_limit_exhausted"] = True
+                    raise ValueError("Summary call limit reached before the covered prefix was complete")
+                fragment = pending[0]
+                request = summary_request(SUMMARY_PROMPT, fragment, progress["text"], progress["config"])
+
+                async def complete_fragment():
+                    fits, budget = await request_fits(summarizer, request)
+                    check_source()
+                    if budget:
+                        stats["last_request_budget"] = budget
+                    if not fits:
+                        raise ContextLengthError("Continuation note and required instructions exceed summary input allowance")
+                    stats["calls"] += 1
+                    progress["calls"] += 1
+                    return await summarizer.complete(request)
+
+                try:
+                    response = await asyncio.wait_for(complete_fragment(), call_timeout)
+                except TimeoutError:
+                    stats["timeout"] = {"stage": "semantic_fragment", "timeout_seconds": call_timeout}
+                    raise
+                except ContextLengthError:
+                    if len(fragment) < 512:
+                        raise
+                    middle = len(fragment) // 2
+                    pending[:1] = [fragment[:middle], fragment[middle:]]
+                    self._summary_progress_stats(stats, progress)
+                    continue
+                add_usage(stats, getattr(response, "usage", None))
+                text = "\n".join(block.text for block in response.content
+                    if getattr(block, "type", None) == "text" and getattr(block, "text", None))
+                if not text.strip():
+                    raise ValueError("Compaction returned an empty continuation note")
+                check_source()
+                progress["text"] = text
+                pending.pop(0)
+                progress["completed"] += 1
+                stats["completed_fragments_this_pass"] += 1
+                self._summary_progress_stats(stats, progress)
+            return progress["text"]
+
+        try:
+            return await asyncio.wait_for(run(), work_timeout)
+        except TimeoutError:
+            stats.setdefault("timeout", {"stage": "semantic_work_pass", "timeout_seconds": work_timeout})
+            raise
+        finally:
+            self._summary_progress_stats(stats, progress)
 
     async def _native_view_tokens(self, provider, messages):
         """Opaque windows require a real count of the entire assembled input."""
@@ -245,15 +335,51 @@ class BoundaryContextManager:
         count = measured.get("input_tokens")
         return count if measured.get("kind") == "provider_count" and type(count) is int and count >= 0 else None
 
-    async def _prepare(self, provider, token_budget, retain):
+    async def _prepare(self, provider, token_budget, retain, measurement=None):
         messages, revision = copy.deepcopy(self.messages), self.revision
+        # Materialize dynamic instructions and operation observations once for
+        # both pressure measurement and the request fitter's final snapshot.
+        system_prompt = await self.factory() if self.factory else None
+        operations = self.active_operations() if self.active_operations else None
+        manifest = ("Pending operations (observations, not authorization):\n" + json.dumps(operations)) if operations else None
+
+        def pressure_view(rows):
+            view = copy.deepcopy(rows)
+            if self.factory:
+                view = [{"role": "system", "content": system_prompt}] + [row for row in view
+                    if row.get("role") != "system" or (row.get("metadata") or {}).get("source") == "hook"]
+            if manifest:
+                view.append({"role": "user", "content": manifest,
+                    "metadata": {"ephemeral": True, "persisted": True, "source": "context-managed-operations"}})
+            return view
         # An opted-in host commits originals before any fitted view can clip
         # tool output. References point to its existing evidence/transcript store.
         if self.config.get("durable_checkpoints") and self.preserve_evidence:
             self.evidence_refs = await self.preserve_evidence(copy.deepcopy(messages))
-        identity = self.checkpoint_identity() if self.checkpoint_identity else {
+        identity = copy.deepcopy(self.checkpoint_identity()) if self.checkpoint_identity else {
             "provider": getattr(provider, "name", type(provider).__name__),
             "model": getattr(provider, "default_model", None)}
+        configuration = self.checkpoint_configuration()
+        provider_identity = (getattr(provider, "name", type(provider).__name__),
+                             getattr(provider, "default_model", None))
+
+        def request_contract_changed():
+            current_provider = (getattr(provider, "name", type(provider).__name__),
+                                getattr(provider, "default_model", None))
+            current_identity = self.checkpoint_identity() if self.checkpoint_identity else {
+                "provider": current_provider[0], "model": current_provider[1]}
+            return (configuration != self.checkpoint_configuration()
+                    or identity != current_identity or provider_identity != current_provider)
+
+        def check_request_contract():
+            if request_contract_changed():
+                self._summary_progress = None
+                raise RuntimeError("Request contract changed during compaction; stale summary was discarded")
+
+        if self._summary_progress and (not self._same_prefix(self._summary_progress, messages)
+                or self._summary_progress["identity"] != identity
+                or self._summary_progress["configuration"] != self.checkpoint_configuration()):
+            self._summary_progress = None
         if self.summary and self.summary_identity != identity:
             self.summary = None
             self.checkpoint_status = {"status": "stale", "reason": "Provider/model identity changed.", "originalsAvailable": True}
@@ -278,7 +404,24 @@ class BoundaryContextManager:
                 self.summary = None
                 self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint transport is unavailable or invalid.", "originalsAvailable": True}
                 assembled = self._assembled(messages, None, retain)
-        measured_tokens = await self._native_view_tokens(provider, assembled) if use_native else None
+        end = self._boundary(messages, retain)
+        if self._summary_progress and self._summary_progress["source_revision"]["messages"] != end:
+            self._summary_progress = None
+        can_measure = measurement is not None and (use_native or (provider is not None
+            and end > (self.summary[0] if self.summary else 0)))
+        input_limit = None
+        measurement_kind = "public_estimate"
+        if can_measure:
+            pressure_tokens, input_limit, measurement_kind = await measurement.measure(fitter, pressure_view(assembled))
+            measured_tokens = pressure_tokens if measurement_kind == "provider_count" else None
+        else:
+            measured_tokens = await self._native_view_tokens(provider, pressure_view(assembled)) if use_native else None
+            pressure_tokens = measured_tokens
+            if measured_tokens is not None:
+                measurement_kind = "provider_count"
+        if revision != self.revision:
+            raise RuntimeError("History changed during request preparation")
+        check_request_contract()
         if self.summary and isinstance(self.summary[1], dict) and measured_tokens is None:
             # Never budget an opaque checkpoint by its short visible label.
             # Preserve originals and use the portable path when the continuation
@@ -286,11 +429,22 @@ class BoundaryContextManager:
             self.summary = None
             self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint could not be measured by the continuation provider.", "originalsAvailable": True}
             assembled = self._assembled(messages, None, retain)
+            if can_measure:
+                pressure_tokens, input_limit, measurement_kind = await measurement.measure(fitter, pressure_view(assembled))
+                measured_tokens = pressure_tokens if measurement_kind == "provider_count" else None
+            else:
+                pressure_tokens = None
+                measurement_kind = "public_estimate"
+            check_request_contract()
         use_native = use_native and measured_tokens is not None
-        assembled_tokens = measured_tokens if use_native else fitter._estimate_tokens(assembled)
+        assembled_tokens = pressure_tokens if pressure_tokens is not None else estimate_pressure(fitter, pressure_view(assembled))
         budget = fitter._calculate_budget(token_budget, provider)
-        end = self._boundary(messages, retain)
+        if input_limit is not None:
+            budget = min(budget, input_limit)
         threshold = self.config.get("summarize_trigger", 0.70)
+        self.last_budget = {"semantic_input_tokens": assembled_tokens,
+            "semantic_measurement_kind": measurement_kind, "semantic_policy_budget": budget,
+            "semantic_trigger": budget * threshold}
         should_summarize = (provider is not None and end > (self.summary[0] if self.summary else 0)
                             and assembled_tokens >= budget * threshold)
         if should_summarize and use_native and self.summary and isinstance(self.summary[1], dict):
@@ -302,12 +456,28 @@ class BoundaryContextManager:
                                 fitter._estimate_tokens(added) >= self.config.get("native_min_new_tokens", 500))
         if should_summarize:
             summarizer = self.summary_provider() if self.summary_provider else provider
+            summary_provider_identity = (getattr(summarizer, "name", type(summarizer).__name__),
+                                         getattr(summarizer, "default_model", None))
+
+            def summary_contract_changed():
+                current = self.summary_provider() if self.summary_provider else provider
+                return (request_contract_changed() or summary_provider_identity != (
+                    getattr(current, "name", type(current).__name__), getattr(current, "default_model", None)))
+
+            def check_summary_contract():
+                if summary_contract_changed():
+                    self._summary_progress = None
+                    raise RuntimeError("Summary contract changed during compaction; stale summary was discarded")
+
             # Current-turn tool results change the revision but not the covered
             # prefix. A failed unchanged prefix must not create a retry storm.
             source = self._assembled(messages[:end], self.summary, retain)
             fingerprint = digest({"source": source, "identity": identity,
                 "provider": getattr(summarizer, "name", type(summarizer).__name__),
                 "model": getattr(summarizer, "default_model", None), "config": self.config})
+            source_revision = {"messages": end, "sha256": digest(messages[:end])}
+            if self._summary_progress and self._summary_progress["fingerprint"] != fingerprint:
+                self._summary_progress = None
             failure = self.summary_failure
             if failure and failure["fingerprint"] == fingerprint:
                 should_summarize = failure["retryable"] and failure["attempts"] < 3 and time.monotonic() >= failure["retry_after"]
@@ -315,15 +485,16 @@ class BoundaryContextManager:
             if getattr(summarizer, "native_bundle_live", False):
                 raise RuntimeError("Native live providers require a separate context.summary_provider for compaction")
             self.is_compacting = True
-            await self._emit("context:compaction_started", revision=revision, through_message=end)
+            await self._emit("context:compaction_started", revision=revision, through_message=end, **self.last_budget)
             outcome = "failed"
-            stats = {"calls": 0}
+            stats = {"calls": 0, "input_tokens_before": assembled_tokens, "measurement_kind": measurement_kind}
             started = time.monotonic()
             try:
                 # Earlier notes are included so repeated compactions retain the
                 # same task. Canonical originals stay available to the host.
                 async def prepare_note():
-                    if use_native:
+                    check_summary_contract()
+                    if use_native and not self._summary_progress:
                         stats["calls"] += 1
                         try:
                             # Required persisted reminders stay verbatim outside the
@@ -346,7 +517,12 @@ class BoundaryContextManager:
                             if not validate_native(result["message"]):
                                 raise ValueError("Native compaction returned an invalid transport envelope")
                             native_candidate = self._assembled(messages, (end, result["message"]), retain)
-                            candidate_tokens = await self._native_view_tokens(provider, native_candidate)
+                            if measurement is not None:
+                                candidate_tokens, _, candidate_kind = await measurement.measure(fitter, pressure_view(native_candidate))
+                                if candidate_kind != "provider_count":
+                                    candidate_tokens = None
+                            else:
+                                candidate_tokens = await self._native_view_tokens(provider, pressure_view(native_candidate))
                             stats["native_input_tokens_after"] = candidate_tokens
                             if candidate_tokens is None or candidate_tokens >= assembled_tokens:
                                 raise ValueError("Native compaction did not produce a measured reduction")
@@ -360,13 +536,14 @@ class BoundaryContextManager:
                             stats["native_failure"] = {"type": type(exc).__name__}
                             if isinstance(exc, TimeoutError) and native_timeout is not None:
                                 stats["native_failure"].update(stage="native", timeout_seconds=native_timeout)
+                    if use_native and self._summary_progress:
+                        stats["native_skipped_for_staged_semantic"] = True
                     stats["method"] = "semantic"
                     # If native state cannot be continued, rebuild semantic
                     # evidence from originals, not an opaque-state placeholder.
                     semantic_source = messages[:end] if self.summary and isinstance(self.summary[1], dict) else source
-                    return await asyncio.wait_for(
-                        self._summarize(summarizer, semantic_source, revision, stats),
-                        self.config.get("summary_timeout"))
+                    return await self._summarize(summarizer, semantic_source, revision, stats,
+                        fingerprint=fingerprint, source_revision=source_revision, identity=identity)
 
                 text = await prepare_note()
                 if revision != self.revision:
@@ -374,27 +551,49 @@ class BoundaryContextManager:
                     raise RuntimeError("History changed during compaction; stale summary was discarded")
                 candidate = self._assembled(messages, (end, text), retain)
                 portable_baseline = messages if self.summary and isinstance(self.summary[1], dict) else assembled
-                if stats.get("method") != "native" and fitter._estimate_tokens(candidate) >= fitter._estimate_tokens(portable_baseline):
+                if stats.get("method") != "native" and estimate_pressure(fitter, candidate) >= estimate_pressure(fitter, portable_baseline):
                     raise ValueError("Compaction did not reduce the request")
+                if stats.get("method") != "native" and measurement is not None and measurement_kind == "provider_count":
+                    candidate_tokens, _, candidate_kind = await measurement.measure(fitter, pressure_view(candidate))
+                    if candidate_kind == "provider_count":
+                        stats["input_tokens_after"] = candidate_tokens
+                        if candidate_tokens >= assembled_tokens:
+                            raise ValueError("Compaction did not produce a measured reduction")
+                if revision != self.revision:
+                    outcome = "superseded"
+                    raise RuntimeError("History changed during compaction; stale summary was discarded")
+                check_summary_contract()
                 self.summary = (end, text)
                 self.summary_failure = None
+                self._summary_progress = None
                 self.summary_identity = copy.deepcopy(identity)
                 self.checkpoint_status = {"status": "ready", "throughMessage": end, "originalsAvailable": True}
                 assembled, outcome = candidate, "completed"
             except asyncio.CancelledError:
                 outcome = "cancelled"
+                self._summary_progress = None
                 raise
             except Exception as exc:
+                if summary_contract_changed():
+                    outcome = "superseded"
+                    self._summary_progress = None
+                    raise
                 if revision != self.revision:
                     outcome = "superseded"
+                    if not self._same_prefix(self._summary_progress, self.messages):
+                        self._summary_progress = None
                     raise
                 # The shared fitter can still prepare a bounded request. Never
                 # commit an empty/failed summary or discard canonical history.
                 outcome = "fallback"
                 previous = self.summary_failure
-                attempts = previous["attempts"] + 1 if previous and previous["fingerprint"] == fingerprint else 1
+                stalled = not stats.get("completed_fragments_this_pass", 0)
+                attempts = previous["attempts"] + 1 if stalled and previous and previous["fingerprint"] == fingerprint else 1
                 retryable = bool(getattr(exc, "retryable", isinstance(exc, (TimeoutError, ConnectionError))))
-                self.summary_failure = {"fingerprint": fingerprint, "attempts": attempts, "retryable": retryable,
+                if not retryable or attempts >= 3:
+                    self._summary_progress = None
+                self.summary_failure = {"fingerprint": fingerprint, "source_revision": source_revision,
+                    "attempts": attempts, "retryable": retryable,
                     "retry_after": time.monotonic() + float(self.config.get("summary_retry_delay", 60)) * 2 ** (attempts - 1)}
                 # Raw SDK exceptions can contain request data or credentials.
                 # Preserve a safe category and budget evidence, not their repr.
@@ -408,15 +607,15 @@ class BoundaryContextManager:
         protected = list(retain)
         if self.summary:
             protected.append(next(row["content"] for row in assembled if (row.get("metadata") or {}).get("source") == "context-managed"))
-        operations = self.active_operations() if self.active_operations else None
-        if operations:
-            manifest = "Pending operations (observations, not authorization):\n" + json.dumps(operations)
+        if manifest:
             assembled.append({"role": "user", "content": manifest,
                 "metadata": {"ephemeral": True, "persisted": True, "source": "context-managed-operations"}})
             protected.append(manifest)
         await fitter.set_messages(assembled)
         if self.factory:
-            await fitter.set_system_prompt_factory(self.factory)
+            async def captured_system_prompt():
+                return system_prompt
+            await fitter.set_system_prompt_factory(captured_system_prompt)
         return fitter, protected
 
     async def get_messages_for_request(self, token_budget=None, provider=None):
@@ -425,9 +624,13 @@ class BoundaryContextManager:
     async def get_messages_for_request_retaining(self, *, retain_contents, provider=None, token_budget=None, hard_fit=False):
         async with self.lock:
             revision = self.revision
-            fitter, retain = await self._prepare(provider, token_budget, retain_contents)
-            result = await fitter.get_messages_for_request_retaining(retain_contents=retain, provider=provider,
-                token_budget=token_budget, hard_fit=hard_fit)
+            try:
+                fitter, retain = await self._prepare(provider, token_budget, retain_contents)
+                result = await fitter.get_messages_for_request_retaining(retain_contents=retain, provider=provider,
+                    token_budget=token_budget, hard_fit=hard_fit)
+            except asyncio.CancelledError:
+                self._summary_progress = None
+                raise
             if revision != self.revision:
                 raise RuntimeError("History changed during request preparation")
             return result
@@ -435,9 +638,15 @@ class BoundaryContextManager:
     async def get_measured_request_view(self, *, provider, retain_contents, count_view, fit_output=None):
         async with self.lock:
             revision = self.revision
-            fitter, retain = await self._prepare(provider, None, retain_contents)
-            result = await fitter.get_measured_request_view(provider=provider, retain_contents=retain,
-                count_view=count_view, fit_output=fit_output)
+            measurement = RequestMeasurement(count_view)
+            try:
+                fitter, retain = await self._prepare(provider, None, retain_contents, measurement)
+                result = await fitter.get_measured_request_view(provider=provider, retain_contents=retain,
+                    count_view=measurement.count, fit_output=fit_output)
+            except asyncio.CancelledError:
+                self._summary_progress = None
+                raise
+            result["count_calls"] += measurement.preflight_calls - measurement.reused_calls
             if revision != self.revision:
                 if result.get("transaction"):
                     result["transaction"].rollback()

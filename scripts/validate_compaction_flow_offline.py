@@ -11,18 +11,25 @@ import copy
 import json
 import re
 import socket
+import hashlib
+import inspect
+import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import ClassVar
+from types import SimpleNamespace
 
 import httpx
 import openai
 from amplifier_core import AmplifierSession, HookResult, ToolResult
 from amplifier_module_loop_live.runtime import Input, Runtime
+from amplifier_module_loop_live.orchestrator import BundleLiveOrchestrator
 from amplifier_module_provider_openai import OpenAIProvider
+from amplifier_module_context_managed.boundary import BoundaryContextManager
 from validate_compaction_wait_offline import checksum
 
-MODEL = "gpt-6-astra"
+MODEL = "gpt-6.1-sol"
 IDENTITY = {"provider": "openai", "model": MODEL}
 
 
@@ -119,7 +126,7 @@ async def run_case(mode, turns):
             events.append((kind, copy.deepcopy(data)))
             return HookResult()
         coordinator.hooks.register("context:compaction_finished", observe)
-        sdk = openai.AsyncOpenAI(api_key="fixture", timeout=0.001, max_retries=0,
+        sdk = openai.AsyncOpenAI(api_key="fixture", base_url="https://api.openai.com/v1", timeout=0.001, max_retries=0,
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(server)))
         provider = OpenAIProvider(client=sdk, config={"default_model": MODEL,
             "enable_long_context": True, "use_streaming": False, "max_retries": 0})
@@ -196,6 +203,139 @@ async def run_case(mode, turns):
         await close(active)
 
 
+async def run_work_budget_cases():
+    """Exercise installed Core mounts and logical SDK calls on an unchanged prefix."""
+    reports = []
+    for mode in ("slow-fragments", "auto-continuations", "resume-work", "stalled-replacements"):
+        events, requests, cancellations = [], [], []
+        config = {"engine": "boundary", "durable_checkpoints": True,
+            "max_tokens": 10000, "summarize_trigger": .01, "native_compaction": False,
+            "summary_max_source_chars": 6000, "summary_retry_delay": 0,
+            "summary_timeout": .12, "summary_total_work_timeout": .5}
+        if mode == "resume-work":
+            config.update(summary_timeout=.5, summary_total_work_timeout=.06)
+        session = AmplifierSession({"session": {
+            "orchestrator": {"module": "loop-live", "config": {"configured_bundle": True}},
+            "context": {"module": "context-managed", "config": config}},
+            "providers": [], "tools": [], "hooks": []})
+        await session.initialize()
+        coordinator = session.coordinator
+        coordinator.register_capability("context.checkpoint_identity", lambda: IDENTITY)
+        async def preserve(rows):
+            return [{"kind": "synthetic-history", "sha256": checksum(rows)}]
+        coordinator.register_capability("context.preserve_evidence", preserve)
+        async def observe(kind, data):
+            events.append(copy.deepcopy(data))
+            return HookResult()
+        coordinator.hooks.register("context:compaction_finished", observe)
+
+        async def server(request):
+            body = json.loads(request.content)
+            wire = json.dumps(body.get("input", []))
+            if request.url.path.endswith("input_tokens"):
+                return httpx.Response(200, json={"input_tokens": len(wire)//4})
+            assert request.url.path == "/v1/responses"
+            assert "Prepare a factual continuation note" in body.get("instructions", "")
+            requests.append(copy.deepcopy(body))
+            if mode == "stalled-replacements" or (mode == "resume-work" and len(requests) == 2):
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancellations.append(len(requests))
+                    raise
+            if mode in {"slow-fragments", "auto-continuations"}:
+                await asyncio.sleep(.03)
+            if mode == "auto-continuations" and len(requests) % 2:
+                partial = response()
+                partial.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+                return httpx.Response(200, json=partial)
+            return httpx.Response(200, json=response(
+                "ORBIT; budget=25; publication=pending; FIRST and LAST evidence verified; preserve originals."))
+
+        sdk = openai.AsyncOpenAI(api_key="fixture", base_url="https://api.openai.com/v1", max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(server)))
+        provider = OpenAIProvider(client=sdk, config={"default_model": MODEL,
+            "enable_long_context": True, "use_streaming": False, "max_retries": 0})
+        provider.coordinator = coordinator
+        await coordinator.mount("providers", provider, name="openai")
+        manager = coordinator.get("context")
+        receipt = json.dumps({"status": "pending", "job_id": "fixture-job"})
+        original = [{"role": "user", "content": "ORBIT; budget=25; preserve originals."},
+            {"role": "assistant", "content": "FIRST verified evidence. " + "x"*22000 + " LAST verified evidence."},
+            {"role": "user", "content": "Preserve all original tools and instructions."},
+            {"role": "assistant", "content": "Recent completed work."},
+            {"role": "user", "content": "Finish the report; publication=pending."},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "call", "name": "delegate", "arguments": {}}]},
+            {"role": "tool", "tool_call_id": "call", "content": receipt}]
+        await manager.set_messages(original)
+        started = time.monotonic()
+        try:
+            await manager._prepare(provider, None, [])
+            first_calls = len(requests)
+            if mode == "resume-work":
+                assert manager.summary is None and manager.export_checkpoint(IDENTITY) is None
+                assert manager._summary_progress["completed"] >= 1
+                staged = manager._summary_progress["completed"]
+                job = {"receipt": receipt, "result": "Verified completed background result."}
+                await BundleLiveOrchestrator._synchronize_job_results(
+                    SimpleNamespace(native_job=lambda call: job), manager)
+                assert manager._summary_progress["completed"] == staged
+                await manager._prepare(provider, None, [])
+                assert requests[first_calls]["input"] == requests[first_calls-1]["input"]
+                assert events[0]["timeout"]["stage"] == "semantic_work_pass"
+                assert events[-1]["resumed_fragments"] == staged
+            elif mode == "stalled-replacements":
+                for number in range(8):
+                    replacement = await manager.get_messages()
+                    replacement[-1]["content"] = receipt
+                    await manager.set_messages(replacement)
+                    job = {"receipt": receipt, "result": f"Verified completed result {number}"}
+                    await BundleLiveOrchestrator._synchronize_job_results(
+                        SimpleNamespace(native_job=lambda call: job), manager)
+                    await manager._prepare(provider, None, [])
+                assert len(requests) == 3 and len(cancellations) == 3
+                assert manager.summary is None and manager.summary_failure["attempts"] == 3
+            if mode != "stalled-replacements":
+                assert manager.summary and manager._summary_progress is None
+                checkpoint = manager.export_checkpoint(IDENTITY)
+                assert checkpoint and checkpoint["summary"]["throughMessage"] == 2
+                restored = BoundaryContextManager(manager.config)
+                restored.checkpoint_identity = lambda: IDENTITY
+                await restored.set_messages(await manager.get_messages())
+                assert restored.restore_checkpoint(checkpoint, IDENTITY)["status"] == "restored"
+                assert restored.summary == manager.summary
+            if mode == "auto-continuations":
+                assert len(requests) == 2 * events[-1]["calls"]
+                assert all(body["reasoning"]["effort"] == "low" for body in requests)
+            canonical = await manager.get_messages()
+            assert canonical[:2] == original[:2]
+            reports.append({"mode": mode, "passed": True,
+                "summary_http_requests": len(requests),
+                "logical_summary_calls": sum(event["calls"] for event in events),
+                "cancelled_requests": len(cancellations),
+                "elapsed_seconds": round(time.monotonic()-started, 3),
+                "canonical_prefix_sha256": checksum(canonical[:2]), "covered_prefix_unchanged": True,
+                "checkpoint_round_trip": mode != "stalled-replacements", "events": events})
+        finally:
+            await session.cleanup()
+            await provider.close()
+    return {"mode": "work-budget", "passed": True, "cases": reports,
+        "scope": "Installed real Core mount + loop-live replacement + OpenAI provider/SDK, synthetic in-memory HTTP only."}
+
+
+def loaded_sources():
+    from importlib.metadata import version
+    result = {"python": sys.executable, "core_version": version("amplifier-core"),
+              "sdk_version": version("openai"), "modules": {}}
+    for name in ("amplifier_core", "amplifier_module_context_managed.boundary",
+                 "amplifier_module_context_simple", "amplifier_module_loop_live.orchestrator",
+                 "amplifier_module_loop_streaming", "amplifier_module_provider_openai"):
+        module = __import__(name, fromlist=["__name__"])
+        path = Path(inspect.getfile(module))
+        result["modules"][name] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    return result
+
+
 async def main(args):
     denials = []
     def refuse(*unused, **kwargs):
@@ -206,16 +346,17 @@ async def main(args):
     socket.getaddrinfo = refuse
     reports = []
     for mode in args.mode:
-        report = await run_case(mode, args.turns)
+        report = await run_work_budget_cases() if mode == "work-budget" else await run_case(mode, args.turns)
         reports.append(report)
         assert not denials
-        Path(args.output).write_text(json.dumps({"cases": reports, "actual_network_attempts": len(denials)}, indent=2)+"\n")
-        print(json.dumps({k: v for k, v in report.items() if k not in {"turns", "tool_operations"}}), flush=True)
+        Path(args.output).write_text(json.dumps({"cases": reports, "actual_network_attempts": len(denials),
+            "loaded_sources": loaded_sources()}, indent=2)+"\n")
+        print(json.dumps({k: v for k, v in report.items() if k not in {"turns", "tool_operations", "cases"}}), flush=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
     parser.add_argument("--turns", type=int, default=24)
-    parser.add_argument("--mode", nargs="+", choices=["native", "semantic", "fallback"], default=["native", "semantic", "fallback"])
+    parser.add_argument("--mode", nargs="+", choices=["native", "semantic", "fallback", "work-budget"], default=["native", "semantic", "fallback", "work-budget"])
     asyncio.run(main(parser.parse_args()))
