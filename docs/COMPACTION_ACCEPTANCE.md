@@ -118,23 +118,24 @@ Optional boundary-engine settings (existing trigger/output settings still apply)
 | `native_min_new_tokens` | `500` | Avoid costly recompaction of a tiny eligible prefix, except when fitting is required. |
 | `summary_max_source_chars` | `512000` | Maximum source fragment; also bounded conservatively by provider context and exact request count. |
 | `summary_max_calls` | `16` | Bound portable logical provider calls across all retries of one exact prefix/identity/configuration. Failed calls consume this allowance; exhaustion suppresses retries until source or contract changes. Native attempts do not consume it. |
-| `native_compaction_timeout` | unset | Optional caller-selected native-call deadline in seconds. By default wait until the provider completes, fails, or the user cancels. |
-| `summary_timeout` | unset | Optional deadline in seconds for each portable fragment's preflight and logical provider call, including provider auto-continuations. Native compaction never consumes it. |
-| `summary_total_work_timeout` | unset, or `summary_timeout * min(summary_max_calls, 4)` | Bound each portable work pass. An explicit positive value overrides the calculated default. A null value preserves the default. Without either deadline, wait for healthy providers as before. |
 | `summary_reasoning_effort` | `low` | Avoid spending the continuation model's high reasoning setting on routine notes. |
 | `summary_retry_delay` | `60` | Initial transient-failure cooldown in seconds; exponential backoff and three stalled attempts. Successful fragment progress resets the stalled-attempt count; the total call limit still applies. |
 
 `summary_target_tokens` still controls output reserve (default 1,500), and
 `summarization_model` now reaches the OpenAI request correctly. A source requiring
-more than the configured call limit or an explicitly selected deadline falls back to the existing fitter;
+more than the configured call limit falls back to the existing fitter;
 this is explicit failure, not a partial successful summary. Provider retries
 remain owned by the provider and are separate from this prefix-level cooldown.
 
-`summary_timeout` formerly covered the entire sequential portable phase. It now
-applies independently to each fragment so several healthy calls can complete a
-large prefix. Use `summary_total_work_timeout` to retain an explicit whole-pass
-deadline. The calculated default bounds total waiting whenever a fragment
-deadline is configured.
+Compaction has **no context-owned elapsed-time deadline**, for either native
+calls, portable fragments, or the complete summary. Healthy model work may take
+ten minutes or longer. The former 120-second limit repeatedly cancelled large
+summaries and caused them to start again; it must not be restored as a default,
+an inherited bundle setting, or a calculated whole-pass timer. Legacy
+`summary_timeout`, `summary_total_work_timeout`, and `native_compaction_timeout`
+values are ignored, so older bundles and saved configuration cannot reintroduce
+this failure. Completion, a real provider error, or caller cancellation ends a
+call. Source, input/output and logical-call limits still protect request safety.
 
 Completed fragments remain private in-memory work after a retryable failure and
 can resume for the exact same prefix, provider/model identity, and configuration.
@@ -154,7 +155,7 @@ projection for its semantic estimate, excluding private/duplicate transcript
 fields; the shared fitter still owns hard input safety, media and opaque state.
 `context:compaction_started` records the trigger, count kind and policy budget.
 Finished events record completed/resumed/remaining fragments, total summary
-calls and the timeout stage. No prompt or exception body is added to these fields.
+calls and safe provider failure categories. No prompt or exception body is added to these fields.
 
 Before publishing a completed note, history revision, checkpoint identity,
 configuration and provider/model identity are checked again after final
@@ -163,8 +164,8 @@ old request or accepting a stale note. Canonical history remains the authority.
 
 The fallback order is native compaction, then a portable text summary, then the
 request fitter as a last resort if summarization fails or cannot fit the request.
-Elapsed time alone does not trigger a fallback by default. Actual native provider
-errors still enter the summary phase, which gets its own optional deadline.
+Elapsed time alone does not trigger a fallback. Actual native provider errors
+still enter the summary phase without introducing a new timer.
 User cancellation ends the operation without launching another model call.
 Canonical messages are preserved on every path. Provider transport settings must
 also permit long-running requests; this context-manager setting cannot override a

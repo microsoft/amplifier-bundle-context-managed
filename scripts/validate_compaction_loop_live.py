@@ -87,7 +87,6 @@ async def run_case(native, directory):
         "summarize_trigger": 0.12,
         "summary_target_tokens": 4096,
         "summary_max_source_chars": 24000,
-        "summary_timeout": 180,
         "durable_checkpoints": True,
         "native_compaction": native,
     }
@@ -212,7 +211,7 @@ async def run_case(native, directory):
             start_time = time.monotonic()
             await runtime.submit(Input("user", prompt, id=f"turn-{index}"))
             if index == 0:
-                await asyncio.wait_for(tool.started.wait(), 120)
+                await tool.started.wait()
                 await runtime.submit(
                     Input(
                         "steer",
@@ -226,7 +225,7 @@ async def run_case(native, directory):
                     event["sequence"] > after
                     and event["type"] in {"generation.finished", "generation.failed"}
                 ),
-                300,
+                None,
             )
             assert finished["type"] == "generation.finished", "Integrated turn failed"
             messages = await context.get_messages()
@@ -362,9 +361,7 @@ async def main(args):
         for mode in args.mode:
             try:
                 report["cases"].append(
-                    await asyncio.wait_for(
-                        run_case(mode == "native", Path(temporary) / mode), 1500
-                    )
+                    await run_case(mode == "native", Path(temporary) / mode)
                 )
             except Exception as exc:  # noqa: BLE001 - redact arbitrary SDK errors in the evidence report
                 report["cases"].append(

@@ -382,11 +382,11 @@ async def test_native_uses_continuation_provider_not_different_utility_model():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native_finishes", [True, False])
-async def test_native_and_semantic_compaction_have_independent_deadlines(native_finishes):
-    # Model the production full-window native call exceeding the portable
-    # summary timeout, without sending production history or waiting minutes.
-    manager = context(summary_timeout=0.01 if native_finishes else 1,
-                      native_compaction_timeout=1 if native_finishes else 0.01)
+async def test_legacy_deadlines_do_not_cancel_native_or_semantic_compaction(native_finishes):
+    # Old saved/bundle deadlines must not cancel healthy calls in either phase.
+    # A real native provider error still starts the portable semantic fallback.
+    manager = context(summary_timeout=0.001, summary_total_work_timeout=0.001,
+                      native_compaction_timeout=0.001)
     original = history()
     await manager.set_messages(original)
     manager.hooks = SimpleNamespace(emit=AsyncMock())
@@ -394,6 +394,8 @@ async def test_native_and_semantic_compaction_have_independent_deadlines(native_
         "source":"context-managed", "ephemeral":True, "persisted":True, "opaque":"fixture"}}
     async def compact(request):
         await asyncio.sleep(0.03)
+        if not native_finishes:
+            raise TimeoutError("Provider transport failed")
         return {"kind":"native", "message":message}
     async def summarize(request):
         await asyncio.sleep(0.03)
@@ -419,12 +421,15 @@ async def test_native_and_semantic_compaction_have_independent_deadlines(native_
         assert isinstance(manager.summary[1], str)
         assert model.complete.await_count >= 1
         assert finished["method"] == "semantic"
-        assert finished["native_failure"] == {"type":"TimeoutError", "stage":"native", "timeout_seconds":0.01}
+        assert finished["native_failure"] == {"type":"TimeoutError"}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [True, False])
 async def test_compaction_waits_for_provider_without_a_default_deadline(monkeypatch, native):
+    import amplifier_module_context_managed.boundary as boundary
+    elapsed = [0.0]
+    monkeypatch.setattr(boundary, "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
     # Compress any accidentally restored finite deadline, so the old 120-second
     # default fails this regression without spending two minutes in the test.
     actual_wait_for = asyncio.wait_for
@@ -433,16 +438,20 @@ async def test_compaction_waits_for_provider_without_a_default_deadline(monkeypa
         deadlines.append(timeout)
         return await actual_wait_for(awaitable, 0.001 if timeout is not None else None)
     monkeypatch.setattr(asyncio, "wait_for", accelerated_wait_for)
-    manager = context()
+    manager = context(summary_timeout=120, summary_total_work_timeout=480,
+                      native_compaction_timeout=120)
+    manager.hooks = SimpleNamespace(emit=AsyncMock())
     original = history()
     await manager.set_messages(original)
     message = {"role":"user", "content":"Native continuation", "metadata":{
         "source":"context-managed", "ephemeral":True, "persisted":True, "opaque":"fixture"}}
     async def compact(request):
         await asyncio.sleep(0.01)
+        elapsed[0] += 600  # Ten minutes of healthy model work; no real long wait.
         return {"kind":"native", "message":message}
     async def summarize(request):
         await asyncio.sleep(0.01)
+        elapsed[0] += 600
         return response("ORBIT; budget $25; originals preserved; report pending.")
     model = SimpleNamespace(
         supports_native_compaction=lambda:native,
@@ -452,9 +461,12 @@ async def test_compaction_waits_for_provider_without_a_default_deadline(monkeypa
         request_budget=lambda request, **kw:{"measurement":{"kind":"provider_count", "input_tokens":
             100 if any((row.metadata or {}).get("opaque") for row in request.messages) else 9000}})
     await manager.get_messages_for_request(provider=model)
-    assert deadlines and all(value is None for value in deadlines)
+    assert all(value is None for value in deadlines)
     assert manager.summary is not None
     assert await manager.get_messages() == original
+    event = next(call.args[1] for call in manager.hooks.emit.call_args_list
+                 if call.args[0] == "context:compaction_finished")
+    assert event["outcome"] == "completed" and event["elapsed_ms"] >= 600000
     if native:
         model.complete.assert_not_awaited()
         assert manager.summary[1] == message
