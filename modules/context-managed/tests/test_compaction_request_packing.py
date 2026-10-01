@@ -232,3 +232,33 @@ async def test_missing_native_request_context_falls_back_without_creating_opaque
     model.compact_context.assert_not_awaited()
     model.complete.assert_awaited_once()
     assert finished(manager)["native_selection"] == "request_context_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_oversized_native_window_is_skipped_without_a_paid_request_or_native_fragments():
+    manager = await context()
+    original = await manager.get_messages()
+    native_budgets = []
+
+    def budget(request, **kwargs):
+        if request.metadata.get("native_compaction_request_context"):
+            native_budgets.append(request)
+            assert any(row.content == original[2]["content"] for row in request.messages)
+            return decision(1_100_000)
+        return decision(sum(len(str(row.content)) for row in request.messages) // 4)
+
+    model = SimpleNamespace(native_compaction_requires_request_context=True,
+        supports_native_compaction=lambda: True, validate_compacted_context=lambda row: True,
+        request_budget=budget, compact_context=AsyncMock(), complete=AsyncMock(return_value=reply()))
+
+    async def count_view(view):
+        return {"dispatch": ChatRequest(messages=[Message(**row) for row in view], model="chosen-model"),
+                "budget_decision": decision(200_000)}
+
+    await manager.get_measured_request_view(provider=model, retain_contents=[], count_view=count_view)
+    assert len(native_budgets) == 1
+    model.compact_context.assert_not_awaited()
+    model.complete.assert_awaited_once()
+    assert finished(manager)["native_selection"] == "input_exceeds_native_allowance"
+    assert finished(manager)["method"] == "semantic" and finished(manager)["calls"] == 1
+    assert await manager.get_messages() == original

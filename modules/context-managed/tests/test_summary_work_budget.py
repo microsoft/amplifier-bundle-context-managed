@@ -81,7 +81,7 @@ async def test_provider_failure_resumes_completed_fragments_without_exporting_pa
     model = SimpleNamespace(complete=complete)
     original = await manager.get_messages()
     await manager._prepare(model, None, [])
-    assert manager.summary is None and manager.export_checkpoint(IDENTITY) is None
+    assert manager.summary is None and manager.export_checkpoint(IDENTITY)["summary"] is None
     assert manager._summary_progress["completed"] == 1
     first_event = finished(manager)[-1]
     assert first_event["failure"]["type"] == type(failure).__name__
@@ -100,17 +100,20 @@ async def test_provider_failure_resumes_completed_fragments_without_exporting_pa
 
 
 @pytest.mark.asyncio
-async def test_call_limit_covers_failed_and_resumed_work_and_stops_retries():
-    manager = await context(summary_max_calls=3)
-    model = SimpleNamespace(complete=AsyncMock(side_effect=[response(),
-        LLMError("temporary", retryable=True), LLMError("temporary", retryable=True)]))
-    for _ in range(8):
-        await manager._prepare(model, None, [])
-    assert model.complete.await_count == 3
-    assert manager.summary is None and manager._summary_progress is None
-    assert manager.summary_failure["retryable"] is False
+async def test_call_allowance_resumes_saved_work_in_later_pass_without_repeating_paid_pieces():
+    manager = await context(summary_max_calls=2)
+    model = SimpleNamespace(complete=AsyncMock(return_value=response()))
+    await manager._prepare(model, None, [])
+    assert manager.summary is None and manager._summary_progress["completed"] == 2
     assert finished(manager)[-1]["work_limit_exhausted"] is True
-    assert manager.export_checkpoint(IDENTITY) is None
+    first_requests = [c.args[0].messages[-1].content for c in model.complete.call_args_list]
+    for _ in range(8):
+        if manager.summary: break
+        await manager._prepare(model, None, [])
+    assert manager.summary is not None
+    later = [c.args[0].messages[-1].content for c in model.complete.call_args_list[2:]]
+    assert all(r not in first_requests for r in later)
+    assert finished(manager)[-1]["resumed_fragments"] >= 2
 
 
 @pytest.mark.asyncio
@@ -168,7 +171,7 @@ async def test_inflight_replacement_aborts_request_and_retains_only_unchanged_pr
 
 
 @pytest.mark.asyncio
-async def test_cancellation_during_next_preflight_discards_private_draft():
+async def test_cancellation_during_next_preflight_preserves_only_completed_private_work():
     manager = await context()
     entered = asyncio.Event()
     budgets = 0
@@ -189,8 +192,8 @@ async def test_cancellation_during_next_preflight_discards_private_draft():
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert manager._summary_progress is None and manager.summary is None
-    assert manager.export_checkpoint(IDENTITY) is None
+    assert manager._summary_progress["completed"] == 1 and manager.summary is None
+    assert manager.export_checkpoint(IDENTITY)["summary"] is None
     assert await manager.get_messages() == history()
 
 
