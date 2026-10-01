@@ -25,8 +25,8 @@ Original tool outputs are retained even when the request fitter clips its view.
 
 Request fitting delegates to context-simple's tracked `main` branch. Its
 provider-count callback accounts for the complete assembled request, including
-tools and injected context. The semantic-summary trigger itself uses an estimate;
-final request validation uses provider measurement when available. Oversized
+tools and injected context. The compaction trigger uses that full request count
+when available, with a labelled estimate otherwise. Oversized
 protected content can still fail rather than silently vanish.
 The optional request-owner `fit_output` callback is forwarded unchanged, allowing
 the shared fitter to try a smaller output reserve after context reduction while
@@ -43,6 +43,19 @@ the portable text summary; only a failed summary or a still-oversized request
 falls back to fitting. Neither model phase has a default elapsed-time deadline.
 Explicit cancellation stops preparation without starting fallback work. History
 changes invalidate in-flight summaries and request views.
+
+Native compaction is a single operation on the complete eligible history window,
+not a chain of fragment summaries. On the measured path it reuses the loop's
+actual request envelope, including selected model, tools, options and current
+system instructions. Current-turn input and pending-operation overlays remain
+outside the checkpoint; required reminders follow the returned canonical window.
+
+For portable summaries, providers with authoritative request counts preflight
+the whole eligible prefix before splitting. A fitting request is summarized once.
+Only an oversized request, an explicit source cap, or unavailable authoritative
+counting requires the conservative fragment path. Finished events include
+`native_selection` so unsupported capabilities, unavailable measurement, real
+native failure and a resumed portable draft are distinguishable.
 
 Continuation notes remain derived state. With `durable_checkpoints: true`, a host
 can preserve and restore a validated summary checkpoint alongside its canonical

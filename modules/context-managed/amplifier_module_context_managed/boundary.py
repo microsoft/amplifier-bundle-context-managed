@@ -195,9 +195,11 @@ class BoundaryContextManager:
             # The provider owns the complete native canonical window, including
             # retained user/developer items. Keep it intact and append only new
             # conversation messages. System prompts travel separately.
-            systems = [copy.deepcopy(row) for row in messages[:end]
-                       if row.get("role") == "system" or self._retained_reminder(row, retain)]
-            return systems + [copy.deepcopy(text)] + copy.deepcopy(messages[end:])
+            systems = [copy.deepcopy(row) for row in messages[:end] if row.get("role") == "system"]
+            reminders = [copy.deepcopy(row) for row in messages[:end] if self._retained_reminder(row, retain)]
+            # Provider checkpoints precede new conversation input. Required
+            # reminders excluded from compaction remain verbatim after them.
+            return systems + [copy.deepcopy(text)] + reminders + copy.deepcopy(messages[end:])
         # System/developer messages, the original objective and explicitly
         # required persisted reminders remain verbatim with their provenance.
         first = next((i for i, row in enumerate(messages) if self._human(row)), None)
@@ -215,7 +217,7 @@ class BoundaryContextManager:
                      remaining_fragments=len(progress["pending"]))
 
     async def _summarize(self, summarizer, source, revision, stats, *, fingerprint, source_revision, identity):
-        """Build a note incrementally; commit happens only after every fragment."""
+        """Prefer one measured request; commit only after the entire prefix."""
         from amplifier_core.llm_errors import ContextLengthError
 
         limit = int(self.config.get("summary_max_source_chars", 512000))
@@ -226,6 +228,13 @@ class BoundaryContextManager:
         max_calls = int(self.config.get("summary_max_calls", 16))
         if limit < 256 or max_calls < 1:
             raise ValueError("Summary source limit and call limit must be positive")
+        # A character cap caused million-token providers to summarize fitting
+        # histories in several serial calls. Preflight the whole actual request
+        # (instructions, source, prior note, output reservation) before splitting.
+        # Explicit caps and providers without authoritative counting retain the
+        # conservative path. Do not restore unconditional default prefragmenting.
+        preflight_whole = ("summary_max_source_chars" not in self.config
+                           and callable(getattr(summarizer, "request_budget", None)))
         progress = self._summary_progress
         if not progress or progress["fingerprint"] != fingerprint:
             progress = {"fingerprint": fingerprint, "source_revision": source_revision,
@@ -234,7 +243,7 @@ class BoundaryContextManager:
                         "config": copy.deepcopy(self.config),
                         "provider": (getattr(summarizer, "name", type(summarizer).__name__),
                                      getattr(summarizer, "default_model", None)),
-                        "pending": list(source_fragments(public_messages(source), limit)),
+                        "pending": list(source_fragments(public_messages(source), None if preflight_whole else limit)),
                         "text": "", "calls": 0, "completed": 0}
             self._summary_progress = progress
         pending = progress["pending"]
@@ -267,7 +276,12 @@ class BoundaryContextManager:
                     check_source()
                     if budget:
                         stats["last_request_budget"] = budget
-                    if not fits:
+                    counted = budget is not None and budget["measurement_kind"] == "provider_count"
+                    # Missing/estimated counts cannot justify lifting the
+                    # safety cap. This check also applies after a retry whose
+                    # provider can no longer return an authoritative count.
+                    if not fits or (len(fragment) > limit and
+                                    (not preflight_whole or not counted)):
                         raise ContextLengthError("Continuation note and required instructions exceed summary input allowance")
                     stats["calls"] += 1
                     progress["calls"] += 1
@@ -378,8 +392,12 @@ class BoundaryContextManager:
         assembled = self._assembled(messages, self.summary, retain)
         native = getattr(provider, "supports_native_compaction", None)
         validate_native = getattr(provider, "validate_compacted_context", None)
+        requires_context = getattr(provider, "native_compaction_requires_request_context", False)
         use_native = (self.config.get("native_compaction", True) and callable(native) and native()
-                      and callable(validate_native))
+                      and callable(validate_native) and (not requires_context or measurement is not None))
+        native_reason = ("disabled" if not self.config.get("native_compaction", True)
+                         else "request_context_unavailable" if requires_context and measurement is None
+                         else "unsupported_by_provider" if not use_native else "available")
         if self.summary and isinstance(self.summary[1], dict):
             try:
                 valid_native = use_native and validate_native(self.summary[1])
@@ -422,6 +440,20 @@ class BoundaryContextManager:
                 measurement_kind = "public_estimate"
             check_request_contract()
         use_native = use_native and measured_tokens is not None
+        if native_reason == "available" and measured_tokens is None:
+            native_reason = "authoritative_measurement_unavailable"
+        template = measurement.dispatch if measurement is not None else None
+        if use_native and requires_context and template is None:
+            use_native = False
+            native_reason = "request_context_unavailable"
+            if self.summary and isinstance(self.summary[1], dict):
+                self.summary = None
+                self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint request context is unavailable.", "originalsAvailable": True}
+                assembled = self._assembled(messages, None, retain)
+                pressure_tokens, input_limit, measurement_kind = await measurement.measure(fitter, pressure_view(assembled))
+                if revision != self.revision:
+                    raise RuntimeError("History changed during request preparation")
+                check_request_contract()
         assembled_tokens = pressure_tokens if pressure_tokens is not None else estimate_pressure(fitter, pressure_view(assembled))
         budget = fitter._calculate_budget(token_budget, provider)
         if input_limit is not None:
@@ -472,7 +504,8 @@ class BoundaryContextManager:
             self.is_compacting = True
             await self._emit("context:compaction_started", revision=revision, through_message=end, **self.last_budget)
             outcome = "failed"
-            stats = {"calls": 0, "input_tokens_before": assembled_tokens, "measurement_kind": measurement_kind}
+            stats = {"calls": 0, "input_tokens_before": assembled_tokens, "measurement_kind": measurement_kind,
+                     "native_selection": native_reason}
             started = time.monotonic()
             try:
                 # Earlier notes are included so repeated compactions retain the
@@ -485,9 +518,19 @@ class BoundaryContextManager:
                             # Required persisted reminders stay verbatim outside the
                             # native window, so they must not also enter it.
                             native_source = [row for row in source if not self._retained_reminder(row, retain)]
-                            request = ChatRequest(messages=[Message(**row) for row in native_source],
-                                max_output_tokens=self.config.get("summary_target_tokens", 1500),
-                                metadata={"purpose": "context-compaction", "stream": False})
+                            if isinstance(template, ChatRequest):
+                                # Reuse the loop's exact model/tools/options and
+                                # current instructions. Only settled history is
+                                # compacted; current-turn overlays stay outside.
+                                rows = [row.model_copy(deep=True) for row in template.messages if row.role == "system"]
+                                rows += [Message(**row) for row in native_source if row.get("role") != "system"]
+                                request = template.model_copy(deep=True, update={"messages": rows})
+                            else:
+                                request = ChatRequest(messages=[Message(**row) for row in native_source])
+                            request = request.model_copy(update={
+                                "max_output_tokens": self.config.get("native_compaction_max_output_tokens", 4096),
+                                "metadata": {**(request.metadata or {}), "purpose": "context-compaction", "stream": False,
+                                             "native_compaction_request_context": isinstance(template, ChatRequest)}})
                             # The continuation provider owns opaque state. A
                             # separate utility provider/model is only for the
                             # portable semantic fallback, never native compact.
@@ -517,8 +560,10 @@ class BoundaryContextManager:
                             raise
                         except Exception as exc:
                             stats["native_failure"] = {"type": type(exc).__name__}
+                            stats["native_selection"] = "native_failed"
                     if use_native and self._summary_progress:
                         stats["native_skipped_for_staged_semantic"] = True
+                        stats["native_selection"] = "retrying_portable_request"
                     stats["method"] = "semantic"
                     # If native state cannot be continued, rebuild semantic
                     # evidence from originals, not an opaque-state placeholder.

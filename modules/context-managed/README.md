@@ -39,11 +39,20 @@ travels in message metadata and is validated before use, including after resume.
 An unavailable or invalid transport rebuilds the request from original history.
 The utility summary provider/model is used only for portable notes.
 
-Portable notes consume ordered bounded fragments, preflight input/output budgets,
-commit atomically, and suppress repeated unchanged-prefix failures. Explicit
+Native compaction sends one complete eligible window, using the loop's selected
+model, current instructions and request configuration. It never uses the text
+summary's fragment limits. Retain every returned canonical item unchanged.
+
+Portable notes first preflight the complete eligible prefix when the provider
+offers authoritative counting. A fitting prefix uses one summary request;
+oversized requests split into bounded fragments. Providers without authoritative
+counting keep conservative limits, and an explicit `summary_max_source_chars`
+still bounds portable requests. Notes commit atomically and suppress repeated
+unchanged-prefix failures. Explicit
 `context:compaction_finished` evidence identifies the method, safe failure
 category, elapsed time, call count and usage, including cache buckets. Raw
-provider exception bodies are not copied to these events.
+provider exception bodies are not copied to these events. `native_selection`
+records why native compaction was selected or why a portable fallback was used.
 
 See the [research, acceptance evidence and configuration](../../docs/COMPACTION_ACCEPTANCE.md)
 for actual live test limits and dependency integration order.
