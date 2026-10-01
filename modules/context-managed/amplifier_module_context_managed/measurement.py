@@ -2,6 +2,8 @@
 
 import copy
 
+from amplifier_core import ChatRequest
+
 from .checkpoint import digest
 from .summary import public_messages
 
@@ -25,6 +27,7 @@ class RequestMeasurement:
         self.cached = None
         self.preflight_calls = 0
         self.reused_calls = 0
+        self.dispatch = None
 
     @staticmethod
     def key(view):
@@ -42,6 +45,8 @@ class RequestMeasurement:
         self.preflight_calls += 1
         if not isinstance(envelope, dict) or "dispatch" not in envelope:
             raise TypeError("count_view must return {dispatch, budget_decision}")
+        if self.dispatch is None and isinstance(envelope["dispatch"], ChatRequest):
+            self.dispatch = envelope["dispatch"].model_copy(deep=True)
         measurement = fitter._measured_budget_decision(envelope)
         self.cached = (self.key(public_view), envelope)
         decision = envelope.get("budget_decision")

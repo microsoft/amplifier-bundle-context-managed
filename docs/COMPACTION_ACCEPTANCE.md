@@ -30,8 +30,11 @@ The two methods remain explicitly distinguishable in diagnostics and checkpoints
 
 Portable summaries project public messages, receipts, tool results, and input
 provenance, omitting duplicated tool calls and private reasoning serialization.
-Bounded source fragments update a continuation note incrementally, with output
-reserve and provider input preflight. A note commits only after the complete
+The complete eligible prefix is preflighted first when authoritative request
+counting is available. A fitting prefix uses one summary call; only oversized
+input or an explicit source cap requires fragments. Without authoritative counts,
+conservative source fragments update a continuation note incrementally, with
+output reserve and provider input preflight. A note commits only after the complete
 eligible prefix succeeds, at a boundary preserving complete tool exchanges.
 The summary instructions retain the objective, corrections, constraints,
 decisions, verified results, pending work, identifiers and artifact references;
@@ -116,7 +119,8 @@ Optional boundary-engine settings (existing trigger/output settings still apply)
 | --- | --- | --- |
 | `native_compaction` | `true` | Prefer the continuation provider's optional native contract. |
 | `native_min_new_tokens` | `500` | Avoid costly recompaction of a tiny eligible prefix, except when fitting is required. |
-| `summary_max_source_chars` | `512000` | Maximum source fragment; also bounded conservatively by provider context and exact request count. |
+| `summary_max_source_chars` | automatic | An explicit value caps portable source fragments. Otherwise an authoritative full-request count allows one fitting prefix; unavailable counts use a conservative 512000-character cap, also bounded by provider context. Never applies to native compaction. |
+| `native_compaction_max_output_tokens` | `4096` | Request reservation for the native operation, separate from portable note output. |
 | `summary_max_calls` | `16` | Bound portable logical provider calls across all retries of one exact prefix/identity/configuration. Failed calls consume this allowance; exhaustion suppresses retries until source or contract changes. Native attempts do not consume it. |
 | `summary_reasoning_effort` | `low` | Avoid spending the continuation model's high reasoning setting on routine notes. |
 | `summary_retry_delay` | `60` | Initial transient-failure cooldown in seconds; exponential backoff and three stalled attempts. Successful fragment progress resets the stalled-attempt count; the total call limit still applies. |
@@ -155,7 +159,12 @@ projection for its semantic estimate, excluding private/duplicate transcript
 fields; the shared fitter still owns hard input safety, media and opaque state.
 `context:compaction_started` records the trigger, count kind and policy budget.
 Finished events record completed/resumed/remaining fragments, total summary
-calls and safe provider failure categories. No prompt or exception body is added to these fields.
+calls and safe provider failure categories. `native_selection` identifies an
+available native path, disabled/unsupported capability, missing request context
+or authoritative measurement, an actual native failure, or a portable retry.
+Native requests reuse the loop's complete measured envelope and compact the
+eligible history in one operation, without portable fragmentation. No prompt or
+exception body is added to these diagnostic fields.
 
 Before publishing a completed note, history revision, checkpoint identity,
 configuration and provider/model identity are checked again after final

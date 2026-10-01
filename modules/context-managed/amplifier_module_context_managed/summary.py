@@ -95,7 +95,14 @@ def source_fragments(messages, max_chars):
     Fragments are *quoted source data*, not tool protocol messages. A large
     record may span fragments; indexes let the summarizer join its evidence.
     Only the completed note is eligible for commit at a safe turn boundary.
+    A missing character limit prepares one complete prefix for request preflight.
     """
+    if max_chars is None:
+        text = "\n".join(json.dumps(row, ensure_ascii=False, separators=(",", ":"))
+                         for row in messages)
+        if text:
+            yield text
+        return
     pending = []
     size = 0
     for index, row in enumerate(messages):
@@ -155,10 +162,16 @@ async def request_fits(provider, request):
         return True, None
     measured = decision.get("estimated_input_tokens")
     limit = decision.get("input_limit_tokens")
-    if type(measured) is not int or type(limit) is not int:
+    if type(measured) is not int or measured < 0 or type(limit) is not int or limit <= 0:
         return True, None
+    measurement = decision.get("measurement")
+    counted = (isinstance(measurement, dict) and measurement.get("kind") == "provider_count"
+               and isinstance(measurement.get("source"), str) and bool(measurement["source"])
+               and type(measurement.get("input_tokens")) is int
+               and measurement["input_tokens"] == measured)
     return measured <= limit, {
         "input_tokens": measured,
         "input_limit_tokens": limit,
         "output_reserve": request.max_output_tokens,
+        "measurement_kind": "provider_count" if counted else "provider_estimate",
     }
