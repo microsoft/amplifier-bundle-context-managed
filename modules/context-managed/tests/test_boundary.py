@@ -53,7 +53,7 @@ async def test_visible_compaction_preserves_canonical_and_latest_correction():
     assert "Continuation note" in str(view)
     assert "Use the revised requirement" in str(view)
     assert await context.get_messages() == original
-    assert [call.args[0] for call in hooks.emit.call_args_list if call.args[0].startswith("context:compaction_")] == ["context:compaction_started", "context:compaction_finished"]
+    assert [call.args[0] for call in hooks.emit.call_args_list if call.args[0].startswith("context:compaction_")] == ["context:compaction_started", "context:compaction_progress", "context:compaction_finished"]
     original[0]["content"] = "mutated by caller"
     assert (await context.get_messages())[0]["content"] == "Build a report"
 

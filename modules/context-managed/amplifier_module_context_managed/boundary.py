@@ -56,9 +56,12 @@ class BoundaryContextManager:
         self.evidence_refs = []
         self.checkpoint_status = {"status": "empty"}
         self.summary_failure = None
-        # Private, uncommitted work. Checkpoints and request views only expose a
-        # completed summary that covers the entire chosen canonical prefix.
+        # Only a fully covered summary can enter a request view. Completed
+        # partial notes may be checkpointed to resume auxiliary work after a
+        # restart; they never become canonical history or executable work.
         self._summary_progress = None
+        self._restored_progress = None
+        self.persist_checkpoint = None
 
     @staticmethod
     def _same_prefix(record, messages):
@@ -104,6 +107,8 @@ class BoundaryContextManager:
         # the same prefix. No result completed after replacement can be staged.
         if not self._same_prefix(self._summary_progress, replacement):
             self._summary_progress = None
+        if not self._same_prefix(self._restored_progress, replacement):
+            self._restored_progress = None
         if not keep_summary:
             self.summary = None
             self.summary_identity = None
@@ -111,7 +116,14 @@ class BoundaryContextManager:
 
     def checkpoint_configuration(self):
         from .checkpoint import digest
-        return digest({"config": self.config, "prompt": SUMMARY_PROMPT})
+        # Trigger, observer and retry policy changes do not change the meaning
+        # of an already completed note. Keep identity, source and summary
+        # generation options in the compatibility contract.
+        inert = {"summarize_trigger", "summary_retry_delay", "summary_max_calls",
+                 "native_min_new_tokens", "compaction_notice_enabled",
+                 "compaction_notice_token_reserve", "token_meter", "durable_checkpoints"}
+        return digest({"config": {k: v for k, v in self.config.items() if k not in inert},
+                       "prompt": SUMMARY_PROMPT})
 
     def export_checkpoint(self, identity):
         from .checkpoint import export_checkpoint
@@ -120,6 +132,7 @@ class BoundaryContextManager:
     def restore_checkpoint(self, record, identity):
         from .checkpoint import restore_checkpoint
         self._summary_progress = None
+        self._restored_progress = None
         self.summary_failure = None
         return restore_checkpoint(self, record, identity)
 
@@ -237,14 +250,44 @@ class BoundaryContextManager:
                            and callable(getattr(summarizer, "request_budget", None)))
         progress = self._summary_progress
         if not progress or progress["fingerprint"] != fingerprint:
+            parts = list(source_fragments(public_messages(source), None if preflight_whole else limit))
+            segments = [[i, 0, len(part)] for i, part in enumerate(parts)]
+            saved = self._restored_progress
+            self._restored_progress = None
+            if (saved and saved["fingerprint"] == fingerprint
+                    and saved["provider"] == [getattr(summarizer, "name", type(summarizer).__name__),
+                                              getattr(summarizer, "default_model", None)]
+                    and saved["parts_digest"] == digest(parts)):
+                segments = saved["segments"]
+                valid = all(0 <= i < len(parts) and 0 <= a < z <= len(parts[i]) for i, a, z in segments)
+                for previous, current in zip(segments, segments[1:]):
+                    i, start, end = previous
+                    j, next_start, next_end = current
+                    valid = valid and ((j == i and next_start == end) or
+                        (j == i + 1 and end == len(parts[i]) and next_start == 0))
+                if segments:
+                    i, start, end = segments[-1]
+                    valid = valid and i == len(parts) - 1 and end == len(parts[i])
+                if not valid:
+                    saved = None
+                    segments = [[i, 0, len(part)] for i, part in enumerate(parts)]
+            else:
+                saved = None
+            if not saved and self.checkpoint_status.get("status") == "resuming":
+                self.checkpoint_status = {"status": "progress_rejected", "originalsAvailable": True,
+                    "reason": "Saved partial progress no longer matches the source or summary provider."}
+                await self._emit("context:checkpoint_progress_rejected", **self.checkpoint_status)
             progress = {"fingerprint": fingerprint, "source_revision": source_revision,
                         "identity": copy.deepcopy(identity),
                         "configuration": self.checkpoint_configuration(),
                         "config": copy.deepcopy(self.config),
                         "provider": (getattr(summarizer, "name", type(summarizer).__name__),
                                      getattr(summarizer, "default_model", None)),
-                        "pending": list(source_fragments(public_messages(source), None if preflight_whole else limit)),
-                        "text": "", "calls": 0, "completed": 0}
+                        "pending": [parts[i][a:z] for i, a, z in segments],
+                        "parts_digest": digest(parts), "segments": copy.deepcopy(segments),
+                        "text": saved["text"] if saved else "",
+                        "calls": saved["calls"] if saved else 0,
+                        "completed": saved["completed"] if saved else 0}
             self._summary_progress = progress
         pending = progress["pending"]
         stats["resumed_fragments"] = progress["completed"]
@@ -262,12 +305,15 @@ class BoundaryContextManager:
                 self._summary_progress = None
                 raise RuntimeError("Summary contract changed during compaction; stale summary was discarded")
 
+        calls_at_start = stats["calls"]
+
         async def run():
             while pending:
                 check_source()
-                if progress["calls"] >= max_calls:
+                if stats["calls"] - calls_at_start >= max_calls:
                     stats["work_limit_exhausted"] = True
-                    raise ValueError("Summary call limit reached before the covered prefix was complete")
+                    from amplifier_core.llm_errors import LLMError
+                    raise LLMError("Summary call allowance reached; completed pieces are saved for continuation", retryable=True)
                 fragment = pending[0]
                 request = summary_request(SUMMARY_PROMPT, fragment, progress["text"], progress["config"])
 
@@ -285,7 +331,15 @@ class BoundaryContextManager:
                         raise ContextLengthError("Continuation note and required instructions exceed summary input allowance")
                     stats["calls"] += 1
                     progress["calls"] += 1
-                    return await summarizer.complete(request)
+                    info = summarizer.get_info() if callable(getattr(summarizer, "get_info", None)) else None
+                    if inspect.isawaitable(info):
+                        info = await info
+                    capabilities = info.get("capabilities", []) if isinstance(info, dict) else getattr(info, "capabilities", [])
+                    # This is an output-work bound, NEVER an elapsed deadline.
+                    # Providers that auto-continue must expose and honor the
+                    # per-call control. Ordinary chat keeps its configured policy.
+                    options = {"request_options": {"auto_continue": False}} if "completion:auto_continue:v1" in capabilities else {}
+                    return await summarizer.complete(request, **options)
 
                 try:
                     response = await complete_fragment()
@@ -294,9 +348,13 @@ class BoundaryContextManager:
                         raise
                     middle = len(fragment) // 2
                     pending[:1] = [fragment[:middle], fragment[middle:]]
+                    i, start, end = progress["segments"][0]
+                    progress["segments"][:1] = [[i, start, start + middle], [i, start + middle, end]]
                     self._summary_progress_stats(stats, progress)
                     continue
                 add_usage(stats, getattr(response, "usage", None))
+                if getattr(response, "finish_reason", None) in {"length", "max_tokens", "incomplete"}:
+                    raise ValueError("Compaction continuation note reached its output limit; incomplete note was not committed")
                 text = "\n".join(block.text for block in response.content
                     if getattr(block, "type", None) == "text" and getattr(block, "text", None))
                 if not text.strip():
@@ -304,9 +362,16 @@ class BoundaryContextManager:
                 check_source()
                 progress["text"] = text
                 pending.pop(0)
+                progress["segments"].pop(0)
                 progress["completed"] += 1
                 stats["completed_fragments_this_pass"] += 1
                 self._summary_progress_stats(stats, progress)
+                if self.persist_checkpoint:
+                    saved = self.persist_checkpoint()
+                    if inspect.isawaitable(saved):
+                        await saved
+                await self._emit("context:compaction_progress", completed_parts=progress["completed"],
+                                 remaining_parts=len(pending), method="semantic")
             return progress["text"]
 
         try:
@@ -491,7 +556,7 @@ class BoundaryContextManager:
             source = self._assembled(messages[:end], self.summary, retain)
             fingerprint = digest({"source": source, "identity": identity,
                 "provider": getattr(summarizer, "name", type(summarizer).__name__),
-                "model": getattr(summarizer, "default_model", None), "config": self.config})
+                "model": getattr(summarizer, "default_model", None), "configuration": self.checkpoint_configuration()})
             source_revision = {"messages": end, "sha256": digest(messages[:end])}
             if self._summary_progress and self._summary_progress["fingerprint"] != fingerprint:
                 self._summary_progress = None
@@ -512,8 +577,7 @@ class BoundaryContextManager:
                 # same task. Canonical originals stay available to the host.
                 async def prepare_note():
                     check_summary_contract()
-                    if use_native and not self._summary_progress:
-                        stats["calls"] += 1
+                    if use_native and not self._summary_progress and not self._restored_progress:
                         try:
                             # Required persisted reminders stay verbatim outside the
                             # native window, so they must not also enter it.
@@ -536,6 +600,17 @@ class BoundaryContextManager:
                             # portable semantic fallback, never native compact.
                             # A healthy native response may take many minutes.
                             # Elapsed time must not cancel it or start a fallback.
+                            fits, compact_budget = await request_fits(provider, request)
+                            if not fits:
+                                # Native compaction accepts one complete eligible
+                                # window, never fragments. Oversized legacy history
+                                # goes straight to portable recovery without a paid
+                                # native request or a scary auxiliary error banner.
+                                stats["native_selection"] = "input_exceeds_native_allowance"
+                                stats["native_request_budget"] = compact_budget
+                                from amplifier_core.llm_errors import ContextLengthError
+                                raise ContextLengthError("Native compaction input exceeds allowance")
+                            stats["calls"] += 1
                             result = await provider.compact_context(request)
                             add_usage(stats, result.get("usage"))
                             if result.get("kind") != "native" or not isinstance(result.get("message"), dict):
@@ -560,8 +635,9 @@ class BoundaryContextManager:
                             raise
                         except Exception as exc:
                             stats["native_failure"] = {"type": type(exc).__name__}
-                            stats["native_selection"] = "native_failed"
-                    if use_native and self._summary_progress:
+                            if stats["native_selection"] != "input_exceeds_native_allowance":
+                                stats["native_selection"] = "native_failed"
+                    if use_native and (self._summary_progress or self._restored_progress):
                         stats["native_skipped_for_staged_semantic"] = True
                         stats["native_selection"] = "retrying_portable_request"
                     stats["method"] = "semantic"
@@ -597,7 +673,10 @@ class BoundaryContextManager:
                 assembled, outcome = candidate, "completed"
             except asyncio.CancelledError:
                 outcome = "cancelled"
-                self._summary_progress = None
+                # Only completed, source-validated pieces survive cancellation.
+                # The in-flight response is never staged or replayed.
+                if self._summary_progress and not self._summary_progress["completed"]:
+                    self._summary_progress = None
                 raise
             except Exception as exc:
                 if summary_contract_changed():
@@ -616,7 +695,10 @@ class BoundaryContextManager:
                 stalled = not stats.get("completed_fragments_this_pass", 0)
                 attempts = previous["attempts"] + 1 if stalled and previous and previous["fingerprint"] == fingerprint else 1
                 retryable = bool(getattr(exc, "retryable", isinstance(exc, (TimeoutError, ConnectionError))))
-                if not retryable or attempts >= 3:
+                if self._summary_progress and (not self._summary_progress["completed"]
+                        or (not retryable and not self._summary_progress["pending"])):
+                    # An empty draft or a finished note that failed reduction
+                    # checks is not reusable paid progress.
                     self._summary_progress = None
                 self.summary_failure = {"fingerprint": fingerprint, "source_revision": source_revision,
                     "attempts": attempts, "retryable": retryable,
@@ -655,7 +737,9 @@ class BoundaryContextManager:
                 result = await fitter.get_messages_for_request_retaining(retain_contents=retain, provider=provider,
                     token_budget=token_budget, hard_fit=hard_fit)
             except asyncio.CancelledError:
-                self._summary_progress = None
+                # Preserve validated completed pieces; never stage the active call.
+                if self._summary_progress and not self._summary_progress["completed"]:
+                    self._summary_progress = None
                 raise
             if revision != self.revision:
                 raise RuntimeError("History changed during request preparation")
@@ -670,7 +754,9 @@ class BoundaryContextManager:
                 result = await fitter.get_measured_request_view(provider=provider, retain_contents=retain,
                     count_view=measurement.count, fit_output=fit_output)
             except asyncio.CancelledError:
-                self._summary_progress = None
+                # Preserve validated completed pieces; never stage the active call.
+                if self._summary_progress and not self._summary_progress["completed"]:
+                    self._summary_progress = None
                 raise
             result["count_calls"] += measurement.preflight_calls - measurement.reused_calls
             if revision != self.revision:
@@ -694,6 +780,7 @@ async def mount_boundary(coordinator, config):
                 raise RuntimeError("Durable checkpoints require a host context.preserve_evidence callback before request fitting")
             return await callback(messages)
         context.preserve_evidence = preserve
+        context.persist_checkpoint = lambda: (coordinator.get_capability("context.persist_checkpoint") or (lambda: None))()
         coordinator.register_capability("context.checkpoint.export", context.export_checkpoint)
         coordinator.register_capability("context.checkpoint.restore", context.restore_checkpoint)
         coordinator.register_capability("context.checkpoint.status", lambda: copy.deepcopy(context.checkpoint_status))
@@ -713,5 +800,6 @@ async def mount_boundary(coordinator, config):
     coordinator.register_capability("context.compacting", lambda: context.is_compacting)
     coordinator.register_capability("context.history_authority", "host")
     coordinator.register_capability("context.history", context.get_messages)
-    events = ["context:compaction_started", "context:compaction_finished"]
+    events = ["context:compaction_started", "context:compaction_finished",
+              "context:compaction_progress", "context:checkpoint_progress_rejected"]
     coordinator.register_contributor("observability.events", "context-managed", lambda: events)
