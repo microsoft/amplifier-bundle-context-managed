@@ -1,12 +1,14 @@
 """Text-only size hints for structured messages, never image token counts.
 
-Keep this small helper local: runtime modules must not depend on a host or on
-another context/loop implementation. Image cost requires the selected provider.
+Keep image estimation local; canonical history projection is shared with the
+already-required context-simple library. Image cost requires the selected provider.
 Only actual content-block positions are inspected; quoted data and tool arguments
 remain ordinary text. The original messages and image payloads are never changed.
 """
 
 from typing import Any, NamedTuple
+
+from amplifier_module_context_simple.request_view import request_view
 
 
 class TextEstimate(NamedTuple):
@@ -17,7 +19,7 @@ class TextEstimate(NamedTuple):
 def estimate_messages(messages: list[dict[str, Any]]) -> TextEstimate:
     tokens = 0
     has_images = False
-    for message in messages:
+    for message in request_view(messages):
         content = message.get("content")
         if isinstance(content, list):
             content, found = _content_without_image_payloads(content)

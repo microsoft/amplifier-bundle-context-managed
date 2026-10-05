@@ -10,6 +10,7 @@ import json
 from decimal import Decimal, InvalidOperation
 
 from amplifier_core import ChatRequest, Message
+from amplifier_module_context_simple.request_view import request_view
 
 
 def add_usage(stats, usage):
@@ -43,7 +44,7 @@ def add_usage(stats, usage):
 def public_messages(messages):
     """Keep task evidence without serializing duplicate or opaque wire state."""
     result = []
-    for message in messages:
+    for message in request_view(messages):
         row = {
             key: copy.deepcopy(message[key])
             for key in ("role", "name", "tool_call_id")
