@@ -410,7 +410,7 @@ class BoundaryContextManager:
         manifest = ("Pending operations (observations, not authorization):\n" + json.dumps(operations)) if operations else None
 
         def pressure_view(rows):
-            view = request_view(copy.deepcopy(rows))
+            view = copy.deepcopy(request_view(rows))
             if self.factory:
                 view = [{"role": "system", "content": system_prompt}] + [row for row in view
                     if row.get("role") != "system" or (row.get("metadata") or {}).get("source") == "hook"]

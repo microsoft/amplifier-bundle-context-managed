@@ -143,3 +143,31 @@ async def test_native_compaction_request_uses_the_shared_execution_projection():
     assert calls
     model.complete.assert_not_awaited()
     assert await context.get_messages() == original
+
+
+@pytest.mark.asyncio
+async def test_pressure_boundary_discards_archive_metadata_before_deepcopy(monkeypatch):
+    import amplifier_module_context_managed.boundary as boundary
+    context = BoundaryContextManager({"max_tokens": 6000, "summarize_trigger": 0.2,
+                                      "compaction_notice_enabled": False})
+    original = rows(pressure=True)
+    await context.set_messages(original)
+    canonical = await context.get_messages()
+    actual_copy = copy.deepcopy
+    pressure_copies = []
+    def observed_copy(value, *args, **kwargs):
+        import sys
+        # Canonical snapshots/evidence keep their existing copy semantics.
+        # This observes exactly the request-pressure boundary being corrected.
+        if sys._getframe(1).f_code.co_name == "pressure_view":
+            assert_clean(value)
+            pressure_copies.append(value)
+        return actual_copy(value, *args, **kwargs)
+    monkeypatch.setattr(boundary.copy, "deepcopy", observed_copy)
+    view = await context.get_messages_for_request(provider=provider())
+    assert pressure_copies and "Continuation note" in str(view)
+    assert_clean(view)
+    assert await context.get_messages() == canonical
+    # Request copies still isolate mutable execution content from canonical rows.
+    view[-1]["content"] = "changed caller view"
+    assert await context.get_messages() == canonical
