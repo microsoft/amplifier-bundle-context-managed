@@ -163,7 +163,7 @@ class BoundaryContextManager:
         origin = metadata.get("amplifier_input") or {}
         service = isinstance(origin, dict) and origin.get("version") == 1 and origin.get("kind") == "service"
         return (bool(request_view([message])) and message.get("role") == "user"
-                and not metadata.get("ephemeral") and not service)
+                and not metadata.get("ephemeral") and not metadata.get("passive") and not service)
 
     @staticmethod
     def _retained_reminder(message, retain):
