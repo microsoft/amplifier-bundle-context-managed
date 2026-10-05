@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from ._text_estimate import estimate_messages
+from amplifier_module_context_simple.request_view import request_view
 
 logger = logging.getLogger(__name__)
 
@@ -552,7 +553,7 @@ class ManagedContextManager:
             )
             assembled = await self._inline_compact(assembled, budget)
 
-        return assembled
+        return request_view(assembled)
 
     async def get_messages(self) -> list[dict[str, Any]]:
         """Return full raw conversation history.
@@ -1084,7 +1085,7 @@ class ManagedContextManager:
         included for any calls not already shown via content blocks.
         """
         lines = []
-        for msg in messages:
+        for msg in request_view(messages):
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
             # IDs of tool calls already shown via content blocks (avoid duplication)
