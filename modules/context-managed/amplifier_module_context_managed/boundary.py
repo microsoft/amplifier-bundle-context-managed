@@ -1,7 +1,8 @@
 """Host-owned canonical history with visible, request-boundary summarization.
 
-The context-simple request fitter owns token/retention/provider contracts. This
-module owns semantic summaries. It never opens a second transcript writer.
+Request validation shares context-simple budget/provider contracts without its
+emergency trimming ladder. This module owns native checkpoints and semantic
+summaries. It never opens a second transcript writer.
 """
 import asyncio
 import copy
@@ -11,7 +12,8 @@ import time
 import inspect
 
 from amplifier_core import ChatRequest, Message
-from amplifier_module_context_simple import SimpleContextManager
+from .request_context import RequestContext
+from .errors import CompactionError
 
 from .checkpoint import digest
 from .measurement import RequestMeasurement, estimate_pressure
@@ -147,7 +149,7 @@ class BoundaryContextManager:
                 "protected_recent", "protected_tool_results", "truncate_chars",
                 "compaction_notice_enabled", "compaction_notice_token_reserve",
                 "output_reserve_fraction", "token_meter"}
-        return SimpleContextManager(**{k: v for k, v in self.config.items() if k in keys}, hooks=self.hooks)
+        return RequestContext(**{k: v for k, v in self.config.items() if k in keys}, hooks=self.hooks)
 
     async def _emit(self, kind, **data):
         if self.hooks:
@@ -237,7 +239,7 @@ class BoundaryContextManager:
         # Providers without exact preflight still advertise a context budget.
         # One source character per token is deliberately conservative; an
         # authoritative overflow below causes further splitting, never replay.
-        limit = min(limit, max(256, SimpleContextManager()._calculate_budget(None, summarizer) // 2))
+        limit = min(limit, max(256, RequestContext()._calculate_budget(None, summarizer) // 2))
         max_calls = int(self.config.get("summary_max_calls", 16))
         if limit < 256 or max_calls < 1:
             raise ValueError("Summary source limit and call limit must be positive")
@@ -354,11 +356,11 @@ class BoundaryContextManager:
                     continue
                 add_usage(stats, getattr(response, "usage", None))
                 if getattr(response, "finish_reason", None) in {"length", "max_tokens", "incomplete"}:
-                    raise ValueError("Compaction continuation note reached its output limit; incomplete note was not committed")
+                    raise CompactionError("summary_output_limit", "The summary exhausted its output allowance. Increase summary_max_output_tokens and retry; no incomplete note was committed.")
                 text = "\n".join(block.text for block in response.content
                     if getattr(block, "type", None) == "text" and getattr(block, "text", None))
                 if not text.strip():
-                    raise ValueError("Compaction returned an empty continuation note")
+                    raise CompactionError("summary_empty", "The summarizer returned no continuation text. Check the model and summary output allowance before retrying.")
                 check_source()
                 progress["text"] = text
                 pending.pop(0)
@@ -416,8 +418,8 @@ class BoundaryContextManager:
                 view.append({"role": "user", "content": manifest,
                     "metadata": {"ephemeral": True, "persisted": True, "source": "context-managed-operations"}})
             return view
-        # An opted-in host commits originals before any fitted view can clip
-        # tool output. References point to its existing evidence/transcript store.
+        # An opted-in host commits originals before deriving a compacted view.
+        # References point to its existing evidence/transcript store.
         if self.config.get("durable_checkpoints") and self.preserve_evidence:
             self.evidence_refs = await self.preserve_evidence(copy.deepcopy(messages))
         identity = copy.deepcopy(self.checkpoint_identity()) if self.checkpoint_identity else {
@@ -458,20 +460,21 @@ class BoundaryContextManager:
         native = getattr(provider, "supports_native_compaction", None)
         validate_native = getattr(provider, "validate_compacted_context", None)
         requires_context = getattr(provider, "native_compaction_requires_request_context", False)
-        use_native = (self.config.get("native_compaction", True) and callable(native) and native()
-                      and callable(validate_native) and (not requires_context or measurement is not None))
-        native_reason = ("disabled" if not self.config.get("native_compaction", True)
+        native_supported = bool(callable(native) and native())
+        native_reason = ("unsupported_by_provider" if not native_supported
+                         else "disabled" if not self.config.get("native_compaction", True)
                          else "request_context_unavailable" if requires_context and measurement is None
-                         else "unsupported_by_provider" if not use_native else "available")
+                         else "invalid_native_contract" if not callable(validate_native) or not callable(getattr(provider, "compact_context", None))
+                         else "available")
+        use_native = native_supported and native_reason == "available"
         if self.summary and isinstance(self.summary[1], dict):
             try:
                 valid_native = use_native and validate_native(self.summary[1])
             except Exception:
                 valid_native = False
             if not valid_native:
-                self.summary = None
                 self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint transport is unavailable or invalid.", "originalsAvailable": True}
-                assembled = self._assembled(messages, None, retain)
+                raise CompactionError("native_checkpoint_invalid", "The saved native checkpoint cannot be used by this provider. Restore a compatible checkpoint or explicitly recover the history.")
         end = self._boundary(messages, retain)
         if self._summary_progress and self._summary_progress["source_revision"]["messages"] != end:
             self._summary_progress = None
@@ -491,34 +494,12 @@ class BoundaryContextManager:
             raise RuntimeError("History changed during request preparation")
         check_request_contract()
         if self.summary and isinstance(self.summary[1], dict) and measured_tokens is None:
-            # Never budget an opaque checkpoint by its short visible label.
-            # Preserve originals and use the portable path when the continuation
-            # provider cannot authoritatively count this native state.
-            self.summary = None
-            self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint could not be measured by the continuation provider.", "originalsAvailable": True}
-            assembled = self._assembled(messages, None, retain)
-            if can_measure:
-                pressure_tokens, input_limit, measurement_kind = await measurement.measure(fitter, pressure_view(assembled))
-                measured_tokens = pressure_tokens if measurement_kind == "provider_count" else None
-            else:
-                pressure_tokens = None
-                measurement_kind = "public_estimate"
-            check_request_contract()
-        use_native = use_native and measured_tokens is not None
-        if native_reason == "available" and measured_tokens is None:
-            native_reason = "authoritative_measurement_unavailable"
+            raise CompactionError("native_measurement_unavailable", "The native checkpoint could not be measured. Restore provider counting before continuing.")
         template = measurement.dispatch if measurement is not None else None
+        if use_native and measured_tokens is None:
+            native_reason = "authoritative_measurement_unavailable"
         if use_native and requires_context and template is None:
-            use_native = False
             native_reason = "request_context_unavailable"
-            if self.summary and isinstance(self.summary[1], dict):
-                self.summary = None
-                self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint request context is unavailable.", "originalsAvailable": True}
-                assembled = self._assembled(messages, None, retain)
-                pressure_tokens, input_limit, measurement_kind = await measurement.measure(fitter, pressure_view(assembled))
-                if revision != self.revision:
-                    raise RuntimeError("History changed during request preparation")
-                check_request_contract()
         assembled_tokens = pressure_tokens if pressure_tokens is not None else estimate_pressure(fitter, pressure_view(assembled))
         budget = fitter._calculate_budget(token_budget, provider)
         if input_limit is not None:
@@ -537,12 +518,18 @@ class BoundaryContextManager:
             should_summarize = (assembled_tokens >= budget or
                                 fitter._estimate_tokens(added) >= self.config.get("native_min_new_tokens", 500))
         if should_summarize:
-            summarizer = self.summary_provider() if self.summary_provider else provider
+            if native_supported and native_reason != "available":
+                raise CompactionError(native_reason, "Native compaction is advertised but its required configuration, request envelope or token measurement is unavailable. Repair native support; portable summaries are not an automatic fallback.")
+            # A portable draft must never bypass newly available native support.
+            if native_supported:
+                self._summary_progress = None
+                self._restored_progress = None
+            summarizer = provider if native_supported else self.summary_provider() if self.summary_provider else provider
             summary_provider_identity = (getattr(summarizer, "name", type(summarizer).__name__),
                                          getattr(summarizer, "default_model", None))
 
             def summary_contract_changed():
-                current = self.summary_provider() if self.summary_provider else provider
+                current = provider if native_supported else self.summary_provider() if self.summary_provider else provider
                 return (request_contract_changed() or summary_provider_identity != (
                     getattr(current, "name", type(current).__name__), getattr(current, "default_model", None)))
 
@@ -562,9 +549,10 @@ class BoundaryContextManager:
                 self._summary_progress = None
             failure = self.summary_failure
             if failure and failure["fingerprint"] == fingerprint:
-                should_summarize = failure["retryable"] and failure["attempts"] < 3 and time.monotonic() >= failure["retry_after"]
+                if not (failure["retryable"] and failure["attempts"] < 3 and time.monotonic() >= failure["retry_after"]):
+                    raise CompactionError("previous_failure", "Compaction of this history previously failed. Correct the reported cause or wait for the retry cooldown; the conversation has not advanced.", retryable=failure["retryable"])
         if should_summarize:
-            if getattr(summarizer, "native_bundle_live", False):
+            if not native_supported and getattr(summarizer, "native_bundle_live", False):
                 raise RuntimeError("Native live providers require a separate context.summary_provider for compaction")
             self.is_compacting = True
             await self._emit("context:compaction_started", revision=revision, through_message=end, **self.last_budget)
@@ -597,26 +585,28 @@ class BoundaryContextManager:
                                              "native_compaction_request_context": isinstance(template, ChatRequest)}})
                             # The continuation provider owns opaque state. A
                             # separate utility provider/model is only for the
-                            # portable semantic fallback, never native compact.
+                            # portable summaries on unsupported providers, never native compact.
                             # A healthy native response may take many minutes.
                             # Elapsed time must not cancel it or start a fallback.
                             fits, compact_budget = await request_fits(provider, request)
                             if not fits:
                                 # Native compaction accepts one complete eligible
                                 # window, never fragments. Oversized legacy history
-                                # goes straight to portable recovery without a paid
-                                # native request or a scary auxiliary error banner.
+                                # requires explicit recovery; never silently switch
+                                # compaction methods or discard input to make it fit.
                                 stats["native_selection"] = "input_exceeds_native_allowance"
                                 stats["native_request_budget"] = compact_budget
-                                from amplifier_core.llm_errors import ContextLengthError
-                                raise ContextLengthError("Native compaction input exceeds allowance")
+                                raise CompactionError("native_input_oversized", "Native input exceeds the provider allowance. Restore the last compatible checkpoint or explicitly recover this oversized history; it was not sent to native compaction.")
                             stats["calls"] += 1
                             result = await provider.compact_context(request)
+                            if revision != self.revision:
+                                raise RuntimeError("History changed during compaction; stale summary was discarded")
+                            check_summary_contract()
                             add_usage(stats, result.get("usage"))
                             if result.get("kind") != "native" or not isinstance(result.get("message"), dict):
-                                raise ValueError("Native compaction returned an invalid checkpoint")
+                                raise CompactionError("native_checkpoint_invalid", "Native compaction returned no valid checkpoint.")
                             if not validate_native(result["message"]):
-                                raise ValueError("Native compaction returned an invalid transport envelope")
+                                raise CompactionError("native_checkpoint_invalid", "Native compaction returned an invalid transport envelope.")
                             native_candidate = self._assembled(messages, (end, result["message"]), retain)
                             if measurement is not None:
                                 candidate_tokens, _, candidate_kind = await measurement.measure(fitter, pressure_view(native_candidate))
@@ -626,7 +616,7 @@ class BoundaryContextManager:
                                 candidate_tokens = await self._native_view_tokens(provider, pressure_view(native_candidate))
                             stats["native_input_tokens_after"] = candidate_tokens
                             if candidate_tokens is None or candidate_tokens >= assembled_tokens:
-                                raise ValueError("Native compaction did not produce a measured reduction")
+                                raise CompactionError("native_no_reduction", "Native compaction returned an unmeasurable or non-reducing checkpoint.")
                             stats["method"] = "native"
                             stats["input_tokens_before"] = assembled_tokens
                             stats["input_tokens_after"] = candidate_tokens
@@ -637,9 +627,7 @@ class BoundaryContextManager:
                             stats["native_failure"] = {"type": type(exc).__name__}
                             if stats["native_selection"] != "input_exceeds_native_allowance":
                                 stats["native_selection"] = "native_failed"
-                    if use_native and (self._summary_progress or self._restored_progress):
-                        stats["native_skipped_for_staged_semantic"] = True
-                        stats["native_selection"] = "retrying_portable_request"
+                            raise
                     stats["method"] = "semantic"
                     # If native state cannot be continued, rebuild semantic
                     # evidence from originals, not an opaque-state placeholder.
@@ -688,9 +676,9 @@ class BoundaryContextManager:
                     if not self._same_prefix(self._summary_progress, self.messages):
                         self._summary_progress = None
                     raise
-                # The shared fitter can still prepare a bounded request. Never
-                # commit an empty/failed summary or discard canonical history.
-                outcome = "fallback"
+                # Stop this request instead of hiding compaction failures with
+                # trimming. Keep canonical history and the last valid checkpoint.
+                outcome = "failed"
                 previous = self.summary_failure
                 stalled = not stats.get("completed_fragments_this_pass", 0)
                 attempts = previous["attempts"] + 1 if stalled and previous and previous["fingerprint"] == fingerprint else 1
@@ -707,7 +695,11 @@ class BoundaryContextManager:
                 # Preserve a safe category and budget evidence, not their repr.
                 stats["failure"] = {"type": type(exc).__name__, "retryable": retryable,
                                     "attempt": attempts, "retry_suppressed": not retryable or attempts >= 3}
-                self.checkpoint_status = {"status": "fallback", "failure": stats["failure"], "originalsAvailable": True}
+                stats["failure"]["code"] = getattr(exc, "code", "native_failed" if native_supported else "summary_failed")
+                self.checkpoint_status = {"status": "failed", "failure": stats["failure"], "originalsAvailable": True}
+                if isinstance(exc, CompactionError):
+                    raise
+                raise CompactionError(stats["failure"]["code"], "The compaction operation failed. Check provider availability and compaction diagnostics before retrying.", retryable=retryable) from exc
             finally:
                 self.is_compacting = False
                 await self._emit("context:compaction_finished", revision=revision, outcome=outcome,

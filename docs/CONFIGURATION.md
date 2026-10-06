@@ -1,6 +1,11 @@
 # Configuration Reference
 
-## Context Manager Module (`context-managed`)
+## Legacy context manager (`context-managed`)
+
+The table below describes the legacy rolling-summary engine. For
+`engine: boundary`, see [request-boundary configuration and policy](BOUNDARY_ENGINE.md).
+That engine uses `summary_max_output_tokens` (default 8192) for portable summaries,
+requires native compaction when advertised, and never uses emergency history trimming.
 
 | Parameter | Default | Description |
 |---|---|---|

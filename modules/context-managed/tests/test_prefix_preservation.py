@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from amplifier_module_context_managed.boundary import BoundaryContextManager
+from amplifier_module_context_managed.errors import CompactionError
 
 IDENTITY = {"provider": "fixture", "model": "fixture-model"}
 
@@ -181,6 +182,12 @@ async def test_preserving_prefix_does_not_bypass_request_boundary_guards(method,
     if guard == "required_original": retain = [replacement[1]["content"]]
     if guard == "native_transport": model.validate_compacted_context = lambda row: False
     if guard == "native_count": model.request_budget = lambda *args, **kwargs: {}
-    await manager._prepare(model, None, retain)
-    assert manager.summary is None
+    if guard in {"native_transport", "native_count"}:
+        previous = copy.deepcopy(manager.summary)
+        with pytest.raises(CompactionError):
+            await manager._prepare(model, None, retain)
+        assert manager.summary == previous
+    else:
+        await manager._prepare(model, None, retain)
+        assert manager.summary is None
     assert await manager.get_messages() == replacement

@@ -1,5 +1,7 @@
 # amplifier-bundle-context-managed
 
+For the Work profile’s `engine: boundary`, see the [request-boundary engine](docs/BOUNDARY_ENGINE.md). It uses native compaction when advertised, portable summaries only when native support is absent, and fails clearly instead of emergency trimming. The rolling-summary description below concerns the legacy default engine.
+
 An [Amplifier](https://github.com/microsoft/amplifier) bundle providing intelligent, budget-aware context management with persistent JSONL transcripts, LLM-powered rolling summaries, and session resume support.
 
 ## Overview

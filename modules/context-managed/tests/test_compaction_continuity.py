@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from amplifier_module_context_managed.errors import CompactionError
 from amplifier_core.llm_errors import ContextLengthError, LLMError
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 from amplifier_module_context_managed.checkpoint import digest
@@ -44,12 +45,15 @@ async def test_recomputed_checkpoint_digest_cannot_hide_missing_native_transport
         },
         compact_context=AsyncMock(),
     )
-    fitter, _ = await manager._prepare(model, None, [])
-    assert manager.summary is None
-    assert manager.checkpoint_status["status"] == "rejected"
-    assert without_fitter_sequence(await fitter.get_messages()) == original
+    if manager.summary:
+        with pytest.raises(CompactionError, match="native_checkpoint_invalid"):
+            await manager._prepare(model, None, [])
+    else:
+        # A checkpoint without the required provenance was already rejected.
+        assert manager.checkpoint_status["status"] == "rejected"
     assert await manager.get_messages() == original
     model.compact_context.assert_not_awaited()
+
 
 
 def test_usage_preserves_cached_buckets_and_partial_cost_coverage():
@@ -207,7 +211,8 @@ async def test_permanent_failure_on_unchanged_prefix_is_not_retried_for_each_too
     await manager.set_messages(original)
     model = SimpleNamespace(complete=complete)
     for number in range(10):
-        await manager.get_messages_for_request(provider=model)
+        with pytest.raises(CompactionError):
+            await manager.get_messages_for_request(provider=model)
         await manager.add_message(
             {"role": "assistant", "content": f"Observed progress {number}"}
         )
@@ -222,13 +227,15 @@ async def test_permanent_failure_on_unchanged_prefix_is_not_retried_for_each_too
         "retryable": False,
         "attempt": 1,
         "retry_suppressed": True,
+        "code": "summary_failed",
     }
     assert "secret" not in json.dumps(event)
     assert manager.summary is None
     await manager.add_message(
         {"role": "user", "content": "New boundary and explicit correction"}
     )
-    await manager.get_messages_for_request(provider=model)
+    with pytest.raises(CompactionError):
+        await manager.get_messages_for_request(provider=model)
     assert complete.await_count == 2
 
 
@@ -244,7 +251,8 @@ async def test_transient_failure_has_cooldown_and_three_attempt_ceiling(monkeypa
     await manager.set_messages(history())
     for stamp, expected in [(0, 1), (1, 1), (10, 2), (20, 2), (30, 3), (10000, 3)]:
         now[0] = stamp
-        await manager.get_messages_for_request(provider=model)
+        with pytest.raises(CompactionError):
+            await manager.get_messages_for_request(provider=model)
         assert complete.await_count == expected
 
 
@@ -259,7 +267,8 @@ async def test_partial_note_never_commits_when_later_fragment_fails():
     manager = context(summary_max_source_chars=1000)
     original = history()
     await manager.set_messages(original)
-    await manager.get_messages_for_request(provider=SimpleNamespace(complete=complete))
+    with pytest.raises(CompactionError):
+        await manager.get_messages_for_request(provider=SimpleNamespace(complete=complete))
     assert complete.await_count == 2
     assert manager.summary is None
     assert await manager.get_messages() == original
@@ -273,8 +282,10 @@ async def test_native_window_is_preserved_across_repeat_checkpoint_and_resume():
     originals = history()
     await manager.set_messages(originals)
     windows = []
+    compact_inputs = []
 
     async def compact(request):
+        compact_inputs.append([row.model_dump(exclude_none=True) for row in request.messages])
         window = [
             {
                 "type": "message",
@@ -318,6 +329,8 @@ async def test_native_window_is_preserved_across_repeat_checkpoint_and_resume():
 
     model.request_budget = count
     first = await manager.get_messages_for_request(provider=model)
+    covered = manager.summary[0]
+    first_checkpoint = copy.deepcopy(manager.summary[1])
     assert "Correction: budget $25" in str(first)
     for row in [
         {"role": "assistant", "content": "Additional results " * 1000},
@@ -327,6 +340,17 @@ async def test_native_window_is_preserved_across_repeat_checkpoint_and_resume():
         originals.append(row)
     second = await manager.get_messages_for_request(provider=model)
     assert len(windows) == 2
+    # Recompaction carries the entire previous native window plus only the
+    # newly covered suffix. Canonical originals are never replayed behind it.
+    rows = compact_inputs[1]
+    carrier = next(row for row in rows if (row.get("metadata") or {}).get("openai:compaction"))
+    assert carrier["metadata"]["openai:compaction"] == first_checkpoint["metadata"]["openai:compaction"]
+    contents = [row.get("content") for row in rows]
+    for row in originals[:covered]:
+        if row["role"] != "system":  # Current instructions travel separately.
+            assert row["content"] not in contents
+    for row in originals[covered:manager.summary[0]]:
+        assert row["content"] in contents
     assert "ship on Tuesday" in str(second)
     checkpoint = manager.export_checkpoint(identity)
     restored = context(durable_checkpoints=True)
@@ -384,7 +408,7 @@ async def test_native_uses_continuation_provider_not_different_utility_model():
 @pytest.mark.parametrize("native_finishes", [True, False])
 async def test_legacy_deadlines_do_not_cancel_native_or_semantic_compaction(native_finishes):
     # Old saved/bundle deadlines must not cancel healthy calls in either phase.
-    # A real native provider error still starts the portable semantic fallback.
+    # A real native provider error stops preparation without portable fallback.
     manager = context(summary_timeout=0.001, summary_total_work_timeout=0.001,
                       native_compaction_timeout=0.001)
     original = history()
@@ -407,21 +431,25 @@ async def test_legacy_deadlines_do_not_cancel_native_or_semantic_compaction(nati
         complete=AsyncMock(side_effect=summarize),
         request_budget=lambda request, **kw:{"measurement":{"kind":"provider_count", "input_tokens":
             100 if any((row.metadata or {}).get("opaque") for row in request.messages) else 9000}})
-    await manager.get_messages_for_request(provider=model)
+    if native_finishes:
+        await manager.get_messages_for_request(provider=model)
+    else:
+        with pytest.raises(CompactionError, match="native_failed"):
+            await manager.get_messages_for_request(provider=model)
     assert await manager.get_messages() == original
-    assert manager.summary is not None
+    assert (manager.summary is not None) == native_finishes
     finished = next(call.args[1] for call in manager.hooks.emit.call_args_list
                     if call.args[0] == "context:compaction_finished")
-    assert finished["outcome"] == "completed"
+    assert finished["outcome"] == ("completed" if native_finishes else "failed")
     if native_finishes:
         assert manager.summary[1] == message
         model.complete.assert_not_awaited()
         assert finished["method"] == "native"
     else:
-        assert isinstance(manager.summary[1], str)
-        assert model.complete.await_count >= 1
-        assert finished["method"] == "semantic"
+        assert manager.summary is None
+        model.complete.assert_not_awaited()
         assert finished["native_failure"] == {"type":"TimeoutError"}
+
 
 
 @pytest.mark.asyncio
@@ -477,7 +505,7 @@ async def test_compaction_waits_for_provider_without_a_default_deadline(monkeypa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("summary_fails", [False, True])
-async def test_native_failure_attempts_text_summary_before_last_resort_fitting(summary_fails):
+async def test_native_failure_never_attempts_text_summary_or_fitting(summary_fails):
     calls = []
     async def compact(request):
         calls.append("native")
@@ -496,20 +524,16 @@ async def test_native_failure_attempts_text_summary_before_last_resort_fitting(s
     manager.hooks = SimpleNamespace(emit=AsyncMock())
     original = history()
     await manager.set_messages(original)
-    result = await manager.get_messages_for_request(provider=model)
-    assert calls == ["native", "summary"]
+    with pytest.raises(CompactionError, match="native_failed"):
+        await manager.get_messages_for_request(provider=model)
+    assert calls == ["native"]
     assert await manager.get_messages() == original
-    finished = next(call.args[1] for call in manager.hooks.emit.call_args_list
-                    if call.args[0] == "context:compaction_finished")
-    assert finished["native_failure"]["type"] == "ConnectionError"
-    assert finished["method"] == "semantic"
-    if summary_fails:
-        assert manager.summary is None
-        assert finished["outcome"] == "fallback"
-        assert len(json.dumps(result)) < len(json.dumps(original))
-    else:
-        assert manager.summary is not None
-        assert finished["outcome"] == "completed"
+    assert manager.summary is None
+    event = next(call.args[1] for call in manager.hooks.emit.call_args_list
+                 if call.args[0] == "context:compaction_finished")
+    assert event["outcome"] == "failed"
+    assert event["native_failure"]["type"] == "ConnectionError"
+
 
 
 @pytest.mark.asyncio
@@ -570,19 +594,13 @@ async def test_large_retained_native_window_is_counted_not_its_small_label():
             else 9000,
         }
     }
-    await manager.get_messages_for_request(provider=main)
-    assert isinstance(manager.summary[1], str)
-    assert main.complete.await_count >= 1
-    # A previously valid opaque checkpoint grows above the next trigger when
-    # new content arrives; the complete measured window must trigger again.
-    manager.summary = (4, native_message)
-    for row in [
-        {"role": "assistant", "content": "More work"},
-        {"role": "user", "content": "Continue"},
-    ]:
-        await manager.add_message(row)
-    await manager.get_messages_for_request(provider=main)
-    assert main.compact_context.await_count == 2
+    with pytest.raises(CompactionError, match="native_no_reduction"):
+        await manager.get_messages_for_request(provider=main)
+    assert manager.summary is None
+    main.complete.assert_not_awaited()
+    assert main.compact_context.await_count == 1
+    assert await manager.get_messages() == history()
+
 
 
 @pytest.mark.asyncio
@@ -620,11 +638,12 @@ async def test_old_provider_after_restart_rebuilds_opaque_checkpoint_from_origin
     older = SimpleNamespace(
         name="openai", default_model="same-model", complete=AsyncMock()
     )
-    fitter, _ = await restored._prepare(older, None, [])
-    assert restored.summary is None
-    assert without_fitter_sequence(await fitter.get_messages()) == original
-    assert await manager.get_messages() == original
+    with pytest.raises(CompactionError, match="native_checkpoint_invalid"):
+        await restored._prepare(older, None, [])
+    assert restored.summary is not None  # Evidence remains available for repair.
+    assert await restored.get_messages() == original
     older.complete.assert_not_awaited()
+
 
 
 @pytest.mark.asyncio
@@ -646,10 +665,9 @@ async def test_raising_native_measurement_rebuilds_originals_but_cancellation_pr
         request_budget=AsyncMock(side_effect=ValueError("unusable encrypted state")),
         compact_context=AsyncMock(),
     )
-    fitter, _ = await manager._prepare(model, None, [])
-    assert manager.summary is None
-    assert manager.checkpoint_status["status"] == "rejected"
-    assert without_fitter_sequence(await fitter.get_messages()) == original
+    with pytest.raises(CompactionError, match="native_measurement_unavailable"):
+        await manager._prepare(model, None, [])
+    assert manager.summary == (4, carrier)
     assert await manager.get_messages() == original
     model.compact_context.assert_not_awaited()
     manager.summary, manager.summary_identity = (4, carrier), identity
@@ -658,6 +676,7 @@ async def test_raising_native_measurement_rebuilds_originals_but_cancellation_pr
         await manager._prepare(model, None, [])
     assert manager.summary == (4, carrier)
     assert await manager.get_messages() == original
+
 
 
 @pytest.mark.asyncio
