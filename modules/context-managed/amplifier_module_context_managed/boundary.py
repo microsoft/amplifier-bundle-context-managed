@@ -499,6 +499,7 @@ class BoundaryContextManager:
                     selection_budget * 2 - reserve, self._human)
                 if recovery:
                     recovery["previousThroughMessage"] = start
+                    recovery["sourceMessages"] = end
                     recovery["selectedRanges"] = [[a + start, b + start] for a, b in recovery["selectedRanges"]]
                     recovery_source = base + selected
                     assembled = recovery_source + copy.deepcopy(suffix)
