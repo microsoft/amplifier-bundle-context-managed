@@ -38,7 +38,8 @@ def export_checkpoint(context, identity):
               "summary": ({"throughMessage": through, **({"message": copy.deepcopy(text), "kind": "native"}
                           if isinstance(text, dict) else {"text": text})} if context.summary else None),
               "progress": partial,
-              "evidenceRefs": copy.deepcopy(context.evidence_refs)}
+              "evidenceRefs": copy.deepcopy(context.evidence_refs),
+              "recovery": copy.deepcopy(context.recovery)}
     record["sha256"] = digest(record)
     return record
 
@@ -47,6 +48,7 @@ def restore_checkpoint(context, record, identity):
     context.summary = None
     context.summary_identity = None
     context.evidence_refs = []
+    context.recovery = None
     reason = None
     try:
         if not context.config.get("durable_checkpoints"):
@@ -110,6 +112,7 @@ def restore_checkpoint(context, record, identity):
         context.summary = (end, copy.deepcopy(text)) if summary is not None else None
         context.summary_identity = copy.deepcopy(identity) if summary is not None else None
         context.evidence_refs = copy.deepcopy(record.get("evidenceRefs", []))
+        context.recovery = copy.deepcopy(record.get("recovery"))
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         reason = str(exc)
     context.checkpoint_status = ({"status": "rejected", "reason": reason, "originalsAvailable": True} if reason else
