@@ -36,6 +36,19 @@ Fix the underlying provider/configuration issue or explicitly recover incompatib
 old history before continuing. This engine does not automatically migrate an
 already oversized legacy history by changing compaction strategies.
 
+Hosts retaining the authoritative archive can opt into `archive_recovery: true`
+along with `durable_checkpoints`. If local pressure exceeds the window, recovery
+preserves any compatible native checkpoint and selects required instructions, hook context,
+the original objective, and the newest complete exchanges before remote counting.
+The current tail is reserved first. Earlier messages remain in the archive: the
+provider receives an explicit notice that those messages are **not summarized**
+in this working view, and the checkpoint records exact selected ranges.
+This is bounded archive retrieval followed by native compaction, not chronological
+replay of the entire archive. Normal/native-error paths never fall back to portable
+summaries. Exact assembled-request counting still gates dispatch, required context
+is never truncated, and a successful native result is reused on subsequent turns
+and restarts. Unified enables this policy on each boundary-engine mount.
+
 The first objective, recent turns, system/developer instructions, retained reminders
 and active-operation identities have explicit retention paths. Unknown or queued
 tool calls restrict the boundary; a partial tool batch is never split. A portable
