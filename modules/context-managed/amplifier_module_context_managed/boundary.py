@@ -12,6 +12,7 @@ import time
 import inspect
 
 from amplifier_core import ChatRequest, Message
+from amplifier_module_context_simple.request_view import request_view
 from .request_context import RequestContext
 from .errors import CompactionError
 
@@ -166,7 +167,8 @@ class BoundaryContextManager:
         metadata = message.get("metadata") or {}
         origin = metadata.get("amplifier_input") or {}
         service = isinstance(origin, dict) and origin.get("version") == 1 and origin.get("kind") == "service"
-        return message.get("role") == "user" and not metadata.get("ephemeral") and not service
+        return (bool(request_view([message])) and message.get("role") == "user"
+                and not metadata.get("ephemeral") and not metadata.get("passive") and not service)
 
     @staticmethod
     def _retained_reminder(message, retain):
@@ -413,7 +415,7 @@ class BoundaryContextManager:
         manifest = ("Pending operations (observations, not authorization):\n" + json.dumps(operations)) if operations else None
 
         def pressure_view(rows):
-            view = copy.deepcopy(rows)
+            view = copy.deepcopy(request_view(rows))
             if self.factory:
                 view = [{"role": "system", "content": system_prompt}] + [row for row in view
                     if row.get("role") != "system" or (row.get("metadata") or {}).get("source") == "hook"]
@@ -599,7 +601,7 @@ class BoundaryContextManager:
                         try:
                             # Required persisted reminders stay verbatim outside the
                             # native window, so they must not also enter it.
-                            native_source = [row for row in source if not self._retained_reminder(row, retain)]
+                            native_source = [row for row in request_view(source) if not self._retained_reminder(row, retain)]
                             if isinstance(template, ChatRequest):
                                 # Reuse the loop's exact model/tools/options and
                                 # current instructions. Only settled history is

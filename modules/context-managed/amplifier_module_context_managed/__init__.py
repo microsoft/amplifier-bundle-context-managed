@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from ._text_estimate import estimate_messages
+from amplifier_module_context_simple.request_view import request_view
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +316,7 @@ class ManagedContextManager:
         results, updates running token estimate, and checks thresholds.
         """
         # Increment turn counter for user messages (Phase 2)
-        if message.get("role") == "user":
+        if message.get("role") == "user" and not (message.get("metadata") or {}).get("passive"):
             self._current_turn += 1
 
         # Inject timestamp if not present (same pattern as context-simple)
@@ -552,7 +553,7 @@ class ManagedContextManager:
             )
             assembled = await self._inline_compact(assembled, budget)
 
-        return assembled
+        return request_view(assembled)
 
     async def get_messages(self) -> list[dict[str, Any]]:
         """Return full raw conversation history.
@@ -847,7 +848,7 @@ class ManagedContextManager:
                 tier.token_estimate for tier in tiers
             ) + self._estimate_tokens(self._messages)
             user_in_verbatim = sum(
-                1 for msg in self._messages if msg.get("role") == "user"
+                1 for msg in self._messages if msg.get("role") == "user" and not (msg.get("metadata") or {}).get("passive")
             )
             self._current_turn = self._summarized_through_turn + user_in_verbatim
             self._loaded_from_transcript = True
@@ -1041,7 +1042,7 @@ class ManagedContextManager:
         # Calculate turn range
         turn_start = self._summarized_through_turn + 1
         user_count = sum(
-            1 for msg in messages_to_summarize if msg.get("role") == "user"
+            1 for msg in messages_to_summarize if msg.get("role") == "user" and not (msg.get("metadata") or {}).get("passive")
         )
         turn_end = self._summarized_through_turn + user_count
 
@@ -1084,7 +1085,7 @@ class ManagedContextManager:
         included for any calls not already shown via content blocks.
         """
         lines = []
-        for msg in messages:
+        for msg in request_view(messages):
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
             # IDs of tool calls already shown via content blocks (avoid duplication)
@@ -1361,7 +1362,7 @@ class ManagedContextManager:
 
         # Step 2: Remove oldest non-protected messages
         original_count = len(self._messages)
-        removed_messages_info: list[dict[str, str]] = []
+        removed_messages_info: list[dict[str, Any]] = []
         while self._running_token_estimate > conversation_target:
             removable_idx = None
             for i, msg in enumerate(self._messages):
@@ -1376,6 +1377,7 @@ class ManagedContextManager:
                 {
                     "role": removed.get("role", "unknown"),
                     "content_preview": str(removed.get("content", ""))[:100],
+                    "passive": bool((removed.get("metadata") or {}).get("passive")),
                 }
             )
 
@@ -1400,14 +1402,14 @@ class ManagedContextManager:
             for info in removed_messages_info:
                 role = info["role"]
                 role_counts[role] = role_counts.get(role, 0) + 1
-                if role == "user":
+                if role == "user" and not info["passive"]:
                     user_previews.append(info["content_preview"])
 
             role_summary = ", ".join(
                 f"{count} {role}" for role, count in sorted(role_counts.items())
             )
             turn_start = self._summarized_through_turn + 1
-            user_count = role_counts.get("user", 0)
+            user_count = sum(info["role"] == "user" and not info["passive"] for info in removed_messages_info)
             turn_end = self._summarized_through_turn + max(user_count, 1)
 
             marker_lines: list[str] = [
@@ -1538,7 +1540,7 @@ class ManagedContextManager:
                 (
                     i
                     for i in range(len(compacted) - 1, -1, -1)
-                    if compacted[i].get("role") == "user"
+                    if compacted[i].get("role") == "user" and not (compacted[i].get("metadata") or {}).get("passive")
                 ),
                 None,
             )

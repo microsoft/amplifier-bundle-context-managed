@@ -78,3 +78,7 @@ records why native compaction was selected or why a portable fallback was used.
 
 See the [research, acceptance evidence and configuration](../../docs/COMPACTION_ACCEPTANCE.md)
 for actual live test limits and dependency integration order.
+
+### Passive user context
+
+Adapters may append a user-role feedback record with `metadata.passive: true`. It remains visible to request assembly and summaries but does not advance the user-turn counter. The adapter is responsible for durable identity and ordering; appending context does not schedule model work. This flag is independent of `ephemeral`, which some providers use to preserve in-progress reasoning around contextual reminders.
