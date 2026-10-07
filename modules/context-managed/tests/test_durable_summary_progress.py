@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from amplifier_module_context_managed.errors import CompactionError
 from amplifier_core.llm_errors import LLMError
 from amplifier_module_context_managed.checkpoint import digest
 from .test_summary_work_budget import context, response, IDENTITY, history, finished
@@ -16,7 +17,8 @@ async def test_restart_reuses_completed_piece_without_copying_pending_source():
     first.persist_checkpoint = lambda: saved.append(copy.deepcopy(first.export_checkpoint(IDENTITY)))
     model = SimpleNamespace(name="fixture", default_model="fixture-model",
         complete=AsyncMock(side_effect=[response("FIRST evidence verified"), LLMError("offline", retryable=True)]))
-    await first._prepare(model, None, [])
+    with pytest.raises(CompactionError):
+        await first._prepare(model, None, [])
     assert len(saved) == 1 and saved[0]["summary"] is None
     assert "pending" not in saved[0]["progress"] and "FIRST evidence verified" == saved[0]["progress"]["text"]
     second = await context()
@@ -36,7 +38,8 @@ async def test_bounded_summary_option_does_not_change_chat_and_truncation_is_not
     limited.finish_reason = "length"
     model = SimpleNamespace(get_info=lambda: {"capabilities": ["completion:auto_continue:v1"]},
         complete=AsyncMock(return_value=limited))
-    await manager._prepare(model, None, [])
+    with pytest.raises(CompactionError):
+        await manager._prepare(model, None, [])
     assert model.complete.call_args.kwargs == {"request_options": {"auto_continue": False}}
     assert manager.summary is None and manager.export_checkpoint(IDENTITY) is None
     assert finished(manager)[-1]["usage"]["output_tokens"] == 10
@@ -62,7 +65,8 @@ async def test_incompatible_regenerated_progress_is_explained_and_never_skips_so
     first = await context()
     model = SimpleNamespace(name="fixture", default_model="fixture-model",
         complete=AsyncMock(side_effect=[response("PAID completed evidence"), LLMError("offline", retryable=True)]))
-    await first._prepare(model, None, [])
+    with pytest.raises(CompactionError):
+        await first._prepare(model, None, [])
     record = first.export_checkpoint(IDENTITY)
     if change == "fingerprint":
         record["progress"]["fingerprint"] = "changed"

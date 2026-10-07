@@ -1,67 +1,93 @@
 # Request-boundary context engine
 
-Select `session.context.config.engine: boundary` to use the new engine. Legacy
-rolling-summary behavior remains available as the existing default for callers
-that have not opted into the experimental Work profile.
+Select `session.context.config.engine: boundary` to use this engine. Legacy
+rolling-summary behavior remains the default for callers that have not opted
+into the Work profile; its settings and emergency policies are separate.
 
-The host owns persistence. `get_messages()` returns detached, complete original
-messages; `set_messages()` is authoritative and invalidates derived summaries.
-No private transcript is loaded or written by the boundary engine. The existing
-read_transcript tool discovers `context.history` with
-`context.history_authority: host`, so retrieval uses that same canonical history.
+The host owns persistence. `get_messages()` returns detached, complete originals.
+`set_messages()` invalidates derived state when its covered prefix changes; an
+unchanged prefix can retain its checkpoint while the recent tail changes. No
+private transcript is loaded or written here. The transcript tool uses the host's
+canonical history through `context.history` and `context.history_authority: host`.
 
-Before the next foreground request, the engine may pause to summarize settled old
-turns. It emits `context:compaction_started` and `context:compaction_finished`
-with completed, fallback, cancelled, or superseded outcomes. Hosts can display
-that pause while their input inbox continues accepting messages. The next safe
-request boundary consumes those messages; this is not universal mid-inference
-interruption. Observability failures cannot strand compaction state.
+## Compaction policy
 
-The first human objective, current turns, system/developer instructions, requested
-reminders, and active-operation identities have explicit retention paths. A
-continuation note is reference data at user-message priority, never a new system
-instruction. Unknown or queued tool calls restrict semantic summary boundaries.
-Original tool outputs are retained even when the request fitter clips its view.
+Before a foreground request, the engine can compact settled old turns at the
+`summarize_trigger` fraction of the request budget (default 0.70). Measurement
+includes the loop's tools, instructions and options when its callback is available.
+An estimate is labelled as such and cannot validate opaque native state.
 
-Request fitting delegates to context-simple's tracked `main` branch. Its
-provider-count callback accounts for the complete assembled request, including
-tools and injected context. The compaction trigger uses that full request count
-when available, with a labelled estimate otherwise. Oversized
-protected content can still fail rather than silently vanish.
-The optional request-owner `fit_output` callback is forwarded unchanged, allowing
-the shared fitter to try a smaller output reserve after context reduction while
-retaining the counted dispatch and canonical history.
+- When the continuation provider advertises native compaction, use that provider's
+  native contract. Missing configuration, request context or counting support,
+  invalid output, an oversized native input, and actual provider errors stop
+  preparation. They **do not** start a portable summary or emergency trimming.
+- Providers without native support use an LLM continuation note. The same provider
+  can summarize, or the host can supply a separate `context.summary_provider`.
+  A failed, empty, truncated or non-reducing note stops preparation as well.
+- Request validation does not clip tool results or drop messages. A still-oversized
+  request fails with `ContextLengthError`. The optional `fit_output` callback may
+  reduce the output reserve, but must preserve the input.
 
-The summarizer is awaited at a request boundary and uses no tools. Conventional
-providers can supply the same instance while no foreground inference runs. A
-native live provider requires a separate host-supplied `context.summary_provider`
-and `separate_summary_provider: true`. Summary traffic is marked with
-`metadata.purpose: context-compaction`; `context.compacting` lets hosts exclude it
-from public text streams. Native compaction is preferred when the continuation
-provider exposes a validated and measured native contract. A native failure tries
-the portable text summary; only a failed summary or a still-oversized request
-falls back to fitting. Neither model phase has a default elapsed-time deadline.
-Explicit cancellation stops preparation without starting fallback work. History
-changes invalidate in-flight summaries and request views.
+Compaction errors preserve canonical messages and the last valid checkpoint.
+`CompactionError` exposes a safe code and retryability, without putting raw SDK
+errors into diagnostics. Failed unchanged prefixes retain bounded retry/cooldown
+tracking, so another request cannot silently proceed or start a retry storm.
+Fix the underlying provider/configuration issue or explicitly recover incompatible
+old history before continuing. This engine does not automatically migrate an
+already oversized legacy history by changing compaction strategies.
 
-Native compaction is a single operation on the complete eligible history window,
-not a chain of fragment summaries. On the measured path it reuses the loop's
-actual request envelope, including selected model, tools, options and current
-system instructions. Current-turn input and pending-operation overlays remain
-outside the checkpoint; required reminders follow the returned canonical window.
+The first objective, recent turns, system/developer instructions, retained reminders
+and active-operation identities have explicit retention paths. Unknown or queued
+tool calls restrict the boundary; a partial tool batch is never split. A portable
+continuation note is reference data, not a new instruction or authorization.
 
-For portable summaries, providers with authoritative request counts preflight
-the whole eligible prefix before splitting. A fitting request is summarized once.
-Only an oversized request, an explicit source cap, or unavailable authoritative
-counting requires the conservative fragment path. Finished events include
-`native_selection` so unsupported capabilities, unavailable measurement, real
-native failure and a resumed portable draft are distinguishable.
+## Native window and portable notes
 
-Continuation notes remain derived state. With `durable_checkpoints: true`, a host
-can preserve and restore a validated summary checkpoint alongside its canonical
-history. Otherwise, summaries are recomputed after restore. Provider-owned native
-checkpoints must pass transport and measurement validation before use; an invalid
-checkpoint falls back to originals. The engine reuses context-simple budget
-helpers as well as its public optional capabilities; record the resolved revision
-and validate the contract when updating the tracked branch. It is an experimental
-portable implementation, not a claim of ChatGPT quality parity.
+Native compaction receives the previous complete provider checkpoint plus the
+newly covered suffix, rather than replaying the covered original transcript. On
+first compaction it receives the eligible original window. The covered-message
+boundary and source identity are persisted with the checkpoint. Native input must
+already fit the provider's compaction allowance; triggering early is essential.
+
+The measured path reuses the loop's selected model, tools, options and current
+system instructions. Current-turn input and operation overlays remain outside the
+checkpoint. Required reminders excluded from native input follow the returned
+window. Returned provider items remain intact through repeat compaction and restore.
+
+Portable summaries preserve objective, corrections, decisions, evidence and remaining
+work. They preflight the whole eligible prefix when authoritative counting exists;
+only an oversized input, explicit source cap or unavailable count requires ordered
+fragments. Completed fragment progress can be persisted, but partial notes never
+enter a foreground request.
+
+`summary_max_output_tokens` supplies the portable summary generation allowance,
+default **8192**. It is separate from the legacy `summary_target_tokens: 1500`
+setting and includes reasoning where the provider accounts for reasoning there.
+An output-limit finish raises `summary_output_limit`, rather than accepting an
+incomplete note. Configure the allowance for the provider/model; 8192 is not a
+claim of summary quality or a universal model limit. Native requests retain their
+separate `native_compaction_max_output_tokens` setting (default 4096).
+
+Neither compaction method has a context-owned elapsed-time deadline. Healthy calls
+can complete; caller cancellation stops preparation. History or contract changes
+reject in-flight results. Compaction emits started/finished events with completed,
+failed, cancelled or superseded outcomes; an unavailable native contract can fail
+before an operation starts. Hosts should surface the request error too.
+
+## Persistence and validation
+
+With `durable_checkpoints: true`, the host preserves and restores validated derived
+state alongside canonical history. Invalid native transport or unavailable native
+counting stops use of a saved native checkpoint. Provider/model or source changes
+invalidate incompatible state, and the normal strict preparation rules apply.
+
+Budget and measurement helpers come from context-simple's tracked `main`; its
+emergency reduction ladder is not used by this engine. Record the resolved
+revision and validate compatibility when updating dependencies. Offline scripted
+checks establish transport and state contracts, not live model retention quality
+or performance on production histories.
+
+Provider contracts: [OpenAI compaction](https://developers.openai.com/api/docs/guides/compaction)
+and [Anthropic compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand).
+A provider adapter must implement its own native capability; provider documentation
+alone does not mean a particular installed adapter supports it.

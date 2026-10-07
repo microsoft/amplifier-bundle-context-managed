@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from amplifier_module_context_managed.errors import CompactionError
 from amplifier_core import ChatRequest, Message, ToolSpec
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 
@@ -51,7 +52,7 @@ async def test_counted_fitting_prefix_is_one_portable_request_above_old_characte
     async def budget(request, **kwargs):
         budgets.append(request.model_copy(deep=True))
         # The actual request includes summary instructions and output reserve.
-        assert request.max_output_tokens == 1500
+        assert request.max_output_tokens == 8192
         return decision(sum(len(str(row.content)) for row in request.messages) // 4)
 
     async def complete(request):
@@ -71,6 +72,7 @@ async def test_counted_fitting_prefix_is_one_portable_request_above_old_characte
     assert finished(manager)["last_request_budget"]["measurement_kind"] == "provider_count"
     assert finished(manager)["native_selection"] == "unsupported_by_provider"
     assert await manager.get_messages() == source
+
 
 
 @pytest.mark.asyncio
@@ -222,16 +224,17 @@ async def test_native_compaction_is_one_complete_window_with_actual_request_enve
 
 
 @pytest.mark.asyncio
-async def test_missing_native_request_context_falls_back_without_creating_opaque_state():
+async def test_missing_native_request_context_fails_without_creating_opaque_state():
     manager = await context()
     model = SimpleNamespace(native_compaction_requires_request_context=True,
         supports_native_compaction=lambda: True, validate_compacted_context=lambda row: True,
         request_budget=lambda request, **kw: decision(100), compact_context=AsyncMock(),
         complete=AsyncMock(return_value=reply()))
-    await manager.get_messages_for_request(provider=model)
+    with pytest.raises(CompactionError):
+        await manager.get_messages_for_request(provider=model)
     model.compact_context.assert_not_awaited()
-    model.complete.assert_awaited_once()
-    assert finished(manager)["native_selection"] == "request_context_unavailable"
+    model.complete.assert_not_awaited()
+    assert manager.summary is None
 
 
 @pytest.mark.asyncio
@@ -255,10 +258,11 @@ async def test_oversized_native_window_is_skipped_without_a_paid_request_or_nati
         return {"dispatch": ChatRequest(messages=[Message(**row) for row in view], model="chosen-model"),
                 "budget_decision": decision(200_000)}
 
-    await manager.get_measured_request_view(provider=model, retain_contents=[], count_view=count_view)
+    with pytest.raises(CompactionError):
+        await manager.get_measured_request_view(provider=model, retain_contents=[], count_view=count_view)
     assert len(native_budgets) == 1
     model.compact_context.assert_not_awaited()
-    model.complete.assert_awaited_once()
+    model.complete.assert_not_awaited()
     assert finished(manager)["native_selection"] == "input_exceeds_native_allowance"
-    assert finished(manager)["method"] == "semantic" and finished(manager)["calls"] == 1
+    assert finished(manager)["outcome"] == "failed" and finished(manager)["calls"] == 0
     assert await manager.get_messages() == original

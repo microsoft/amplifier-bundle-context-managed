@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from amplifier_module_context_managed.errors import CompactionError
 
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 
@@ -140,7 +141,8 @@ async def test_note_that_does_not_reduce_measured_input_is_not_committed():
     provider = summarizer()
     async def count_view(view):
         return envelope(16000)
-    await context.get_measured_request_view(provider=provider, retain_contents=[], count_view=count_view)
+    with pytest.raises(CompactionError):
+        await context.get_measured_request_view(provider=provider, retain_contents=[], count_view=count_view)
     provider.complete.assert_awaited_once()
     assert context.summary is None
     assert context._summary_progress is None

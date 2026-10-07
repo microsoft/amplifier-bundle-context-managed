@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from amplifier_module_context_managed.errors import CompactionError
 from amplifier_core.llm_errors import LLMError
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 
@@ -26,7 +27,8 @@ async def test_replacing_job_receipts_keeps_suppression_for_exact_failed_prefix(
     model = SimpleNamespace(complete=AsyncMock(side_effect=LLMError("fixture failure", retryable=retryable)))
     await manager.set_messages(history())
     for number in range(10):
-        await manager._prepare(model, None, [])
+        with pytest.raises(CompactionError):
+            await manager._prepare(model, None, [])
         replacement = await manager.get_messages()
         replacement[-1]["content"] = f"Verified background result {number}"
         await manager.set_messages(replacement)
@@ -37,5 +39,6 @@ async def test_replacing_job_receipts_keeps_suppression_for_exact_failed_prefix(
     replacement[0]["metadata"]["flag"] = 1  # True and 1 differ in canonical identity.
     await manager.set_messages(replacement)
     assert manager.summary_failure is None
-    await manager._prepare(model, None, [])
+    with pytest.raises(CompactionError):
+        await manager._prepare(model, None, [])
     assert model.complete.await_count == expected + 1

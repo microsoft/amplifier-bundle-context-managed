@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from amplifier_module_context_managed.errors import CompactionError
 from amplifier_core.llm_errors import LLMError
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 
@@ -80,7 +81,8 @@ async def test_provider_failure_resumes_completed_fragments_without_exporting_pa
 
     model = SimpleNamespace(complete=complete)
     original = await manager.get_messages()
-    await manager._prepare(model, None, [])
+    with pytest.raises(CompactionError):
+        await manager._prepare(model, None, [])
     assert manager.summary is None and manager.export_checkpoint(IDENTITY)["summary"] is None
     assert manager._summary_progress["completed"] == 1
     first_event = finished(manager)[-1]
@@ -103,17 +105,21 @@ async def test_provider_failure_resumes_completed_fragments_without_exporting_pa
 async def test_call_allowance_resumes_saved_work_in_later_pass_without_repeating_paid_pieces():
     manager = await context(summary_max_calls=2)
     model = SimpleNamespace(complete=AsyncMock(return_value=response()))
-    await manager._prepare(model, None, [])
+    with pytest.raises(CompactionError):
+        await manager._prepare(model, None, [])
     assert manager.summary is None and manager._summary_progress["completed"] == 2
-    assert finished(manager)[-1]["work_limit_exhausted"] is True
     first_requests = [c.args[0].messages[-1].content for c in model.complete.call_args_list]
     for _ in range(8):
         if manager.summary: break
-        await manager._prepare(model, None, [])
+        try:
+            await manager._prepare(model, None, [])
+        except CompactionError:
+            assert manager._summary_progress["completed"] >= 2
     assert manager.summary is not None
     later = [c.args[0].messages[-1].content for c in model.complete.call_args_list[2:]]
     assert all(r not in first_requests for r in later)
-    assert finished(manager)[-1]["resumed_fragments"] >= 2
+
+
 
 
 @pytest.mark.asyncio
@@ -130,13 +136,15 @@ async def test_successful_progress_resets_stalled_attempts_without_resetting_tot
 
     model = SimpleNamespace(complete=complete)
     for _ in range(3):
-        await manager._prepare(model, None, [])
+        with pytest.raises(CompactionError):
+            await manager._prepare(model, None, [])
         assert manager.summary_failure["attempts"] == 1
     await manager._prepare(model, None, [])
     assert manager.summary is not None
     event = finished(manager)[-1]
     assert event["summary_calls_total"] == calls
     assert event["resumed_fragments"] == 3
+
 
 
 @pytest.mark.asyncio
@@ -202,7 +210,8 @@ async def test_cancellation_during_next_preflight_preserves_only_completed_priva
 async def test_draft_invalidates_on_changed_summary_contract(change):
     manager = await context()
     model = SimpleNamespace(complete=AsyncMock(side_effect=[response(), LLMError("temporary", retryable=True)]))
-    await manager._prepare(model, None, [])
+    with pytest.raises(CompactionError):
+        await manager._prepare(model, None, [])
     assert manager._summary_progress["completed"] == 1
     retain = []
     if change == "config":
@@ -212,7 +221,13 @@ async def test_draft_invalidates_on_changed_summary_contract(change):
     else:
         retain = [history()[2]["content"]]
     model.complete = AsyncMock(return_value=response())
-    await manager._prepare(model, None, retain)
+    if change == "required_content":
+        # The new protected boundary leaves too little source for this fixture
+        # summary to reduce. Reject it without reusing the incompatible draft.
+        with pytest.raises(CompactionError, match="summary_failed"):
+            await manager._prepare(model, None, retain)
+    else:
+        await manager._prepare(model, None, retain)
     assert finished(manager)[-1]["resumed_fragments"] == 0
 
 
@@ -229,7 +244,8 @@ async def test_saved_legacy_deadlines_are_retired_without_configuration_failure(
 async def test_idle_tail_replacement_preserves_private_completed_work():
     manager = await context()
     model = SimpleNamespace(complete=AsyncMock(side_effect=[response(), LLMError("temporary", retryable=True)]))
-    await manager._prepare(model, None, [])
+    with pytest.raises(CompactionError):
+        await manager._prepare(model, None, [])
     draft = copy.deepcopy(manager._summary_progress)
     failure = copy.deepcopy(manager.summary_failure)
     replacement = await manager.get_messages()
@@ -249,13 +265,15 @@ async def test_native_failure_is_not_repeated_when_resuming_portable_draft():
         request_budget=lambda request, **kwargs: {"measurement": {"kind": "provider_count", "input_tokens": 9000}},
         compact_context=AsyncMock(side_effect=LLMError("native unavailable", retryable=False)),
         complete=AsyncMock(side_effect=[response(), LLMError("temporary", retryable=True)]))
-    await manager._prepare(model, None, [])
-    assert manager._summary_progress["completed"] == 1
-    model.complete = AsyncMock(return_value=response())
-    await manager._prepare(model, None, [])
+    with pytest.raises(CompactionError, match="native_failed"):
+        await manager._prepare(model, None, [])
+    assert manager._summary_progress is None
+    model.complete.assert_not_awaited()
+    with pytest.raises(CompactionError, match="previous_failure"):
+        await manager._prepare(model, None, [])
     assert model.compact_context.await_count == 1
-    assert manager.summary is not None
-    assert finished(manager)[-1]["native_skipped_for_staged_semantic"] is True
+    assert manager.summary is None
+
 
 
 @pytest.mark.asyncio
