@@ -64,6 +64,7 @@ class BoundaryContextManager:
         self._summary_progress = None
         self._restored_progress = None
         self.persist_checkpoint = None
+        self.recovery = None
 
     @staticmethod
     def _same_prefix(record, messages):
@@ -114,6 +115,7 @@ class BoundaryContextManager:
         if not keep_summary:
             self.summary = None
             self.summary_identity = None
+            self.recovery = None
             self.checkpoint_status = {"status": "invalidated", "reason": "Canonical history was replaced.", "originalsAvailable": True}
 
     def checkpoint_configuration(self):
@@ -123,7 +125,8 @@ class BoundaryContextManager:
         # generation options in the compatibility contract.
         inert = {"summarize_trigger", "summary_retry_delay", "summary_max_calls",
                  "native_min_new_tokens", "compaction_notice_enabled",
-                 "compaction_notice_token_reserve", "token_meter", "durable_checkpoints"}
+                 "compaction_notice_token_reserve", "token_meter", "durable_checkpoints",
+                 "archive_recovery"}
         return digest({"config": {k: v for k, v in self.config.items() if k not in inert},
                        "prompt": SUMMARY_PROMPT})
 
@@ -476,6 +479,30 @@ class BoundaryContextManager:
                 self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint transport is unavailable or invalid.", "originalsAvailable": True}
                 raise CompactionError("native_checkpoint_invalid", "The saved native checkpoint cannot be used by this provider. Restore a compatible checkpoint or explicitly recover the history.")
         end = self._boundary(messages, retain)
+        recovery = None
+        recovery_source = None
+        # Legacy archives may be much larger than one provider window. Select
+        # the explicit archive-backed working view BEFORE any remote count.
+        # Ordinary native failures still fail; this is not an error fallback.
+        if (self.config.get("archive_recovery") and self.config.get("durable_checkpoints")
+                and self.preserve_evidence and use_native
+                and (not self.summary or isinstance(self.summary[1], dict))
+                and end > (self.summary[0] if self.summary else 0)):
+            selection_budget = fitter._calculate_budget(token_budget, provider)
+            if estimate_pressure(fitter, pressure_view(assembled)) > selection_budget:
+                from .working_history import select_window
+                start = self.summary[0] if self.summary else 0
+                base = self._assembled(messages[:start], self.summary, retain) if self.summary else []
+                suffix = messages[end:]
+                reserve = len(json.dumps(pressure_view(base + suffix), ensure_ascii=False).encode())
+                selected, recovery = select_window(messages[start:end], end - start, retain,
+                    selection_budget * 2 - reserve, self._human)
+                if recovery:
+                    recovery["previousThroughMessage"] = start
+                    recovery["sourceMessages"] = end
+                    recovery["selectedRanges"] = [[a + start, b + start] for a, b in recovery["selectedRanges"]]
+                    recovery_source = base + selected
+                    assembled = recovery_source + copy.deepcopy(suffix)
         if self._summary_progress and self._summary_progress["source_revision"]["messages"] != end:
             self._summary_progress = None
         can_measure = measurement is not None and (use_native or (provider is not None
@@ -509,7 +536,7 @@ class BoundaryContextManager:
             "semantic_measurement_kind": measurement_kind, "semantic_policy_budget": budget,
             "semantic_trigger": budget * threshold}
         should_summarize = (provider is not None and end > (self.summary[0] if self.summary else 0)
-                            and assembled_tokens >= budget * threshold)
+                            and (recovery is not None or assembled_tokens >= budget * threshold))
         if should_summarize and use_native and self.summary and isinstance(self.summary[1], dict):
             # Large recent turns may trigger the full-window threshold even
             # though only a few new words are eligible behind the safe boundary.
@@ -540,7 +567,7 @@ class BoundaryContextManager:
 
             # Current-turn tool results change the revision but not the covered
             # prefix. A failed unchanged prefix must not create a retry storm.
-            source = self._assembled(messages[:end], self.summary, retain)
+            source = recovery_source if recovery else self._assembled(messages[:end], self.summary, retain)
             fingerprint = digest({"source": source, "identity": identity,
                 "provider": getattr(summarizer, "name", type(summarizer).__name__),
                 "model": getattr(summarizer, "default_model", None), "configuration": self.checkpoint_configuration()})
@@ -555,10 +582,13 @@ class BoundaryContextManager:
             if not native_supported and getattr(summarizer, "native_bundle_live", False):
                 raise RuntimeError("Native live providers require a separate context.summary_provider for compaction")
             self.is_compacting = True
-            await self._emit("context:compaction_started", revision=revision, through_message=end, **self.last_budget)
+            await self._emit("context:compaction_started", revision=revision, through_message=end,
+                             **({"recovery": recovery} if recovery else {}), **self.last_budget)
             outcome = "failed"
             stats = {"calls": 0, "input_tokens_before": assembled_tokens, "measurement_kind": measurement_kind,
                      "native_selection": native_reason}
+            if recovery:
+                stats["recovery"] = recovery
             started = time.monotonic()
             try:
                 # Earlier notes are included so repeated compactions retain the
@@ -654,6 +684,8 @@ class BoundaryContextManager:
                     raise RuntimeError("History changed during compaction; stale summary was discarded")
                 check_summary_contract()
                 self.summary = (end, text)
+                if recovery:
+                    self.recovery = copy.deepcopy(recovery)
                 self.summary_failure = None
                 self._summary_progress = None
                 self.summary_identity = copy.deepcopy(identity)
