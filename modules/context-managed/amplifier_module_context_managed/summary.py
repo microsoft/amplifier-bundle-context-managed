@@ -143,7 +143,7 @@ def summary_request(prompt, source, previous, config):
             Message(role="user", content=content),
         ],
         model=config.get("summarization_model"),
-        max_output_tokens=config.get("summary_target_tokens", 1500),
+        max_output_tokens=config.get("summary_max_output_tokens", 8192),
         reasoning_effort=config.get("summary_reasoning_effort", "low"),
         stream=False,
         metadata={"purpose": "context-compaction", "stream": False},

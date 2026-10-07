@@ -182,8 +182,8 @@ async def test_measured_without_output_fit_still_refuses_protected_oversize():
 
 
 @pytest.mark.asyncio
-async def test_history_replacement_during_output_fit_rolls_back_actual_fitter(monkeypatch):
-    from amplifier_module_context_simple import SimpleContextManager
+async def test_history_replacement_during_output_fit_rejects_stale_dispatch_without_trimming(monkeypatch):
+    from amplifier_module_context_managed.request_context import RequestContext
 
     context = BoundaryContextManager({"max_tokens": 1000, "compaction_notice_enabled": False,
         "protected_recent": 1, "summarize_trigger": 100})
@@ -194,7 +194,7 @@ async def test_history_replacement_during_output_fit_rolls_back_actual_fitter(mo
     await context.set_messages(original)
     fitter = context._fitter()
     monkeypatch.setattr(context, "_fitter", lambda: fitter)
-    measured = SimpleContextManager.get_measured_request_view
+    measured = RequestContext.get_measured_request_view
     results = []
 
     async def capture_result(self, **kwargs):
@@ -202,7 +202,7 @@ async def test_history_replacement_during_output_fit_rolls_back_actual_fitter(mo
         results.append(result)
         return result
 
-    monkeypatch.setattr(SimpleContextManager, "get_measured_request_view", capture_result)
+    monkeypatch.setattr(RequestContext, "get_measured_request_view", capture_result)
     replacement = [{"role": "user", "content": "Restored authoritative history"}]
 
     async def count_view(view):
@@ -220,11 +220,12 @@ async def test_history_replacement_during_output_fit_rolls_back_actual_fitter(mo
     with pytest.raises(RuntimeError, match="History changed during request preparation"):
         await context.get_measured_request_view(provider=None, retain_contents=[],
             count_view=count_view, fit_output=fit_output)
-    assert results[0]["transaction"] is not None
+    assert results[0]["transaction"] is None
     assert not fitter._removed_seqs and not fitter._truncated_seqs and not fitter._stubbed_seqs
     assert fitter._last_compaction_stats is None
     assert await context.get_messages() == replacement
     assert context.summary is None
+
 
 
 @pytest.mark.asyncio
