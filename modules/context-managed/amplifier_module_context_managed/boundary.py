@@ -745,6 +745,14 @@ class BoundaryContextManager:
                     if not self._same_prefix(self._summary_progress, self.messages):
                         self._summary_progress = None
                     raise
+                # A counting outage says nothing about the validity of this
+                # history or checkpoint. Preserve the typed diagnostic and do
+                # not install a summary-failure latch that blocks continuation.
+                if (type(exc).__module__, type(exc).__name__) == (
+                        "amplifier_module_provider_openai._token_count", "TokenCountError"):
+                    outcome = "failed"
+                    stats["failure"] = {"type": "TokenCountError", "code": "token_count_failed"}
+                    raise
                 # Stop this request instead of hiding compaction failures with
                 # trimming. Keep canonical history and the last valid checkpoint.
                 outcome = "failed"
