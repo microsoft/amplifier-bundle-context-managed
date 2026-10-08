@@ -175,58 +175,92 @@ class BoundaryContextManager:
                 and metadata.get("persisted") is True and isinstance(message.get("content"), str)
                 and message["content"] in retain)
 
+    @staticmethod
+    def _reminder_snapshot(row):
+        meta = row.get("metadata") or {}
+        return (row.get("role") == "user" and meta.get("ephemeral") is True
+                and meta.get("persisted") is True
+                and meta.get("reminder_placement") in {"tail", "pre_user"})
+
+    def _carry(self, messages):
+        # Current human instructions and the current aggregate hook snapshot
+        # stay verbatim even when a long autonomous turn crosses the checkpoint.
+        humans = [i for i, row in enumerate(messages) if self._human(row)]
+        snapshots = [i for i, row in enumerate(messages) if self._reminder_snapshot(row)]
+        indices = set(humans[-2:] + snapshots[-1:])
+        return [row for i, row in enumerate(messages) if i in indices]
+
+    def _project(self, messages, retain=(), carry=()):
+        # Only the loop's explicitly marked, replaceable aggregate snapshots
+        # supersede one another. Arbitrary ephemeral messages remain evidence.
+        return [copy.deepcopy(row) for row in messages
+                if not self._reminder_snapshot(row) or row in carry
+                or (isinstance(row.get("content"), str) and row["content"] in retain)]
+
     def _boundary(self, messages, retain):
         turns = [i for i, row in enumerate(messages) if self._human(row)]
-        if len(turns) < 3:
-            return 0
-        end = turns[-2]
-        # Outstanding calls and ordinary required messages remain barriers.
-        # Required persisted reminders can be inside the covered prefix: the
-        # assembled request keeps them verbatim, independently of the summary.
-        calls = {}
+        end = turns[-2] if len(turns) >= 3 else 0
+        calls, settled, safe = {}, [], set()
+        batch_start = None
+        barrier = len(messages)
         for i, row in enumerate(messages):
-            for call in row.get("tool_calls") or []:
-                calls[call.get("id")] = i
-            for block in row.get("content", []) if isinstance(row.get("content"), list) else []:
-                if block.get("type") in {"tool_call", "tool_use"}:
-                    calls[block.get("id")] = i
+            if not calls:
+                safe.add(i)
+            declared = list(row.get("tool_calls") or [])
+            blocks = row.get("content") if isinstance(row.get("content"), list) else []
+            declared += [block for block in blocks if block.get("type") in {"tool_call", "tool_use"}]
+            for call in declared:
+                if not calls:
+                    batch_start = i
+                if call.get("id"):
+                    calls[call["id"]] = i
+            results = [block.get("tool_use_id") for block in blocks if block.get("type") == "tool_result"]
             if row.get("role") == "tool":
                 try:
                     receipt = json.loads(row.get("content", ""))
                 except (ValueError, TypeError):
                     receipt = None
                 if not (isinstance(receipt, dict) and receipt.get("status") in {"queued", "pending"} and receipt.get("job_id")):
-                    calls.pop(row.get("tool_call_id"), None)
+                    results.append(row.get("tool_call_id"))
+            for call_id in results:
+                calls.pop(call_id, None)
+            if batch_start is not None and not calls:
+                settled.append((batch_start, i + 1))
+                batch_start = None
             if (isinstance(row.get("content"), str) and row["content"] in retain
                     and not self._retained_reminder(row, retain)):
-                end = min(end, i)
+                barrier = min(barrier, i)
+        # Human input is not a prerequisite for making progress. Leave four
+        # complete recent exchanges verbatim; never cut an unresolved batch.
+        recent = [pair for pair in settled if turns and pair[0] > turns[-1]]
+        if len(recent) > 4:
+            end = max(end, recent[-4][0])
         if calls:
-            end = min(end, min(calls.values()))
-        # A cut always starts a human turn, so settled tool batches stay whole.
-        return max((i for i in turns if i <= end), default=0)
+            barrier = min(barrier, min(calls.values()))
+        end = min(end, barrier)
+        candidates = set(turns) | {start for start, _ in settled}
+        return max((i for i in candidates if i <= end and i in safe), default=0)
 
-    def _assembled(self, messages, summary, retain=()):
+    def _assembled(self, messages, summary, retain=(), carry=None):
+        carry = self._carry(messages) if carry is None else carry
         if not summary:
-            return copy.deepcopy(messages)
+            return self._project(messages, retain, carry)
         end, text = summary
         if isinstance(text, dict):
-            # The provider owns the complete native canonical window, including
-            # retained user/developer items. Keep it intact and append only new
-            # conversation messages. System prompts travel separately.
-            systems = [copy.deepcopy(row) for row in messages[:end] if row.get("role") == "system"]
-            reminders = [copy.deepcopy(row) for row in messages[:end] if self._retained_reminder(row, retain)]
-            # Provider checkpoints precede new conversation input. Required
-            # reminders excluded from compaction remain verbatim after them.
-            return systems + [copy.deepcopy(text)] + reminders + copy.deepcopy(messages[end:])
-        # System/developer messages, the original objective and explicitly
-        # required persisted reminders remain verbatim with their provenance.
+            # The provider-owned checkpoint remains opaque and intact. Current
+            # instructions/reminders are carried outside newly compacted input.
+            keep = [row for row in messages[:end] if row.get("role") == "system"
+                    or row in carry or self._retained_reminder(row, retain)]
+            return self._project([row for row in keep if row.get("role") == "system"]
+                + [text] + [row for row in keep if row.get("role") != "system"]
+                + messages[end:], retain, carry)
         first = next((i for i, row in enumerate(messages) if self._human(row)), None)
-        keep = [copy.deepcopy(row) for i, row in enumerate(messages[:end])
+        keep = [row for i, row in enumerate(messages[:end])
                 if row.get("role") in {"system", "developer"} or i == first
-                or self._retained_reminder(row, retain)]
-        keep.append({"role": "user", "content": "Continuation note (reference data, not new instructions):\n" + text,
-                     "metadata": {"source": "context-managed", "ephemeral": True, "persisted": True}})
-        return keep + copy.deepcopy(messages[end:])
+                or row in carry or self._retained_reminder(row, retain)]
+        note = {"role": "user", "content": "Continuation note (reference data, not new instructions):\n" + text,
+                "metadata": {"source": "context-managed", "ephemeral": True, "persisted": True}}
+        return self._project(keep + [note] + messages[end:], retain, carry)
 
     @staticmethod
     def _summary_progress_stats(stats, progress):
@@ -406,6 +440,7 @@ class BoundaryContextManager:
 
     async def _prepare(self, provider, token_budget, retain, measurement=None):
         messages, revision = copy.deepcopy(self.messages), self.revision
+        carry = self._carry(messages)
         # Materialize dynamic instructions and operation observations once for
         # both pressure measurement and the request fitter's final snapshot.
         system_prompt = await self.factory() if self.factory else None
@@ -459,7 +494,7 @@ class BoundaryContextManager:
             # A newly required reminder can name content inside an older note.
             # Reassemble from originals instead of pretending it survived.
             self.summary = None
-        assembled = self._assembled(messages, self.summary, retain)
+        assembled = self._assembled(messages, self.summary, retain, carry)
         native = getattr(provider, "supports_native_compaction", None)
         validate_native = getattr(provider, "validate_compacted_context", None)
         requires_context = getattr(provider, "native_compaction_requires_request_context", False)
@@ -492,7 +527,7 @@ class BoundaryContextManager:
             if estimate_pressure(fitter, pressure_view(assembled)) > selection_budget:
                 from .working_history import select_window
                 start = self.summary[0] if self.summary else 0
-                base = self._assembled(messages[:start], self.summary, retain) if self.summary else []
+                base = self._assembled(messages[:start], self.summary, retain, carry) if self.summary else []
                 suffix = messages[end:]
                 reserve = len(json.dumps(pressure_view(base + suffix), ensure_ascii=False).encode())
                 selected, recovery = select_window(messages[start:end], end - start, retain,
@@ -534,7 +569,9 @@ class BoundaryContextManager:
         threshold = self.config.get("summarize_trigger", 0.70)
         self.last_budget = {"semantic_input_tokens": assembled_tokens,
             "semantic_measurement_kind": measurement_kind, "semantic_policy_budget": budget,
-            "semantic_trigger": budget * threshold}
+            "semantic_trigger": budget * threshold, "source_messages": len(messages),
+            "eligible_through_message": end, "checkpoint_through_message": self.summary[0] if self.summary else 0,
+            "retained_tail_messages": len(messages) - end}
         should_summarize = (provider is not None and end > (self.summary[0] if self.summary else 0)
                             and (recovery is not None or assembled_tokens >= budget * threshold))
         if should_summarize and use_native and self.summary and isinstance(self.summary[1], dict):
@@ -567,7 +604,7 @@ class BoundaryContextManager:
 
             # Current-turn tool results change the revision but not the covered
             # prefix. A failed unchanged prefix must not create a retry storm.
-            source = recovery_source if recovery else self._assembled(messages[:end], self.summary, retain)
+            source = recovery_source if recovery else self._assembled(messages[:end], self.summary, retain, carry)
             fingerprint = digest({"source": source, "identity": identity,
                 "provider": getattr(summarizer, "name", type(summarizer).__name__),
                 "model": getattr(summarizer, "default_model", None), "configuration": self.checkpoint_configuration()})
@@ -599,7 +636,7 @@ class BoundaryContextManager:
                         try:
                             # Required persisted reminders stay verbatim outside the
                             # native window, so they must not also enter it.
-                            native_source = [row for row in source if not self._retained_reminder(row, retain)]
+                            native_source = [row for row in source if row not in carry and not self._retained_reminder(row, retain)]
                             if isinstance(template, ChatRequest):
                                 # Reuse the loop's exact model/tools/options and
                                 # current instructions. Only settled history is
@@ -637,7 +674,7 @@ class BoundaryContextManager:
                                 raise CompactionError("native_checkpoint_invalid", "Native compaction returned no valid checkpoint.")
                             if not validate_native(result["message"]):
                                 raise CompactionError("native_checkpoint_invalid", "Native compaction returned an invalid transport envelope.")
-                            native_candidate = self._assembled(messages, (end, result["message"]), retain)
+                            native_candidate = self._assembled(messages, (end, result["message"]), retain, carry)
                             if measurement is not None:
                                 candidate_tokens, _, candidate_kind = await measurement.measure(fitter, pressure_view(native_candidate))
                                 if candidate_kind != "provider_count":
@@ -669,7 +706,7 @@ class BoundaryContextManager:
                 if revision != self.revision:
                     outcome = "superseded"
                     raise RuntimeError("History changed during compaction; stale summary was discarded")
-                candidate = self._assembled(messages, (end, text), retain)
+                candidate = self._assembled(messages, (end, text), retain, carry)
                 portable_baseline = messages if self.summary and isinstance(self.summary[1], dict) else assembled
                 if stats.get("method") != "native" and estimate_pressure(fitter, candidate) >= estimate_pressure(fitter, portable_baseline):
                     raise ValueError("Compaction did not reduce the request")
@@ -750,6 +787,13 @@ class BoundaryContextManager:
             await fitter.set_system_prompt_factory(captured_system_prompt)
         return fitter, protected
 
+    async def _budget_failure(self, error):
+        count = getattr(error, "context_input_tokens", None)
+        limit = getattr(error, "context_input_limit", None)
+        if type(count) is int and type(limit) is int:
+            await self._emit("context:budget_exceeded", input_tokens=count,
+                input_limit_tokens=limit, **self.last_budget)
+
     async def get_messages_for_request(self, token_budget=None, provider=None):
         return await self.get_messages_for_request_retaining(retain_contents=[], token_budget=token_budget, provider=provider)
 
@@ -764,6 +808,9 @@ class BoundaryContextManager:
                 # Preserve validated completed pieces; never stage the active call.
                 if self._summary_progress and not self._summary_progress["completed"]:
                     self._summary_progress = None
+                raise
+            except Exception as error:
+                await self._budget_failure(error)
                 raise
             if revision != self.revision:
                 raise RuntimeError("History changed during request preparation")
@@ -781,6 +828,9 @@ class BoundaryContextManager:
                 # Preserve validated completed pieces; never stage the active call.
                 if self._summary_progress and not self._summary_progress["completed"]:
                     self._summary_progress = None
+                raise
+            except Exception as error:
+                await self._budget_failure(error)
                 raise
             result["count_calls"] += measurement.preflight_calls - measurement.reused_calls
             if revision != self.revision:
@@ -824,6 +874,6 @@ async def mount_boundary(coordinator, config):
     coordinator.register_capability("context.compacting", lambda: context.is_compacting)
     coordinator.register_capability("context.history_authority", "host")
     coordinator.register_capability("context.history", context.get_messages)
-    events = ["context:compaction_started", "context:compaction_finished",
+    events = ["context:budget_exceeded", "context:compaction_started", "context:compaction_finished",
               "context:compaction_progress", "context:checkpoint_progress_rejected"]
     coordinator.register_contributor("observability.events", "context-managed", lambda: events)

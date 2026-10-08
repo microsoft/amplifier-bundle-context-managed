@@ -26,10 +26,13 @@ class RequestContext(SimpleContextManager):
 
     @staticmethod
     def _oversize(count, limit):
-        raise ContextLengthError(
+        error = ContextLengthError(
             f"Context preparation stopped: input {count} tokens exceeds allowance {limit}. "
             "No emergency history trimming was applied. Restore a compatible compaction "
             "checkpoint or explicitly recover the oversized history before continuing.")
+        error.context_input_tokens = count
+        error.context_input_limit = limit
+        raise error
 
     async def get_messages_for_request_retaining(self, *, retain_contents, provider=None, token_budget=None, hard_fit=False):
         view = await self._view()
