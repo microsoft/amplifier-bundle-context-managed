@@ -78,3 +78,21 @@ records why native compaction was selected or why a portable fallback was used.
 
 See the [research, acceptance evidence and configuration](../../docs/COMPACTION_ACCEPTANCE.md)
 for actual live test limits and dependency integration order.
+
+### Long autonomous runs
+
+The boundary engine can checkpoint completed tool exchanges within a human turn.
+It leaves four recent exchanges verbatim and never splits an unresolved tool batch
+or queued background job. Current human instructions and the latest persisted
+reminder snapshot remain outside newly compacted input. Older replacement reminder
+snapshots stay in canonical history but leave the working request.
+
+`context:budget_exceeded` records numeric input/allowance and boundary positions
+without conversation content when required context still cannot fit.
+
+Oversized existing histories can be recovered explicitly with `recovery.recover_native`.
+This offline helper uses measured, complete exchange batches and persists resumable
+progress; it never runs foreground inference or tools. The caller must preserve the
+original transcript, hold exclusive session ownership, verify the finished request,
+and install the derived checkpoint atomically. Ordinary request preparation never
+invokes this recovery helper automatically.
