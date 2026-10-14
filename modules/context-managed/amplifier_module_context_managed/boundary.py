@@ -399,16 +399,32 @@ class BoundaryContextManager:
                 if not text.strip():
                     raise CompactionError("summary_empty", "The summarizer returned no continuation text. Check the model and summary output allowance before retrying.")
                 check_source()
+                previous_text = progress["text"]
                 progress["text"] = text
                 pending.pop(0)
-                progress["segments"].pop(0)
+                segment = progress["segments"].pop(0)
                 progress["completed"] += 1
                 stats["completed_fragments_this_pass"] += 1
                 self._summary_progress_stats(stats, progress)
                 if self.persist_checkpoint:
-                    saved = self.persist_checkpoint()
-                    if inspect.isawaitable(saved):
-                        await saved
+                    try:
+                        saved = self.persist_checkpoint()
+                        if inspect.isawaitable(saved):
+                            saved = await saved
+                        if saved is False:
+                            raise CompactionError("checkpoint_persist_failed", "The host did not save completed summary progress. Restore checkpoint storage and retry.")
+                    except (Exception, asyncio.CancelledError) as exc:
+                        # Export needs staged progress, but a failed host save
+                        # cannot accept this piece. Actual calls/usage stay billed.
+                        progress["text"] = previous_text
+                        pending.insert(0, fragment)
+                        progress["segments"].insert(0, segment)
+                        progress["completed"] -= 1
+                        stats["completed_fragments_this_pass"] -= 1
+                        self._summary_progress_stats(stats, progress)
+                        if isinstance(exc, (asyncio.CancelledError, CompactionError)):
+                            raise
+                        raise CompactionError("checkpoint_persist_failed", "The host did not save completed summary progress. Restore checkpoint storage and retry.") from exc
                 await self._emit("context:compaction_progress", completed_parts=progress["completed"],
                                  remaining_parts=len(pending), method="semantic")
             return progress["text"]
