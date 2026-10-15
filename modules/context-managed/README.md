@@ -23,8 +23,19 @@ Trigger, retry, observer, and per-pass call-allowance changes do not invalidate
 an otherwise compatible note; summary-generation settings still do. Older
 checkpoints retain their original, stricter configuration validation.
 
-Hosts can register `context.persist_checkpoint()` to save each completed
-portable-summary piece into the same checkpoint file. A `progress` record holds
+Hosts can optionally register `context.persist_checkpoint()` to save each completed
+portable-summary piece into the same checkpoint file. Sync or async callbacks
+returning `None` (legacy acknowledgement) or `True` accept the piece. Explicit
+`False` or an ordinary callback exception stops preparation with the safe code
+`checkpoint_persist_failed`; an existing `CompactionError` retains its code.
+Cancellation rolls back the staged piece and propagates unchanged. Failed or
+cancelled saves do not advance accepted progress or emit a success progress event;
+prior accepted pieces, the last valid summary, and canonical messages remain intact.
+Actual model calls and billed usage are not rolled back. Hosts must make storage
+writes atomic: the module cannot undo writes a callback already performed.
+Without a callback, existing in-memory compaction remains available, as does a
+compatible restored request view; no checkpoint writer is required.
+A `progress` record holds
 only the derived note, exact source identity, and remaining piece boundaries;
 pending source is regenerated from the canonical transcript. After restart,
 compatible progress resumes without repeating completed pieces. Partial notes
