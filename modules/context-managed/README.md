@@ -98,12 +98,15 @@ or queued background job. Current human instructions and the latest persisted
 reminder snapshot remain outside newly compacted input. Older replacement reminder
 snapshots stay in canonical history but leave the working request.
 
-An unanswered tool call before a later human continuation no longer pins all
+An unanswered tool call before later ordinary input no longer pins all
 subsequent completed work. Request preparation adds a truthful unknown-outcome
 observation without editing history or running tools. Exact unresolved identities
 and the instruction not to replay them remain outside checkpoints; current calls
 and recorded queued work remain protected. See the boundary-engine policy for
-the distinction between unknown evidence and actual operation status.
+the distinction between unknown evidence and actual operation status. Ordinary
+input can include host-authorized peer messages; recovery does not establish
+human authorship or grant permission to repeat actions. Conflicting duplicate
+call declarations remain barriers.
 
 `context:budget_exceeded` records numeric input/allowance and boundary positions
 without conversation content when required context still cannot fit.

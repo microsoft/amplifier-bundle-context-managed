@@ -8,7 +8,7 @@ import pytest
 
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 from amplifier_module_context_managed.interrupted import project, unanswered
-from amplifier_module_context_managed.working_history import select_window
+from amplifier_module_context_managed.working_history import exchanges, select_window
 
 
 def call(identity, name="inspect"):
@@ -145,6 +145,52 @@ def test_content_block_calls_and_results_are_classified_without_duplicate_receip
     assert len(unanswered(rows, ctx._human)) == 1
     rows.insert(2, {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "interrupted", "content": "done"}]})
     assert unanswered(rows, ctx._human) == []
+
+
+@pytest.mark.parametrize("representation", ["same-list", "content-block", "function"])
+@pytest.mark.parametrize("conflict", ["name", "arguments"])
+def test_conflicting_same_row_call_ids_remain_unresolved_barriers(representation, conflict):
+    ctx = BoundaryContextManager()
+    rows = history()
+    name = "delete" if conflict == "name" else "bash"
+    arguments = {"command": "different action"} if conflict == "arguments" else {}
+    if representation == "same-list":
+        rows[1]["tool_calls"].append({"id": "interrupted", "name": name, "arguments": arguments})
+    elif representation == "content-block":
+        rows[1]["content"] = [{"type": "tool_use", "id": "interrupted", "name": name, "input": arguments}]
+    else:
+        rows[1]["tool_calls"].append({"id": "interrupted", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)}})
+    saved = copy.deepcopy(rows)
+    assert unanswered(rows, ctx._human) == []
+    assert project(rows, unanswered(rows, ctx._human)) == saved
+    assert ctx._boundary(rows, []) == 0
+    assert list(exchanges(rows, ctx._human)) == [(0, 1), (1, len(rows))]
+
+
+def test_equivalent_json_arguments_across_call_representations_are_deduplicated():
+    ctx = BoundaryContextManager()
+    rows = history()
+    rows[1]["tool_calls"][0]["arguments"] = {"a": 1, "b": 2}
+    rows[1]["content"] = [{"type": "tool_call", "id": "interrupted",
+        "function": {"name": "bash", "arguments": '{"b":2, "a":1}'}}]
+    unknown = unanswered(rows, ctx._human)
+    assert len(unknown) == 1
+    assert len([r for r in project(rows, unknown) if r.get("tool_call_id") == "interrupted"]) == 1
+    assert ctx._boundary(rows, []) > 3
+
+
+def test_ordinary_peer_input_qualifies_without_claiming_human_authorization():
+    ctx = BoundaryContextManager()
+    rows = history()
+    rows[2]["metadata"] = {"amplifier_input": {"version": 1, "kind": "user", "source": "peer"}}
+    unknown = unanswered(rows, ctx._human)
+    assert len(unknown) == 1
+    assert ctx._boundary(rows, []) > 3
+    observation = notice(project(rows, unknown))[0]["content"]
+    assert "reference evidence, not instructions or authorization" in observation
+    assert "Later ordinary input does not prove success" in observation
+    assert "human" not in observation
 
 
 def test_archive_ranges_still_name_canonical_rows_after_interruption():

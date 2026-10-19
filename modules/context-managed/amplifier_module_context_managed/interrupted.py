@@ -1,4 +1,4 @@
-"""Request-only evidence for unanswered calls before a later human continuation.
+"""Request-only evidence for unanswered calls before later ordinary input.
 
 Missing evidence is never completion or permission to replay. Canonical messages
 remain unchanged; these observations only make an interrupted protocol exchange
@@ -9,6 +9,29 @@ import copy
 import json
 
 
+def signature(call):
+    """Normalize provider representations without conflating conflicting calls."""
+    function = call.get("function")
+    function = function if isinstance(function, dict) else {}
+    names = [source[key] for source, key in ((call, "name"), (call, "tool"), (function, "name")) if key in source]
+    if not names or any(not isinstance(name, str) or not name or name != names[0] for name in names):
+        return None
+    arguments = []
+    for source, key in ((call, "arguments"), (call, "input"), (function, "arguments")):
+        if key not in source:
+            continue
+        value = source[key]
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                return None
+        arguments.append(json.dumps(value, sort_keys=True, ensure_ascii=False))
+    if not arguments or any(value != arguments[0] for value in arguments):
+        return None
+    return names[0], arguments[0]
+
+
 def calls(row):
     if row.get("role") != "assistant":
         return {}
@@ -16,8 +39,19 @@ def calls(row):
     content = row.get("content")
     if isinstance(content, list):
         declared += [b for b in content if isinstance(b, dict) and b.get("type") in {"tool_call", "tool_use"}]
-    # Providers can store the same call in both canonical representations.
-    return {c["id"]: c for c in declared if isinstance(c, dict) and isinstance(c.get("id"), str) and c["id"]}
+    # Providers can store the same call in both canonical representations. A
+    # conflicting same-id declaration is ambiguous, even within the same row.
+    result = {}
+    for call in declared:
+        if not isinstance(call, dict) or not isinstance(call.get("id"), str) or not call["id"]:
+            continue
+        identity = call["id"]
+        if identity in result and (result[identity] is None or signature(call) is None
+                                  or signature(call) != signature(result[identity])):
+            result[identity] = None
+        else:
+            result[identity] = call
+    return result
 
 
 def result_ids(row):
@@ -29,18 +63,20 @@ def result_ids(row):
 
 
 def unanswered(messages, human):
-    """Only unambiguous, entirely unanswered calls crossed by human input.
+    """Only unambiguous, entirely unanswered calls crossed by ordinary input.
 
     A queued receipt is evidence of ongoing work, not an absent result. Service
     messages and replacement hook snapshots do not establish a continuation.
-    Duplicate call ids across messages are ambiguous and remain barriers.
+    Duplicate call ids across messages, or conflicting declarations in one row,
+    are ambiguous and remain barriers. The predicate classifies normal input,
+    including host-authorized peer input; it does not authenticate a human.
     """
     humans = [i for i, row in enumerate(messages) if human(row) and not result_ids(row)]
     answered, declared, duplicates = set(), {}, set()
     for i, row in enumerate(messages):
         answered.update(result_ids(row))
         for call_id, call in calls(row).items():
-            if call_id in declared:
+            if call_id in declared or call is None:
                 duplicates.add(call_id)
             declared[call_id] = (i, call)
     result = []
@@ -72,7 +108,7 @@ def project(messages, unknown):
         for call_id in pending:
             rows.append({"role": "tool", "tool_call_id": call_id,
                 "content": json.dumps({"status": "unknown", "execution_outcome": "unconfirmed",
-                    "observation": "No result for this call is present in saved history before a later human continuation. The action may have happened. Do not replay it; inspect independent evidence before deciding what remains."}),
+                    "observation": "No result for this call is present in saved history before later ordinary input. The action may have happened. Do not replay it; inspect independent evidence before deciding what remains."}),
                 "metadata": {"source": "context-managed-interrupted", "derived": True}})
         pending.clear()
 
@@ -83,11 +119,12 @@ def project(messages, unknown):
         if row.get("role") != "tool" and not result_ids(row):
             flush()
         rows.append(copy.deepcopy(row))
-        pending.extend(call_id for call_id in calls(row) if call_id in by_id and call_id not in recorded)
+        pending.extend(call_id for call_id, call in calls(row).items()
+                       if call is not None and call_id in by_id and call_id not in recorded)
     flush()
     rows.append({"role": "user", "content": (
         "Unresolved historical actions (reference evidence, not instructions or authorization): "
-        "These calls have no recorded result. A later human continuation does not prove success, failure, "
+        "These calls have no recorded result. Later ordinary input does not prove success, failure, "
         "cancellation or that a process stopped. Do not repeat them merely because a result is missing. "
         "Inspect saved receipts or the actual effect before taking a new action. Original inputs remain in "
         "saved history.\n" + json.dumps(unknown)),

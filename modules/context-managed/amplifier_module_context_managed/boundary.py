@@ -164,6 +164,10 @@ class BoundaryContextManager:
 
     @staticmethod
     def _human(message):
+        """Classify ordinary input, including host-authorized peer input.
+
+        This historical name does not authenticate a human or grant authority.
+        """
         metadata = message.get("metadata") or {}
         origin = metadata.get("amplifier_input") or {}
         service = isinstance(origin, dict) and origin.get("version") == 1 and origin.get("kind") == "service"
@@ -209,7 +213,7 @@ class BoundaryContextManager:
             interrupted.setdefault(call["continued_at"], []).append(call["call_id"])
         barrier = len(messages)
         for i, row in enumerate(messages):
-            # A later human request closes the interrupted protocol span, not
+            # Later ordinary input closes the interrupted protocol span, not
             # the action itself. Its unknown outcome remains in the request.
             for call_id in interrupted.get(i, ()):
                 calls.pop(call_id, None)
