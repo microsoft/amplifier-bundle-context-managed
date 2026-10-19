@@ -50,9 +50,24 @@ is never truncated, and a successful native result is reused on subsequent turns
 and restarts. Unified enables this policy on each boundary-engine mount.
 
 The first objective, recent turns, system/developer instructions, retained reminders
-and active-operation identities have explicit retention paths. Unknown or queued
-tool calls restrict the boundary; a partial tool batch is never split. A portable
+and active-operation identities have explicit retention paths. Current unanswered or queued
+tool calls restrict the boundary; a partial live tool batch is never split. A portable
 continuation note is reference data, not a new instruction or authorization.
+
+An unanswered call followed by later ordinary input is represented as an
+explicitly **unknown** outcome in the request view. The derived receipt says only
+that no result exists in saved history; it never asserts completion, cancellation
+or that a process stopped. Its exact call identity and a no-replay observation
+remain outside every checkpoint until actual evidence appears. This lets later
+completed exchanges compact without rewriting the original transcript. Queued
+receipts, ambiguous duplicate call ids, current unanswered calls and service/hook
+messages do not qualify for this recovery. A late canonical result supersedes
+the derived absence observation. Native and portable compaction use the same
+request projection; the host still owns operation status and admission.
+Ordinary input includes host-authorized peer messages delivered as user input;
+it does not prove human authorship or authorize replay. Same-row duplicate call
+representations qualify only when their tool names and arguments agree; conflicts
+remain unresolved barriers, as do repeated call ids across different messages.
 
 ## Native window and portable notes
 
