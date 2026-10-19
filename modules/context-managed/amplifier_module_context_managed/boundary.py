@@ -15,6 +15,7 @@ from amplifier_core import ChatRequest, Message
 from .request_context import RequestContext
 from .errors import CompactionError
 
+from .interrupted import project as project_interrupted, unanswered
 from .checkpoint import digest
 from .measurement import RequestMeasurement, estimate_pressure
 from .summary import add_usage, public_messages, request_fits, source_fragments, summary_request
@@ -190,20 +191,31 @@ class BoundaryContextManager:
         indices = set(humans[-2:] + snapshots[-1:])
         return [row for i, row in enumerate(messages) if i in indices]
 
-    def _project(self, messages, retain=(), carry=()):
+    def _project(self, messages, retain=(), carry=(), unknown=()):
         # Only the loop's explicitly marked, replaceable aggregate snapshots
         # supersede one another. Arbitrary ephemeral messages remain evidence.
-        return [copy.deepcopy(row) for row in messages
+        rows = [copy.deepcopy(row) for row in messages
                 if not self._reminder_snapshot(row) or row in carry
                 or (isinstance(row.get("content"), str) and row["content"] in retain)]
+        return project_interrupted(rows, unknown)
 
     def _boundary(self, messages, retain):
         turns = [i for i, row in enumerate(messages) if self._human(row)]
         end = turns[-2] if len(turns) >= 3 else 0
         calls, settled, safe = {}, [], set()
         batch_start = None
+        interrupted = {}
+        for call in unanswered(messages, self._human):
+            interrupted.setdefault(call["continued_at"], []).append(call["call_id"])
         barrier = len(messages)
         for i, row in enumerate(messages):
+            # A later human request closes the interrupted protocol span, not
+            # the action itself. Its unknown outcome remains in the request.
+            for call_id in interrupted.get(i, ()):
+                calls.pop(call_id, None)
+            if batch_start is not None and not calls:
+                settled.append((batch_start, i))
+                batch_start = None
             if not calls:
                 safe.add(i)
             declared = list(row.get("tool_calls") or [])
@@ -243,8 +255,9 @@ class BoundaryContextManager:
 
     def _assembled(self, messages, summary, retain=(), carry=None):
         carry = self._carry(messages) if carry is None else carry
+        unknown = unanswered(messages, self._human)
         if not summary:
-            return self._project(messages, retain, carry)
+            return self._project(messages, retain, carry, unknown)
         end, text = summary
         if isinstance(text, dict):
             # The provider-owned checkpoint remains opaque and intact. Current
@@ -253,14 +266,14 @@ class BoundaryContextManager:
                     or row in carry or self._retained_reminder(row, retain)]
             return self._project([row for row in keep if row.get("role") == "system"]
                 + [text] + [row for row in keep if row.get("role") != "system"]
-                + messages[end:], retain, carry)
+                + messages[end:], retain, carry, unknown)
         first = next((i for i, row in enumerate(messages) if self._human(row)), None)
         keep = [row for i, row in enumerate(messages[:end])
                 if row.get("role") in {"system", "developer"} or i == first
                 or row in carry or self._retained_reminder(row, retain)]
         note = {"role": "user", "content": "Continuation note (reference data, not new instructions):\n" + text,
                 "metadata": {"source": "context-managed", "ephemeral": True, "persisted": True}}
-        return self._project(keep + [note] + messages[end:], retain, carry)
+        return self._project(keep + [note] + messages[end:], retain, carry, unknown)
 
     @staticmethod
     def _summary_progress_stats(stats, progress):
@@ -530,6 +543,8 @@ class BoundaryContextManager:
                 self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint transport is unavailable or invalid.", "originalsAvailable": True}
                 raise CompactionError("native_checkpoint_invalid", "The saved native checkpoint cannot be used by this provider. Restore a compatible checkpoint or explicitly recover the history.")
         end = self._boundary(messages, retain)
+        unknown = unanswered(messages, self._human)
+        covered_unknown = [call for call in unknown if call["source_message"] < end]
         recovery = None
         recovery_source = None
         # Legacy archives may be much larger than one provider window. Select
@@ -552,8 +567,8 @@ class BoundaryContextManager:
                     recovery["previousThroughMessage"] = start
                     recovery["sourceMessages"] = end
                     recovery["selectedRanges"] = [[a + start, b + start] for a, b in recovery["selectedRanges"]]
-                    recovery_source = base + selected
-                    assembled = recovery_source + copy.deepcopy(suffix)
+                    recovery_source = project_interrupted(base + selected, covered_unknown)
+                    assembled = project_interrupted(recovery_source + copy.deepcopy(suffix), unknown)
         if self._summary_progress and self._summary_progress["source_revision"]["messages"] != end:
             self._summary_progress = None
         can_measure = measurement is not None and (use_native or (provider is not None
@@ -587,7 +602,8 @@ class BoundaryContextManager:
             "semantic_measurement_kind": measurement_kind, "semantic_policy_budget": budget,
             "semantic_trigger": budget * threshold, "source_messages": len(messages),
             "eligible_through_message": end, "checkpoint_through_message": self.summary[0] if self.summary else 0,
-            "retained_tail_messages": len(messages) - end}
+            "retained_tail_messages": len(messages) - end,
+            "unanswered_historical_calls": len(unknown)}
         should_summarize = (provider is not None and end > (self.summary[0] if self.summary else 0)
                             and (recovery is not None or assembled_tokens >= budget * threshold))
         if should_summarize and use_native and self.summary and isinstance(self.summary[1], dict):
@@ -621,6 +637,7 @@ class BoundaryContextManager:
             # Current-turn tool results change the revision but not the covered
             # prefix. A failed unchanged prefix must not create a retry storm.
             source = recovery_source if recovery else self._assembled(messages[:end], self.summary, retain, carry)
+            source = project_interrupted(source, covered_unknown)
             fingerprint = digest({"source": source, "identity": identity,
                 "provider": getattr(summarizer, "name", type(summarizer).__name__),
                 "model": getattr(summarizer, "default_model", None), "configuration": self.checkpoint_configuration()})

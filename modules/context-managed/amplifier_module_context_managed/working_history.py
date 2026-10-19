@@ -10,9 +10,17 @@ import json
 from .errors import CompactionError
 
 
-def exchanges(messages):
+def exchanges(messages, human=None):
+    from .interrupted import unanswered
+    interrupted = {}
+    for call in unanswered(messages, human) if human else ():
+        interrupted.setdefault(call["continued_at"], []).append(call["call_id"])
     start, pending = 0, set()
     for index, row in enumerate(messages):
+        pending.difference_update(interrupted.get(index, ()))
+        if not pending and start < index:
+            yield start, index
+            start = index
         calls = list(row.get("tool_calls") or [])
         content = row.get("content")
         if isinstance(content, list):
@@ -44,7 +52,7 @@ def select_window(messages, end, retain, byte_budget, human):
                 or row.get("role") in {"system", "developer"}
                 or (row.get("metadata") or {}).get("source") == "hook"
                 or (isinstance(row.get("content"), str) and row["content"] in retain)}
-    units = list(exchanges(messages))
+    units = list(exchanges(messages, human))
     selected = set()
     for start, stop in units:
         if any(i in required for i in range(start, stop)):
