@@ -1,4 +1,5 @@
 import copy
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -122,3 +123,89 @@ def test_queued_background_work_is_not_a_settled_recovery_boundary():
     assert settled_boundaries(rows) == []
     rows[1]["content"] = 'completed receipt'
     assert settled_boundaries(rows) == [2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync_error", "async_error", "cancel", "second_error"])
+async def test_failed_progress_save_restores_last_accepted_state(mode):
+    rows = history()
+    ctx, provider, accepted = context(rows), fixture(), []
+    initial = (ctx.summary, ctx.summary_identity)
+    failure = asyncio.CancelledError("save cancelled") if mode == "cancel" else OSError("save failed")
+
+    def save(record, report):
+        if mode == "second_error" and not accepted:
+            accepted.append(copy.deepcopy((ctx.summary, ctx.summary_identity)))
+            return
+        raise failure
+
+    async def async_save(record, report):
+        await asyncio.sleep(0)
+        return save(record, report)
+
+    with pytest.raises(type(failure)) as caught:
+        await recover_native(
+            ctx, provider, ChatRequest(messages=[]), IDENTITY, target_bytes=350,
+            save_progress=async_save if mode in {"async_error", "cancel"} else save,
+        )
+    assert caught.value is failure
+    assert ctx.messages == rows
+    assert (ctx.summary, ctx.summary_identity) == (accepted[0] if accepted else initial)
+    assert provider.compact_context.await_count == (2 if accepted else 1)
+    # The completed provider calls remain real; only rejected summary state rolls back.
+    if accepted:
+        record = ctx.export_checkpoint(IDENTITY)
+        assert record["summary"]["throughMessage"] == accepted[0][0][0]
+        restored = context(rows)
+        assert restored.restore_checkpoint(record, IDENTITY)["status"] == "restored"
+    else:
+        assert ctx.export_checkpoint(IDENTITY) is None
+        await recover_native(
+            ctx, provider, ChatRequest(messages=[]), IDENTITY,
+            save_progress=lambda *args: None, target_bytes=350,
+        )
+        assert ctx.summary[0] == len(rows)
+
+
+@pytest.mark.asyncio
+async def test_progress_export_failure_restores_prior_state(monkeypatch):
+    rows = history()
+    ctx, provider = context(rows), fixture()
+    failure = OSError("export failed")
+    save = AsyncMock()
+
+    def reject_export(identity):
+        raise failure
+
+    monkeypatch.setattr(ctx, "export_checkpoint", reject_export)
+    with pytest.raises(OSError) as caught:
+        await recover_native(
+            ctx, provider, ChatRequest(messages=[]), IDENTITY, save_progress=save,
+        )
+    assert caught.value is failure
+    assert ctx.summary is None and ctx.summary_identity is None
+    assert ctx.messages == rows and provider.compact_context.await_count == 1
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("value", [None, True, False])
+async def test_progress_callback_return_value_remains_ignored(asynchronous, value):
+    rows = history()
+    ctx, provider, saved = context(rows), fixture(), []
+
+    def save(record, report):
+        saved.append(copy.deepcopy(record))
+        return value
+
+    async def async_save(record, report):
+        return save(record, report)
+
+    result = await recover_native(
+        ctx, provider, ChatRequest(messages=[]), IDENTITY, target_bytes=350,
+        save_progress=async_save if asynchronous else save,
+    )
+    assert result == saved[-1]
+    assert result["summary"]["throughMessage"] == len(rows)
+    assert ctx.messages == rows
