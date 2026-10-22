@@ -51,6 +51,10 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
     Byte size chooses a tentative batch only. Authoritative provider preflight
     must accept each exact request. Oversize batches shrink at settled exchange
     boundaries; even the smallest rejected batch fails without dropping input.
+
+    ``save_progress`` may be sync or async. Its return value is ignored; raise
+    to reject a save. Export/save failure or cancellation restores the prior
+    accepted summary and identity, not completed provider calls or storage writes.
     """
     if not provider.supports_native_compaction():
         raise CompactionError("native_checkpoint_invalid", "Explicit native recovery requires native support.")
@@ -103,13 +107,18 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
             raise CompactionError("native_checkpoint_invalid", "Recovery returned an invalid native checkpoint.")
         if digest(context.messages) != source_digest:
             raise RuntimeError("History changed during recovery; new checkpoint was not installed")
-        context.summary = (end, copy.deepcopy(message))
-        context.summary_identity = copy.deepcopy(identity)
-        record = context.export_checkpoint(identity)
-        saved = save_progress(record, {"fromMessage": start, "throughMessage": end,
-            "totalMessages": len(source), "inputTokens": decision["input_tokens"],
-            "inputLimit": decision["input_limit_tokens"]})
-        if inspect.isawaitable(saved):
-            await saved
+        prior_summary, prior_identity = context.summary, context.summary_identity
+        try:
+            context.summary = (end, copy.deepcopy(message))
+            context.summary_identity = copy.deepcopy(identity)
+            record = context.export_checkpoint(identity)
+            saved = save_progress(record, {"fromMessage": start, "throughMessage": end,
+                "totalMessages": len(source), "inputTokens": decision["input_tokens"],
+                "inputLimit": decision["input_limit_tokens"]})
+            if inspect.isawaitable(saved):
+                await saved
+        except BaseException:
+            context.summary, context.summary_identity = prior_summary, prior_identity
+            raise
         start, previous = end, message
     return context.export_checkpoint(identity)

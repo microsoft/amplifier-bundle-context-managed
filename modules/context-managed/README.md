@@ -117,3 +117,10 @@ progress; it never runs foreground inference or tools. The caller must preserve 
 original transcript, hold exclusive session ownership, verify the finished request,
 and install the derived checkpoint atomically. Ordinary request preparation never
 invokes this recovery helper automatically.
+
+The required `save_progress(record, report)` callback may be synchronous or
+asynchronous. Its return value is ignored; raise an exception to reject a save.
+If exporting or saving a piece raises or is cancelled, the helper restores the
+last accepted summary and identity and propagates the original exception.
+Canonical messages and accepted earlier pieces remain intact. Completed provider
+calls are not undone, and callbacks must make their own storage writes atomic.
