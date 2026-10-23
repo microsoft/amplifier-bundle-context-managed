@@ -314,3 +314,47 @@ async def test_optional_checkpoint_writer_can_be_absent_including_restored_view(
     assert target.restore_checkpoint(record, IDENTITY)["status"] == "restored"
     assert await target.get_messages_for_request()
     assert await target.get_messages() == messages()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selection", ["omitted", "explicit"])
+@pytest.mark.parametrize("configuration_version", [1, 2])
+async def test_default_mount_restores_old_explicit_boundary_checkpoint(selection, configuration_version):
+    """Default normalization must preserve the old explicit Boundary identity."""
+    from amplifier_module_context_managed import mount
+    from amplifier_module_context_managed.boundary import SUMMARY_PROMPT
+
+    config = {"engine": "boundary", **CONFIG, "summary_target_tokens": 1500}
+    mounted = {}
+    capabilities = {
+        "context.checkpoint_identity": lambda: copy.deepcopy(IDENTITY),
+        "context.preserve_evidence": AsyncMock(return_value=[]),
+    }
+
+    async def accept(name, item):
+        mounted[name] = item
+
+    host = SimpleNamespace(mount=accept, hooks=None, get_capability=capabilities.get,
+        register_capability=lambda name, value: capabilities.__setitem__(name, value),
+        register_contributor=lambda *args: None)
+    # This is the exact delegation used by the pre-retirement explicit mount.
+    await mount_boundary(host, config)
+    old = mounted["context"]
+    await old.set_messages(messages())
+    await old.get_messages_for_request(provider=provider())
+    record = old.export_checkpoint(IDENTITY)
+    if configuration_version == 1:
+        record["configurationVersion"] = 1
+        record["configuration"] = digest({"config": old.config, "prompt": SUMMARY_PROMPT})
+        record["sha256"] = digest({k: v for k, v in record.items() if k != "sha256"})
+    candidate = dict(config)
+    if selection == "omitted":
+        candidate.pop("engine")
+    await mount(host, candidate)
+    new = mounted["context"]
+    assert new.config == old.config
+    assert new.checkpoint_configuration() == old.checkpoint_configuration()
+    await new.set_messages(messages())
+    assert new.restore_checkpoint(record, IDENTITY)["status"] == "restored"
+    assert new.summary == old.summary
+    assert await new.get_messages() == messages()

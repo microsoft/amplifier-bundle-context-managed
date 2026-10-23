@@ -1,14 +1,24 @@
 # Request-boundary context engine
 
-Select `session.context.config.engine: boundary` to use this engine. Legacy
-rolling-summary behavior remains the default for callers that have not opted
-into the Work profile; its settings and emergency policies are separate.
+Boundary is the only context-managed engine. Set
+`session.context.config.engine: boundary`, or omit `engine` for the same normalized
+configuration. Legacy, unknown and explicit null values fail before coordinator
+mutation. The Legacy executor and `ManagedContextManager` import are removed,
+not aliases. Direct users can import `boundary.BoundaryContextManager`.
+Remove the eight Legacy-only options listed in [configuration](CONFIGURATION.md);
+their presence fails even when their value is null or false.
 
 The host owns persistence. `get_messages()` returns detached, complete originals.
 `set_messages()` invalidates derived state when its covered prefix changes; an
 unchanged prefix can retain its checkpoint while the recent tail changes. No
 private transcript is loaded or written here. The transcript tool uses the host's
 canonical history through `context.history` and `context.history_authority: host`.
+
+Old saved data is a separate read-only interface: hosts can approve explicit
+archive IDs for `read_transcript`, including original large-result sidecars.
+Archive selection takes precedence over host history and returns bounded raw
+record/byte pages. It neither imports Legacy summaries into checkpoints nor
+rewrites originals. See [archive usage and limits](CONFIGURATION.md#legacy-archive-usage).
 
 ## Compaction policy
 
@@ -89,8 +99,9 @@ fragments. Completed fragment progress can be persisted, but partial notes never
 enter a foreground request.
 
 `summary_max_output_tokens` supplies the portable summary generation allowance,
-default **8192**. It is separate from the legacy `summary_target_tokens: 1500`
-setting and includes reasoning where the provider accounts for reasoning there.
+default **8192**. `summary_target_tokens` remains accepted but inert, including the
+bundle's retained value 1500; it is not remapped to this generation allowance.
+The allowance includes reasoning where the provider accounts for reasoning there.
 An output-limit finish raises `summary_output_limit`, rather than accepting an
 incomplete note. Configure the allowance for the provider/model; 8192 is not a
 claim of summary quality or a universal model limit. Native requests retain their
@@ -101,6 +112,8 @@ can complete; caller cancellation stops preparation. History or contract changes
 reject in-flight results. Compaction emits started/finished events with completed,
 failed, cancelled or superseded outcomes; an unavailable native contract can fail
 before an operation starts. Hosts should surface the request error too.
+Old `summary_timeout`, `summary_total_work_timeout`, and
+`native_compaction_timeout` settings remain ignored; they do not restore timers.
 
 ## Persistence and validation
 
@@ -108,6 +121,9 @@ With `durable_checkpoints: true`, the host preserves and restores validated deri
 state alongside canonical history. Invalid native transport or unavailable native
 counting stops use of a saved native checkpoint. Provider/model or source changes
 invalidate incompatible state, and the normal strict preparation rules apply.
+Omitted-engine mounts use the same configuration identity as old explicit
+`engine: boundary` mounts. This is checkpoint compatibility, not automatic storage
+or Legacy history conversion. The host must preserve originals and persist state.
 
 Budget and measurement helpers come from context-simple's tracked `main`; its
 emergency reduction ladder is not used by this engine. Record the resolved

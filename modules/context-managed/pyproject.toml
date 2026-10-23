@@ -1,7 +1,7 @@
 [project]
 name = "amplifier-module-context-managed"
 version = "0.1.0"
-description = "Context manager with LLM-powered rolling summaries and persistent transcript"
+description = "Boundary context management with host-owned history and validated compaction"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [

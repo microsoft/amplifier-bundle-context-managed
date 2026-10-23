@@ -1,19 +1,23 @@
 # amplifier-bundle-context-managed
 
-For the Work profile’s `engine: boundary`, see the [request-boundary engine](docs/BOUNDARY_ENGINE.md). It uses native compaction when advertised, portable summaries only when native support is absent, and fails clearly instead of emergency trimming. The rolling-summary description below concerns the legacy default engine.
-
-An [Amplifier](https://github.com/microsoft/amplifier) bundle providing intelligent, budget-aware context management with persistent JSONL transcripts, LLM-powered rolling summaries, and session resume support.
+An [Amplifier](https://github.com/microsoft/amplifier) bundle providing
+[Boundary-only context management](docs/BOUNDARY_ENGINE.md), with host-owned
+canonical history, request-budget validation, and optional durable compaction checkpoints.
 
 ## Overview
 
-Drop-in replacement for `context-simple`. Instead of mechanically chopping old messages when the context window fills up, this bundle uses the LLM itself to build rolling summaries of earlier conversation. The model always sees compressed older context + full-detail recent context, and can pull back any detail on demand.
+The context manager implements Core's `ContextManager` protocol. It compacts
+eligible settled history before a foreground request. Providers advertising native
+compaction must satisfy that contract; providers without native support use
+portable continuation notes. A failed compaction or still-oversized request stops
+preparation instead of deleting messages or clipping tool output.
 
 ### What You Get
 
-- **Sessions survive past the context limit.** Decisions, file paths, errors, task state -- all captured in structured summaries instead of silently dropped.
-- **A bundled `read_transcript` tool** lets the model pull verbatim history (including full tool inputs and results) whenever it needs earlier details. No silent gaps, no hallucinated fill-ins.
-- **Budget-aware context tracking** starts summarizing at 60%, warns at 70%, emergency fallback at 92%. The model never gets close enough to the limit to start behaving erratically.
-- **Everything persists to disk.** Sessions can be resumed, transcripts inspected, and full history is always available even after summarization compresses the live context.
+- **Explicit request safety.** The module preserves canonical originals and reports preparation failures. Compaction is not a guarantee of lossless model recall or unlimited context.
+- **Evidence retrieval.** The bundled `read_transcript` tool reads host history. Host-approved old archives and sidecar results are separately accessible read-only.
+- **Host-controlled durability.** A host can preserve originals and persist compatible derived checkpoints for resume. The module does not create its own transcript writer or provide storage by itself.
+- **No context-owned elapsed deadlines.** Source, output, and logical-call limits remain; caller cancellation and real provider errors still stop preparation.
 
 ## Modules
 
@@ -21,33 +25,40 @@ Drop-in replacement for `context-simple`. Instead of mechanically chopping old m
 
 Core context management module implementing the `ContextManager` protocol from `amplifier-core`:
 
-- **Persistent JSONL transcript with format versioning** -- every message written to disk with a versioned header; archives on clear
-- **Budget calculation and pressure events** -- tracks token usage across configurable thresholds (`summarize_trigger`, `pressure_warning`, `emergency_fallback`) and emits `context:budget_pressure` events
-- **LLM-powered rolling summarization** -- async summary generation with multi-tier summary management and cache-friendly ordering
-- **Session resume** -- reloads transcript from disk on startup so long-running sessions survive process restarts
-- **Large tool result handling** -- tool results over the threshold are pointer-filed to disk; only a truncated reference is kept in memory
+- **Boundary-only mount** -- omitted `engine` selects `boundary`; Legacy, unknown and null values fail before coordinator mutation
+- **Request validation and compaction events** -- the engine trigger defaults to 70%; this bundle explicitly retains its 60% trigger
+- **Native checkpoints or portable notes** -- strict native handling, with no native-error fallback to text summaries
+- **Host-owned resume** -- the host restores canonical history and optionally validates a derived checkpoint
+- **Whole-message preservation** -- large results and metadata stay in canonical history; no private pointer filing
 - **System prompt factory support** -- accepts a callable that produces the system prompt on every request, enabling dynamic prompts
 
 ### `tool-transcript`
 
-Provides the `read_transcript` tool for on-demand full-fidelity message retrieval:
+Provides the `read_transcript` tool for formatted host-history retrieval and
+separate bounded raw archive access:
 
-- **Turn-based access** -- read specific turn ranges from the persistent transcript
-- **Search** -- find specific content across the full transcript history
+- **Turn-based access and search** -- retrieve formatted host canonical history; message text and tool arguments can be truncated
+- **Legacy archive access** -- explicit approved IDs select bounded raw record pages and referenced sidecar byte pages, without rewriting files or importing them into canonical history
 - **Rate-limited** -- configurable per-turn call limit to prevent excessive retrieval
+
+Only explicit archives return complete raw records within page limits; an
+oversized single record fails visibly. See the
+[archive usage and limits](docs/CONFIGURATION.md#legacy-archive-usage).
 
 ## Usage
 
-Reference the bundle from your Amplifier configuration:
+Include the bundle from your Amplifier configuration:
 
 ```yaml
-bundle:
-  modules:
-    - context-managed
-    - tool-transcript
+includes:
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-context-managed@main
 ```
 
-The `context-managed` module registers itself as the session context provider. The `tool-transcript` module gives the model on-demand access to past messages that have been compressed into summaries.
+The bundle keeps its existing host composition and explicitly sets
+`session.context.config.engine: boundary`. The `ManagedContextManager` Python
+class and Legacy execution path have been removed; direct callers must use
+`amplifier_module_context_managed.boundary.BoundaryContextManager` and supply
+host persistence as needed. Remove Legacy-only options before mounting.
 
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for all configuration parameters.
 
@@ -66,7 +77,10 @@ Run the test suite:
 uv run pytest tests/ -v
 ```
 
-The same pattern applies for `modules/tool-transcript`.
+The same pattern applies for `modules/tool-transcript`. Run each module and the
+root `tests/` in separate pytest processes to avoid their `tests.conftest`
+namespace collision. A controlled environment can disable plugin autoload and
+load `pytest_asyncio.plugin` and `amplifier_core.pytest_plugin` explicitly.
 
 ## Contributing
 

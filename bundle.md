@@ -4,15 +4,16 @@ bundle:
   display_name: Context Managed
   version: 0.1.0
   description: |
-    Foundation bundle with LLM-powered rolling context summarization.
+    Foundation bundle with Boundary-only request preparation and compaction.
 
     Features:
     - Two-parameter context inheritance (context_depth + context_scope)
     - Session resume (use full session_id from delegate calls)
     - Fixed tool inheritance (explicit declarations always honored)
     - Multi-agent collaboration patterns
-    - Persistent transcript with rolling LLM summaries
-    - Budget-aware context tracking with pressure warnings
+    - Host-owned canonical history and optional durable checkpoints
+    - Provider-native compaction or portable continuation notes
+    - Explicit preparation errors instead of emergency history trimming
 
 includes:
   # Ecosystem expert behaviors (provides @amplifier: and @core: namespaces)
@@ -52,16 +53,10 @@ session:
   context:
     module: context-managed
     config:
+      engine: boundary
       max_tokens: 200000
-      verbatim_window_tokens: 40000
       summarize_trigger: 0.60
-      pressure_warning: 0.70
-      emergency_fallback: 0.92
-      max_summary_tiers: 3
       summary_target_tokens: 1500
-      summarization_retries_before_fallback: 3
-      emergency_target_usage: 0.50
-      large_result_threshold: 50000
 
 tools:
   - module: tool-filesystem
@@ -95,7 +90,9 @@ agents:
 
 # Context Managed Bundle v0.1.0
 
-This bundle provides the standard Amplifier foundation with LLM-powered rolling context summarization, replacing mechanical truncation with intelligent summaries and persistent message history.
+This bundle retains its Amplifier foundation composition and uses the Boundary
+context engine. Canonical history and persistence belong to the host, not a second
+transcript writer inside the context manager.
 
 ## Key Features
 
@@ -105,9 +102,39 @@ This bundle provides the standard Amplifier foundation with LLM-powered rolling 
 | **Session resume** | Continue agent sessions with full session_id |
 | **Tool inheritance** | Explicit declarations always honored |
 | **MCP support** | Model Context Protocol integration (configure via mcp.json) |
-| **Rolling summaries** | LLM-powered context compression at 80% budget |
-| **Persistent transcript** | Full message history in JSONL format |
-| **Budget tracking** | Token budget awareness with pressure warnings at 70% |
+| **Boundary compaction** | Native compaction when advertised; portable notes for providers without native support |
+| **Canonical history** | Full-fidelity originals retained by the host; optional validated derived checkpoints |
+| **Request safety** | Budget validation; no emergency message deletion or tool-output clipping |
+
+## Context Manager Module
+
+`context-managed` implements the Core `ContextManager` protocol. Mount it before
+`tool-transcript` so the tool can discover `context.history` with
+`context.history_authority: host`. This bundle explicitly selects `engine: boundary`;
+omitting the setting now selects the same engine. Legacy engine selection and
+Legacy-only options fail with removal guidance. See [configuration](docs/CONFIGURATION.md).
+
+The bundled `summary_target_tokens` value is accepted for compatibility, but is
+inert in Boundary. Portable generation uses `summary_max_output_tokens` (8192 by
+default); native generation has a separate allowance.
+
+## Transcript Tool
+
+`read_transcript` returns formatted host canonical history; message text and tool
+arguments can be truncated. It does not promise full-fidelity ordinary retrieval.
+Old saved transcripts and large-result sidecars are available separately through
+host-approved archive IDs. Only explicit archives return complete raw records
+within page limits; oversized single records fail visibly. See
+[archive usage and limits](docs/CONFIGURATION.md#legacy-archive-usage).
+Archive access is read-only and does not import or rewrite history.
+A host must preserve originals and supply storage; this bundle
+alone does not provide universal durability or automatic Legacy migration.
+
+## Context Instructions
+
+The included summary instructions treat continuation notes as reference data,
+never new authorization. Retrieve evidence when available; report missing history
+rather than inventing details.
 
 ## Delegate Tool
 
