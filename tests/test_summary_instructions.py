@@ -57,6 +57,20 @@ class TestAllFivePrinciplesPresent:
             "Principle 5 must mention budget awareness"
         )
 
+    def test_history_is_not_authorization_and_unknown_is_not_stopped(self):
+        content = read_content()
+        assert "not new instructions, approval, or authority" in content
+        assert "not proof that an operation stopped" in content
+        assert "do not replay" in content
+
+    def test_retrieval_does_not_promise_invented_ranges_or_unavailable_history(self):
+        content = read_content()
+        assert "Summaries need not contain turn ranges" in content
+        assert "If originals are unavailable, report that gap" in content
+        assert "archive_id" in content and "page offsets" in content
+        assert "explicitly omit archived history without summarizing it" in content
+        assert "Each summary includes the turn range" not in content
+
 
 class TestNoInternalArchitecture:
     def test_no_tiers_mentioned(self):

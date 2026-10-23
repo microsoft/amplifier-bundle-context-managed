@@ -1,10 +1,32 @@
+# Context-managed: Boundary only
+
+The public `mount` validates configuration and delegates to
+`boundary.BoundaryContextManager`. Omitted `engine` becomes `boundary`; only that
+exact string is accepted. Legacy, unknown, and null selections fail before
+coordinator mutation. `ManagedContextManager` and Legacy summary/writer exports
+are removed, not compatibility aliases. Direct Python callers must use the
+Boundary class and host-owned history/persistence.
+
+Remove `verbatim_window_tokens`, `max_summary_tiers`, `summarization_prompt_path`,
+`summarization_retries_before_fallback`, `emergency_target_usage`,
+`large_result_threshold`, `pressure_warning`, and `emergency_fallback`. They fail
+even when false or null. `summary_target_tokens` is still accepted but inert;
+portable notes use `summary_max_output_tokens` (default 8192). Existing timeout
+settings remain ignored. See [configuration](../../docs/CONFIGURATION.md).
+
+No private transcript is loaded, written, pointer-filed, or archived by this
+manager. `set_messages` accepts the host's complete canonical history; `get_messages`
+returns detached originals with metadata unchanged. Old transcripts and sidecars
+remain separately accessible through host-approved `read_transcript` archive IDs;
+this is read-only access, not automatic canonical import. See the
+[archive usage and limits](../../docs/CONFIGURATION.md#legacy-archive-usage).
 
 ### Durable boundary checkpoints (opt in)
 
 With `engine: boundary` and `durable_checkpoints: true`, the host must register
 `context.preserve_evidence(messages)` (async) and `context.checkpoint_identity()`.
-The former commits the complete original transcript before any request fitting
-can clip tool output, and returns durable reference records from the host's
+The former commits the complete original transcript before request preparation
+and returns durable reference records from the host's
 existing evidence store. Do not create a competing transcript writer. The latter
 returns the exact `{provider, model}` identity; hosts should include the selected
 provider instance and model, including any temporary pin.
@@ -19,9 +41,11 @@ shortened, corrupt, incompatibly configured, or differently identified history
 rejects the derived summary with a visible reason and `originalsAvailable: true`.
 It never restores/replays a tool or changes original messages. `set_messages`
 retains completed derived notes only when their entire covered prefix is unchanged.
-Trigger, retry, observer, and per-pass call-allowance changes do not invalidate
+Trigger, retry, observer, and call-allowance changes do not invalidate
 an otherwise compatible note; summary-generation settings still do. Older
 checkpoints retain their original, stricter configuration validation.
+Normalized omitted-engine mounts keep the configuration identity of old explicit
+`engine: boundary` mounts. Legacy summary markers are not Boundary checkpoints.
 
 Hosts can optionally register `context.persist_checkpoint()` to save each completed
 portable-summary piece into the same checkpoint file. Sync or async callbacks
@@ -54,19 +78,20 @@ required reminder text or grant authority from historical content.
 
 ### Bounded and native compaction
 
-The boundary engine now prefers a continuation provider's optional native
+The boundary engine requires an advertised continuation provider's native
 compaction contract: `supports_native_compaction()`,
 `validate_compacted_context(message)`, `compact_context(request)`, and a
 `request_budget` result with an authoritative full-window count. Native state
 travels in message metadata and is validated before use, including after resume.
-An unavailable or invalid transport rebuilds the request from original history.
+An unavailable or invalid native contract stops preparation without using a
+portable fallback or deleting canonical history.
 The utility summary provider/model is used only for portable notes.
 
 Native compaction sends one complete eligible window, using the loop's selected
 model, current instructions and request configuration. It never uses the text
 summary's fragment limits. Retain every returned canonical item unchanged.
-An oversized-input preflight skips the native request and uses portable recovery
-directly; native compaction is never split into pieces.
+An oversized-input preflight stops preparation; native compaction is never split
+into pieces or replaced with a portable summary after a native error.
 
 Portable notes first preflight the complete eligible prefix when the provider
 offers authoritative counting. A fitting prefix uses one summary request;
@@ -76,8 +101,11 @@ still bounds portable requests. Providers advertising
 `completion:auto_continue:v1` receive a per-call `auto_continue: false` override
 for auxiliary summaries; normal chat keeps its configured behavior. A response
 ending at its output limit is billed in the evidence but cannot commit a note.
-`summary_max_calls` bounds one preparation pass, preserves completed pieces, and
-allows continuation in a later pass. It is never an elapsed or read deadline:
+`summary_max_calls` bounds logical portable calls per preparation pass, including
+failed calls. Cumulative calls across resumed progress are tracked separately;
+this setting is not a lifetime allowance for an unchanged prefix.
+Completed pieces remain available for compatible continuation, including durable
+progress after restart. It is never an elapsed or read deadline:
 healthy generation can take many minutes until completion or caller cancellation.
 `context:compaction_progress` reports completed and remaining pieces without
 copying source or notes into events. Notes commit atomically and suppress repeated
@@ -85,10 +113,12 @@ unchanged-prefix failures. Explicit
 `context:compaction_finished` evidence identifies the method, safe failure
 category, elapsed time, call count and usage, including cache buckets. Raw
 provider exception bodies are not copied to these events. `native_selection`
-records why native compaction was selected or why a portable fallback was used.
+records why native compaction was selected or why a non-native provider uses
+portable summaries.
 
-See the [research, acceptance evidence and configuration](../../docs/COMPACTION_ACCEPTANCE.md)
-for actual live test limits and dependency integration order.
+See [Boundary policy](../../docs/BOUNDARY_ENGINE.md) for current behavior. The
+[historical acceptance report](../../docs/COMPACTION_ACCEPTANCE.md) records the
+evaluated revisions and live limits, not universal production quality guarantees.
 
 ### Long autonomous runs
 

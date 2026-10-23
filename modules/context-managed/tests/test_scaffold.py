@@ -140,11 +140,11 @@ class TestContextManagedModule:
 
         assert m.__amplifier_module_type__ == "context"
 
-    def test_transcript_format_version(self):
-        """Has TRANSCRIPT_FORMAT_VERSION = '1.0.0'."""
-        from amplifier_module_context_managed import TRANSCRIPT_FORMAT_VERSION
+    def test_no_legacy_writer_exports(self):
+        import amplifier_module_context_managed as module
 
-        assert TRANSCRIPT_FORMAT_VERSION == "1.0.0"
+        for name in ("TRANSCRIPT_FORMAT_VERSION", "ManagedContextManager", "SummaryTier", "SummaryResult"):
+            assert not hasattr(module, name)
 
     def test_mount_function_exists(self):
         """Has async mount() function."""
@@ -153,100 +153,72 @@ class TestContextManagedModule:
         assert callable(m.mount)
 
     def test_managed_context_manager_class(self):
-        """Has ManagedContextManager class."""
-        from amplifier_module_context_managed import ManagedContextManager
+        """The concrete manager lives in the Boundary module, not a Legacy alias."""
+        from amplifier_module_context_managed.boundary import BoundaryContextManager
 
-        assert ManagedContextManager is not None
+        assert BoundaryContextManager is not None
 
     def test_class_has_add_message(self):
-        from amplifier_module_context_managed import ManagedContextManager
+        from amplifier_module_context_managed.boundary import BoundaryContextManager
 
-        assert hasattr(ManagedContextManager, "add_message")
+        assert hasattr(BoundaryContextManager, "add_message")
 
     def test_class_has_get_messages_for_request(self):
-        from amplifier_module_context_managed import ManagedContextManager
+        from amplifier_module_context_managed.boundary import BoundaryContextManager
 
-        assert hasattr(ManagedContextManager, "get_messages_for_request")
+        assert hasattr(BoundaryContextManager, "get_messages_for_request")
 
     def test_class_has_get_messages(self):
-        from amplifier_module_context_managed import ManagedContextManager
+        from amplifier_module_context_managed.boundary import BoundaryContextManager
 
-        assert hasattr(ManagedContextManager, "get_messages")
+        assert hasattr(BoundaryContextManager, "get_messages")
 
     def test_class_has_set_messages(self):
-        from amplifier_module_context_managed import ManagedContextManager
+        from amplifier_module_context_managed.boundary import BoundaryContextManager
 
-        assert hasattr(ManagedContextManager, "set_messages")
+        assert hasattr(BoundaryContextManager, "set_messages")
 
     def test_class_has_set_system_prompt_factory(self):
-        from amplifier_module_context_managed import ManagedContextManager
+        from amplifier_module_context_managed.boundary import BoundaryContextManager
 
-        assert hasattr(ManagedContextManager, "set_system_prompt_factory")
+        assert hasattr(BoundaryContextManager, "set_system_prompt_factory")
 
     def test_class_has_clear(self):
-        from amplifier_module_context_managed import ManagedContextManager
+        from amplifier_module_context_managed.boundary import BoundaryContextManager
 
-        assert hasattr(ManagedContextManager, "clear")
+        assert hasattr(BoundaryContextManager, "clear")
 
-    def test_class_has_transcript_path_property(self):
-        from amplifier_module_context_managed import ManagedContextManager
+    def test_class_has_no_private_transcript_path(self):
+        from amplifier_module_context_managed.boundary import BoundaryContextManager
 
-        ctx = ManagedContextManager(session_dir=None)
-        assert hasattr(ctx, "transcript_path")
+        assert not hasattr(BoundaryContextManager(), "transcript_path")
 
-    def test_class_has_tool_results_dir_property(self):
-        from amplifier_module_context_managed import ManagedContextManager
+    def test_class_has_no_private_tool_results_dir(self):
+        from amplifier_module_context_managed.boundary import BoundaryContextManager
 
-        ctx = ManagedContextManager(session_dir=None)
-        assert hasattr(ctx, "tool_results_dir")
+        assert not hasattr(BoundaryContextManager(), "tool_results_dir")
 
     def test_default_config_values(self):
-        """Constructor has correct default config values."""
-        from amplifier_module_context_managed import ManagedContextManager
+        """Boundary uses provider counting by default, with no Legacy policies."""
+        from amplifier_module_context_managed.boundary import BoundaryContextManager
 
-        ctx = ManagedContextManager(session_dir=None)
-        assert ctx.max_tokens == 200_000
-        assert ctx.verbatim_window_tokens == 40_000
-        assert ctx.max_summary_tiers == 3
-        assert ctx.summary_target_tokens == 1_500
-        assert ctx.summarization_retries_before_fallback == 3
-        assert ctx.emergency_target_usage == 0.50
-        assert ctx.large_result_threshold == 50_000
-        assert ctx.pressure_warning == 0.70
-        assert ctx.summarize_trigger == 0.60
-        assert ctx.emergency_fallback == 0.92
-
-    def test_summarize_trigger_default_is_60_not_80(self):
-        """summarize_trigger default is 0.60, lowered from 0.80.
-
-        Async LLM summarization takes ~50 seconds; the orchestrator continues
-        adding messages during that window (40-60 K tokens).  Starting at 0.80
-        of a 200 K budget means context often grows past 120 % before the
-        summary is ready.  0.60 provides adequate headroom so the swap happens
-        before budget is exceeded.
-        """
-        from amplifier_module_context_managed import ManagedContextManager
-
-        ctx = ManagedContextManager(session_dir=None)
-        assert ctx.summarize_trigger == 0.60, (
-            "summarize_trigger must default to 0.60 (not 0.80) to allow "
-            "headroom during the async summarization window"
-        )
-        assert ctx.summarize_trigger != 0.80, "Old 0.80 default must not be in use"
+        ctx = BoundaryContextManager()
+        assert ctx.config == {"token_meter": "actual"}
+        assert ctx.summary is None
+        assert ctx.messages == []
 
 
 class TestToolTranscriptModule:
     """Verify the tool-transcript __init__.py has correct content."""
 
     def test_tool_init_content(self):
-        """__init__.py has Phase 3 stub content."""
+        """Tool module declares its type and mount entry point."""
         content = (
             TOOL_MODULE_ROOT / "amplifier_module_tool_transcript" / "__init__.py"
         ).read_text()
         assert "__amplifier_module_type__" in content
         assert "tool" in content
         assert "mount" in content
-        assert "Phase 3" in content
 
     def test_mount_is_async(self):
         """mount() is defined as async."""

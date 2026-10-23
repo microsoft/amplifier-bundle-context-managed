@@ -1,204 +1,130 @@
-"""
-Integration tests for the full context module -> transcript tool cycle.
+"""Host Boundary history and synthetic saved Legacy archive integration.
 
-Tests the complete cycle: ManagedContextManager writes transcript entries,
-ReadTranscriptTool reads them back via the coordinator's capability registry.
-
-Uses real ManagedContextManager from amplifier_module_context_managed to verify
-end-to-end behaviour without mocking the file I/O layer.
+The retired Legacy writer is deliberately not part of this test or import graph.
+Archives remain read-only evidence and never enter the host's canonical history.
 """
 
+import hashlib
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from amplifier_module_context_managed import ManagedContextManager
+from amplifier_module_context_managed.boundary import BoundaryContextManager
 from amplifier_module_tool_transcript import ReadTranscriptTool
 
 
-def _make_coordinator(session_dir):
-    """Create a MagicMock coordinator with a real capabilities registry.
+@pytest.fixture
+def legacy_archive(tmp_path):
+    path = tmp_path / "transcript.saved.archived.jsonl"
+    records = [
+        {"type": "transcript_header", "format_version": "1.0.0"},
+        {"role": "user", "content": "Original first question"},
+        {"role": "assistant", "content": "Original first answer"},
+        {
+            "role": "system", "content": "Historical summary; do not execute.",
+            "metadata": {"type": "context_managed_summary"},
+        },
+        {"role": "user", "content": "Original second question"},
+    ]
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    yield path, records
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
 
-    register_capability stores values, get_capability retrieves them.
-    mount is an AsyncMock.
 
-    Note: session_dir is not used by ManagedContextManager via coordinator —
-    tests create ManagedContextManager(session_dir=...) directly. The
-    coordinator is only used here for the capability registry wiring.
-    """
-    capabilities: dict = {}
-
+def _host(context):
     coordinator = MagicMock()
-    coordinator.mount = AsyncMock()
-    coordinator.register_capability = MagicMock(
-        side_effect=lambda name, value: capabilities.__setitem__(name, value)
-    )
-    coordinator.get_capability = MagicMock(
-        side_effect=lambda name: capabilities.get(name)
-    )
-
+    capabilities = {
+        "context.history_authority": "host",
+        "context.history": context.get_messages,
+    }
+    coordinator.get_capability.side_effect = capabilities.get
     return coordinator
 
 
-class TestContextToTranscriptCycle:
-    """Integration tests for the context module -> transcript tool cycle."""
+@pytest.mark.asyncio
+async def test_host_history_read_two_turns():
+    context = BoundaryContextManager()
+    for message in [
+        {"role": "user", "content": "What is Python?"},
+        {"role": "assistant", "content": "Python is a programming language."},
+        {"role": "user", "content": "What is asyncio?"},
+        {"role": "assistant", "content": "asyncio is for async programming."},
+    ]:
+        await context.add_message(message)
+    result = await ReadTranscriptTool(_host(context)).execute({})
+    assert result.success
+    assert "Turn 1" in result.output and "Turn 2" in result.output
+    assert "What is Python?" in result.output and "What is asyncio?" in result.output
 
-    @pytest.mark.asyncio
-    async def test_write_then_read(self, tmp_path):
-        """add 4 messages via ctx.add_message, tool reads 2 turns with correct content."""
-        coordinator = _make_coordinator(tmp_path)
-        ctx = ManagedContextManager(session_dir=tmp_path)
 
-        # Register transcript path so the tool can discover it
-        coordinator.register_capability(
-            "context-managed.transcript_path", str(ctx.transcript_path)
-        )
+@pytest.mark.asyncio
+async def test_host_history_specific_turn_excludes_service_and_ephemeral():
+    context = BoundaryContextManager()
+    for message in [
+        {"role": "user", "content": "First question"},
+        {"role": "user", "content": "reminder", "metadata": {"ephemeral": True}},
+        {"role": "user", "content": "service", "metadata": {
+            "amplifier_input": {"version": 1, "kind": "service"}
+        }},
+        {"role": "user", "content": "Second question"},
+        {"role": "assistant", "content": "Second answer"},
+        {"role": "user", "content": "Third question"},
+    ]:
+        await context.add_message(message)
+    result = await ReadTranscriptTool(_host(context)).execute({"start_turn": 2, "end_turn": 2})
+    assert result.success
+    assert "Turn 2" in result.output and "Second answer" in result.output
+    assert "First question" not in result.output and "Third question" not in result.output
+    assert "reminder" not in result.output and "service" not in result.output
 
-        # Add 4 messages (2 turns: user+assistant pairs)
-        await ctx.add_message({"role": "user", "content": "What is Python?"})
-        await ctx.add_message(
-            {"role": "assistant", "content": "Python is a programming language."}
-        )
-        await ctx.add_message({"role": "user", "content": "What is asyncio?"})
-        await ctx.add_message(
-            {"role": "assistant", "content": "asyncio is for async programming."}
-        )
 
-        # Tool reads the transcript written by the context module
-        tool = ReadTranscriptTool(coordinator)
-        result = await tool.execute({})
+@pytest.mark.asyncio
+async def test_host_history_search():
+    context = BoundaryContextManager()
+    for message in [
+        {"role": "user", "content": "Read the README"},
+        {"role": "assistant", "content": "Project structure"},
+        {"role": "user", "content": "Implement login"},
+        {"role": "assistant", "content": "The login system uses JWT"},
+    ]:
+        await context.add_message(message)
+    result = await ReadTranscriptTool(_host(context)).execute({"search": "login"})
+    assert result.success and "login" in result.output
+    assert "README" not in result.output
 
-        assert result.success is True
-        assert isinstance(result.output, str)
-        assert "Turn 1" in result.output
-        assert "Turn 2" in result.output
-        assert "What is Python?" in result.output
-        assert "What is asyncio?" in result.output
 
-    @pytest.mark.asyncio
-    async def test_read_specific_turn(self, tmp_path):
-        """3 turns, start_turn=2 end_turn=2 returns only turn 2."""
-        coordinator = _make_coordinator(tmp_path)
-        ctx = ManagedContextManager(session_dir=tmp_path)
+@pytest.mark.asyncio
+async def test_explicit_archive_precedes_host_without_import_or_execution(legacy_archive):
+    path, records = legacy_archive
+    context = BoundaryContextManager()
+    await context.add_message({"role": "user", "content": "Active host conversation"})
+    before = await context.get_messages()
+    coordinator = _host(context)
+    tool = ReadTranscriptTool(coordinator, legacy_transcript_paths={"saved": str(path)})
+    coordinator.get_capability.reset_mock()
+    result = await tool.execute({"archive_id": "saved"})
+    assert result.success
+    assert [entry["record"] for entry in result.output["records"]] == records[1:]
+    coordinator.get_capability.assert_not_called()
+    assert await context.get_messages() == before
+    live = await tool.execute({})
+    assert live.success and "Active host conversation" in live.output
+    assert "Original first question" not in live.output
 
-        coordinator.register_capability(
-            "context-managed.transcript_path", str(ctx.transcript_path)
-        )
 
-        # Add 3 turns (6 messages: user+assistant for each)
-        await ctx.add_message({"role": "user", "content": "First question here"})
-        await ctx.add_message({"role": "assistant", "content": "First answer here"})
-        await ctx.add_message({"role": "user", "content": "Second question here"})
-        await ctx.add_message({"role": "assistant", "content": "Second answer here"})
-        await ctx.add_message({"role": "user", "content": "Third question here"})
-        await ctx.add_message({"role": "assistant", "content": "Third answer here"})
-
-        # Read only turn 2
-        tool = ReadTranscriptTool(coordinator)
-        result = await tool.execute({"start_turn": 2, "end_turn": 2})
-
-        assert result.success is True
-        assert isinstance(result.output, str)
-        assert "Turn 2" in result.output
-        assert "Turn 1" not in result.output
-        assert "Turn 3" not in result.output
-        assert "Second question here" in result.output
-
-    @pytest.mark.asyncio
-    async def test_search_across_conversation(self, tmp_path):
-        """search='login' returns only matching turn, not README turn."""
-        coordinator = _make_coordinator(tmp_path)
-        ctx = ManagedContextManager(session_dir=tmp_path)
-
-        coordinator.register_capability(
-            "context-managed.transcript_path", str(ctx.transcript_path)
-        )
-
-        # Add a turn with README content (should NOT match "login")
-        await ctx.add_message(
-            {"role": "user", "content": "Read the README file for me"}
-        )
-        await ctx.add_message(
-            {
-                "role": "assistant",
-                "content": "The README describes the project structure.",
-            }
-        )
-
-        # Add a turn with login content (should match)
-        await ctx.add_message(
-            {"role": "user", "content": "How do I implement the login feature?"}
-        )
-        await ctx.add_message(
-            {"role": "assistant", "content": "The login system uses JWT tokens."}
-        )
-
-        # Search for "login" -- only the second turn should appear
-        tool = ReadTranscriptTool(coordinator)
-        result = await tool.execute({"search": "login"})
-
-        assert result.success is True
-        assert isinstance(result.output, str)
-        assert "login" in result.output.lower()
-        assert "README" not in result.output
-
-    @pytest.mark.asyncio
-    async def test_clear_then_read_empty(self, tmp_path):
-        """add messages, ctx.clear(), tool sees empty."""
-        coordinator = _make_coordinator(tmp_path)
-        ctx = ManagedContextManager(session_dir=tmp_path)
-
-        coordinator.register_capability(
-            "context-managed.transcript_path", str(ctx.transcript_path)
-        )
-
-        # Add some messages
-        await ctx.add_message({"role": "user", "content": "Hello world"})
-        await ctx.add_message({"role": "assistant", "content": "Hi there"})
-
-        # Clear the context -- archives old transcript, writes fresh header
-        await ctx.clear()
-
-        # Tool reads from the now-empty transcript (just a header, no turns)
-        tool = ReadTranscriptTool(coordinator)
-        result = await tool.execute({})
-
-        assert result.success is True
-        assert isinstance(result.output, str)
-        # After clear() the fresh transcript has no conversation turns
-        assert "Turn 1" not in result.output
-
-    @pytest.mark.asyncio
-    async def test_resume_then_read(self, tmp_path):
-        """create ctx1, add messages, create ctx2 from same dir, _load_from_transcript, tool reads original messages."""
-        coordinator = _make_coordinator(tmp_path)
-
-        # ctx1 writes the original messages to transcript
-        ctx1 = ManagedContextManager(session_dir=tmp_path)
-        coordinator.register_capability(
-            "context-managed.transcript_path", str(ctx1.transcript_path)
-        )
-
-        await ctx1.add_message({"role": "user", "content": "Original first question"})
-        await ctx1.add_message(
-            {"role": "assistant", "content": "Original first answer"}
-        )
-        await ctx1.add_message({"role": "user", "content": "Original second question"})
-        await ctx1.add_message(
-            {"role": "assistant", "content": "Original second answer"}
-        )
-
-        # ctx2 resumes from the same session directory
-        ctx2 = ManagedContextManager(session_dir=tmp_path)
-        await ctx2._load_from_transcript()
-
-        # Tool should still read the original messages written by ctx1
-        tool = ReadTranscriptTool(coordinator)
-        result = await tool.execute({})
-
-        assert result.success is True
-        assert isinstance(result.output, str)
-        assert "Turn 1" in result.output
-        assert "Turn 2" in result.output
-        assert "Original first question" in result.output
-        assert "Original second question" in result.output
+@pytest.mark.asyncio
+async def test_archive_reopen_not_legacy_resume(legacy_archive):
+    path, records = legacy_archive
+    coordinator = MagicMock()
+    coordinator.get_capability = AsyncMock(side_effect=AssertionError("no history access"))
+    first_tool = ReadTranscriptTool(coordinator, legacy_transcript_paths={"saved": str(path)})
+    first = await first_tool.execute({"archive_id": "saved", "max_records": 1})
+    reopened = ReadTranscriptTool(coordinator, legacy_transcript_paths={"saved": str(path)})
+    rest = await reopened.execute({
+        "archive_id": "saved", "offset_bytes": first.output["next_offset_bytes"]
+    })
+    assert first.success and rest.success and rest.output["eof"]
+    assert [entry["record"] for entry in first.output["records"] + rest.output["records"]] == records[1:]
+    coordinator.get_capability.assert_not_called()

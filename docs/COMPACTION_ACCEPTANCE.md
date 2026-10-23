@@ -4,6 +4,11 @@ Research and evaluation: 2026-09-21–22. All model generation used synthetic,
 disposable conversations. The affected Mac session was only read; no production
 session was replayed, restarted, installed into, or modified.
 
+This is a historical report for the evaluated revisions. Its Legacy execution,
+fallback and output-setting descriptions are not the current Boundary-only
+contract. See [Boundary policy](BOUNDARY_ENGINE.md) and
+[configuration](CONFIGURATION.md); the recorded results below are unchanged.
+
 ## Research contract and implementation choice
 
 Primary sources consulted:
