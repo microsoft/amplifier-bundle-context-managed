@@ -105,7 +105,7 @@ async def test_provider_wire_measurements_survive_context_compaction(equal_count
     manager.checkpoint_identity = lambda: identity
     source = originals(350000)
     source[3:3] = [
-        {"role": "assistant", "content": None,
+        {"role": "assistant", "content": "",
          "tool_calls": [{"id": "effect-done", "name": "save", "arguments": {}}]},
         {"role": "tool", "tool_call_id": "effect-done", "content": "COMPLETED-EFFECT-17"},
     ]
