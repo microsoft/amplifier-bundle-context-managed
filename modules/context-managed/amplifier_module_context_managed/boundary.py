@@ -564,9 +564,12 @@ class BoundaryContextManager:
                 start = self.summary[0] if self.summary else 0
                 base = self._assembled(messages[:start], self.summary, retain, carry) if self.summary else []
                 suffix = messages[end:]
-                reserve = len(json.dumps(pressure_view(base + suffix), ensure_ascii=False).encode())
+                # Use the same semantic estimate as the recovery trigger. Image
+                # transport bytes are not text tokens, including in the tail.
+                estimate_bytes = lambda rows: estimate_pressure(fitter, rows) * 4
+                reserve = estimate_bytes(pressure_view(base + suffix))
                 selected, recovery = select_window(messages[start:end], end - start, retain,
-                    selection_budget * 2 - reserve, self._human)
+                    selection_budget * 2 - reserve, self._human, estimate_bytes=estimate_bytes)
                 if recovery:
                     recovery["previousThroughMessage"] = start
                     recovery["sourceMessages"] = end

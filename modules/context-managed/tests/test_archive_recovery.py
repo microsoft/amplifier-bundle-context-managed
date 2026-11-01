@@ -112,3 +112,75 @@ async def test_compatible_native_prefix_is_kept_when_uncompacted_tail_is_oversiz
     assert all(a >= 2 for a,b in context.recovery['selectedRanges'])
     assert await context.get_messages() == original
     assert max(len(r.model_dump_json()) for r in provider.requests) < 120000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("placement", ["first", "tail"])
+async def test_archive_recovery_sizes_typed_images_as_media_and_preserves_payload(placement):
+    original = history()
+    image = {"type": "image", "source": {
+        "type": "base64", "media_type": "image/png", "data": "x" * 4_300_000}}
+    index = 1 if placement == "first" else len(original) - 3
+    original[index]["content"] = [{"type": "text", "text": "Required image task"}] + [copy.deepcopy(image) for _ in range(3)]
+    before = copy.deepcopy(original)
+    context = await manager(original)
+    provider = model()
+    measured = []
+
+    def count(request, **kwargs):
+        rows = [row.model_dump(exclude_none=True) for row in request.messages]
+        # Synthetic provider accounting: image transport bytes do not determine
+        # image tokens. The real provider still owns the final input count.
+        images = [b for row in rows if isinstance(row.get("content"), list)
+                  for b in row["content"] if b.get("type") == "image"]
+        assert all(b["source"]["data"] == image["source"]["data"] for b in images)
+        size = context._fitter()._estimate_tokens(rows) + 1000 * len(images)
+        measured.append((size, len(images)))
+        return {"estimated_input_tokens": size, "input_limit_tokens": 60000,
+                "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": size}}
+
+    provider.request_budget = count
+    await context.get_messages_for_request(provider=provider)
+    assert any(images == 3 for _, images in measured)
+    assert max(size for size, _ in measured) < 60000
+    provider.compact_context.assert_awaited_once()
+    provider.complete.assert_not_awaited()
+    assert context.recovery["omittedMessages"] > 200
+    assert await context.get_messages() == before == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [
+    "data:image/png;base64," + "x" * 200000,
+    [{"type": "text", "text": '{"type":"image","source":{"data":"' + "x" * 200000 + '"}}'}],
+    [{"type": "tool_call", "name": "fixture", "arguments": {"type": "image", "data": "x" * 200000}}],
+])
+async def test_recovery_still_rejects_genuinely_oversized_required_text(content):
+    original = history()
+    original[1]["content"] = content
+    context = await manager(original)
+    provider = model()
+    with pytest.raises(CompactionError, match="native_recovery_required_context_oversized"):
+        await context.get_messages_for_request(provider=provider)
+    assert not provider.requests
+    provider.compact_context.assert_not_awaited()
+    provider.complete.assert_not_awaited()
+    assert await context.get_messages() == original
+
+
+@pytest.mark.asyncio
+async def test_recovery_media_estimate_cannot_bypass_authoritative_input_limit():
+    original = history()
+    original[1]["content"] = [{"type": "image", "source": {
+        "type": "base64", "media_type": "image/png", "data": "x" * 4_300_000}}]
+    context = await manager(original)
+    provider = model()
+    provider.request_budget = lambda *args, **kwargs: {
+        "estimated_input_tokens": 70000, "input_limit_tokens": 60000,
+        "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 70000}}
+    with pytest.raises(CompactionError, match="native_input_oversized"):
+        await context.get_messages_for_request(provider=provider)
+    provider.compact_context.assert_not_awaited()
+    provider.complete.assert_not_awaited()
+    assert context.summary is None
+    assert await context.get_messages() == original

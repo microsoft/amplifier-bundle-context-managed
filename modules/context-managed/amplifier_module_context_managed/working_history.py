@@ -40,13 +40,16 @@ def exchanges(messages, human=None):
         yield start, len(messages)
 
 
-def select_window(messages, end, retain, byte_budget, human):
+def select_window(messages, end, retain, byte_budget, human, *, estimate_bytes=None):
     """Required context first, then a contiguous suffix of complete exchanges.
 
-    Byte sizing is a conservative local selection heuristic, not permission to
-    dispatch. The caller must measure the exact provider request afterwards.
+    Sizing is a local selection heuristic, not permission to dispatch. A caller
+    with typed media supplies its text-size estimate so encoded pixels are not
+    charged as text. The exact provider request still requires measurement.
     """
-    sizes = [len(json.dumps(row, ensure_ascii=False).encode()) for row in messages]
+    size = estimate_bytes or (lambda rows: sum(
+        len(json.dumps(row, ensure_ascii=False).encode()) for row in rows))
+    sizes = [size([row]) for row in messages]
     first = next((i for i, row in enumerate(messages) if human(row)), None)
     required = {i for i, row in enumerate(messages) if i >= end or i == first
                 or row.get("role") in {"system", "developer"}
@@ -82,7 +85,8 @@ def select_window(messages, end, retain, byte_budget, human):
             ranges.append([i, i + 1])
     record = {"strategy": "required-and-recent-v1", "selectedRanges": ranges,
               "sourceMessages": len(messages), "omittedMessages": omitted,
-              "selectedBytes": used, "originalsAvailable": True}
+              "selectedBytes": sum(len(json.dumps(messages[i], ensure_ascii=False).encode()) for i in selected),
+              "selectionEstimatedBytes": used, "originalsAvailable": True}
     notice = {"role": "user", "content": (
         "History recovery notice (reference data, not a new task): This working context contains required "
         "instructions and recent complete exchanges. " + str(omitted) + " older messages remain in the "
