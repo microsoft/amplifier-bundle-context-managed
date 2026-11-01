@@ -277,6 +277,7 @@ async def test_partial_note_never_commits_when_later_fragment_fails():
 @pytest.mark.asyncio
 async def test_native_window_is_preserved_across_repeat_checkpoint_and_resume():
     manager = context(durable_checkpoints=True)
+    manager.hooks = SimpleNamespace(emit=AsyncMock())
     identity = {"provider": "openai", "model": "gpt-6-astra"}
     manager.checkpoint_identity = lambda: identity
     originals = history()
@@ -325,12 +326,18 @@ async def test_native_window_is_preserved_across_repeat_checkpoint_and_resume():
 
     def count(request, **kwargs):
         count = sum(len(str(row.model_dump())) // 4 for row in request.messages)
-        return {"measurement": {"kind": "provider_count", "input_tokens": count}}
+        return {"measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": count,
+            "implementation": {"sdk_version": "3.29.0", "imported_bytes_verified": False,
+                "provider_source_sha256": "a" * 64, "count_source_sha256": "b" * 64}}}
 
     model.request_budget = count
     first = await manager.get_messages_for_request(provider=model)
     covered = manager.summary[0]
     first_checkpoint = copy.deepcopy(manager.summary[1])
+    first_event = copy.deepcopy([call.args[1] for call in manager.hooks.emit.call_args_list
+                                if call.args[0] == "context:compaction_finished"][-1])
+    assert first_event["measurement_before"]["implementation"]["sdk_version"] == "3.29.0"
+    assert first_event["measurement_after"]["implementation"]["imported_bytes_verified"] is False
     assert "Correction: budget $25" in str(first)
     for row in [
         {"role": "assistant", "content": "Additional results " * 1000},
@@ -340,6 +347,8 @@ async def test_native_window_is_preserved_across_repeat_checkpoint_and_resume():
         originals.append(row)
     second = await manager.get_messages_for_request(provider=model)
     assert len(windows) == 2
+    assert first_event == [call.args[1] for call in manager.hooks.emit.call_args_list
+                          if call.args[0] == "context:compaction_finished"][0]
     # Recompaction carries the entire previous native window plus only the
     # newly covered suffix. Canonical originals are never replayed behind it.
     rows = compact_inputs[1]

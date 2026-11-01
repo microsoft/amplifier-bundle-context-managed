@@ -21,7 +21,8 @@ async def test_count_failure_preserves_checkpoint_then_continues(phase):
         '__module__': 'amplifier_module_provider_openai._token_count'})
     failure = error_type('Could not check conversation size')
     ctx = BoundaryContextManager({'durable_checkpoints': True, 'max_tokens': 5000,
-        'summarize_trigger': .2, 'native_min_new_tokens': 0})
+        'summarize_trigger': .2, 'native_min_new_tokens': 0},
+        SimpleNamespace(emit=AsyncMock()))
     identity = {'provider': 'fixture', 'model': 'native'}
     ctx.checkpoint_identity = lambda: identity
     rows = [{'role': 'user', 'content': 'Produce a report'},
@@ -62,7 +63,9 @@ async def test_count_failure_preserves_checkpoint_then_continues(phase):
         tokens = 100 if compacted else 4500
         return {'dispatch': ChatRequest(messages=[Message(**row) for row in view]),
                 'budget_decision': {'estimated_input_tokens': tokens, 'input_limit_tokens': 5000,
-                    'measurement': {'kind': 'provider_count', 'source': 'fixture', 'input_tokens': tokens}}}
+                    'measurement': {'kind': 'provider_count', 'source': 'fixture', 'input_tokens': tokens,
+                        'implementation': {'sdk_version': '3.29.0', 'imported_bytes_verified': False,
+                            'provider_source_sha256': 'a' * 64, 'count_source_sha256': 'b' * 64}}}}
 
     with pytest.raises(error_type) as caught:
         await ctx.get_measured_request_view(provider=provider, retain_contents=[], count_view=count_view)
@@ -71,6 +74,11 @@ async def test_count_failure_preserves_checkpoint_then_continues(phase):
     assert ctx.summary_failure is None
     assert ctx.messages == rows
     provider.complete.assert_not_called()
+    if phase == 'result_count':
+        event = [call.args[1] for call in ctx.hooks.emit.call_args_list
+                 if call.args[0] == 'context:compaction_finished'][-1]
+        assert event['measurement_before']['implementation']['sdk_version'] == '3.29.0'
+        assert event['measurement_after'] is None
     recovered, compacted = True, False
     result = await ctx.get_measured_request_view(provider=provider, retain_contents=[], count_view=count_view)
     assert result['final_attempt']['budget_decision']['measurement']['input_tokens'] == 100
