@@ -59,6 +59,13 @@ summaries. Exact assembled-request counting still gates dispatch, required conte
 is never truncated, and a successful native result is reused on subsequent turns
 and restarts. Unified enables this policy on each boundary-engine mount.
 
+Recovery selection uses the existing semantic text estimate for both selected
+history and the reserved tail. Typed image payload bytes are preserved for the
+provider, without charging their base64 or URL transport as text. Text that
+quotes an image or contains image-like tool arguments remains text. This local
+estimate is not an image token count; authoritative provider measurement still
+checks the complete selected input before native compaction and dispatch.
+
 The first objective, recent turns, system/developer instructions, retained reminders
 and active-operation identities have explicit retention paths. Current unanswered or queued
 tool calls restrict the boundary; a partial live tool batch is never split. A portable
