@@ -17,7 +17,7 @@ from .errors import CompactionError
 
 from .interrupted import project as project_interrupted, unanswered
 from .checkpoint import digest
-from .measurement import RequestMeasurement, estimate_pressure
+from .measurement import RequestMeasurement, estimate_pressure, measurement_diagnostics
 from .summary import add_usage, public_messages, request_fits, source_fragments, summary_request
 
 
@@ -451,8 +451,10 @@ class BoundaryContextManager:
         finally:
             self._summary_progress_stats(stats, progress)
 
-    async def _native_view_tokens(self, provider, messages):
+    async def _native_view_tokens(self, provider, messages, diagnostics=None):
         """Opaque windows require a real count of the entire assembled input."""
+        if diagnostics is not None:
+            diagnostics["measurement"] = None
         check = getattr(provider, "request_budget", None)
         if not callable(check):
             return None
@@ -469,6 +471,8 @@ class BoundaryContextManager:
             return None
         measured = decision.get("measurement") or {}
         count = measured.get("input_tokens")
+        if diagnostics is not None:
+            diagnostics["measurement"] = measurement_diagnostics(decision)
         return count if measured.get("kind") == "provider_count" and type(count) is int and count >= 0 else None
 
     async def _prepare(self, provider, token_budget, retain, measurement=None):
@@ -579,11 +583,16 @@ class BoundaryContextManager:
             and end > (self.summary[0] if self.summary else 0)))
         input_limit = None
         measurement_kind = "public_estimate"
+        before_diagnostics = None
         if can_measure:
             pressure_tokens, input_limit, measurement_kind = await measurement.measure(fitter, pressure_view(assembled))
+            before_diagnostics = copy.deepcopy(measurement.diagnostics)
             measured_tokens = pressure_tokens if measurement_kind == "provider_count" else None
         else:
-            measured_tokens = await self._native_view_tokens(provider, pressure_view(assembled)) if use_native else None
+            direct_diagnostics = {}
+            measured_tokens = await self._native_view_tokens(
+                provider, pressure_view(assembled), direct_diagnostics) if use_native else None
+            before_diagnostics = direct_diagnostics.get("measurement")
             pressure_tokens = measured_tokens
             if measured_tokens is not None:
                 measurement_kind = "provider_count"
@@ -660,7 +669,8 @@ class BoundaryContextManager:
                              **({"recovery": recovery} if recovery else {}), **self.last_budget)
             outcome = "failed"
             stats = {"calls": 0, "input_tokens_before": assembled_tokens, "measurement_kind": measurement_kind,
-                     "native_selection": native_reason}
+                     "native_selection": native_reason,
+                     "measurement_before": before_diagnostics, "measurement_after": None}
             if recovery:
                 stats["recovery"] = recovery
             started = time.monotonic()
@@ -714,10 +724,14 @@ class BoundaryContextManager:
                             native_candidate = self._assembled(messages, (end, result["message"]), retain, carry)
                             if measurement is not None:
                                 candidate_tokens, _, candidate_kind = await measurement.measure(fitter, pressure_view(native_candidate))
+                                stats["measurement_after"] = copy.deepcopy(measurement.diagnostics)
                                 if candidate_kind != "provider_count":
                                     candidate_tokens = None
                             else:
-                                candidate_tokens = await self._native_view_tokens(provider, pressure_view(native_candidate))
+                                direct_diagnostics = {}
+                                candidate_tokens = await self._native_view_tokens(
+                                    provider, pressure_view(native_candidate), direct_diagnostics)
+                                stats["measurement_after"] = direct_diagnostics.get("measurement")
                             stats["native_input_tokens_after"] = candidate_tokens
                             if candidate_tokens is None or candidate_tokens >= assembled_tokens:
                                 raise CompactionError("native_no_reduction", "Native compaction returned an unmeasurable or non-reducing checkpoint.")
@@ -749,6 +763,7 @@ class BoundaryContextManager:
                     raise ValueError("Compaction did not reduce the request")
                 if stats.get("method") != "native" and measurement is not None and measurement_kind == "provider_count":
                     candidate_tokens, _, candidate_kind = await measurement.measure(fitter, pressure_view(candidate))
+                    stats["measurement_after"] = copy.deepcopy(measurement.diagnostics)
                     if candidate_kind == "provider_count":
                         stats["input_tokens_after"] = candidate_tokens
                         if candidate_tokens >= assembled_tokens:

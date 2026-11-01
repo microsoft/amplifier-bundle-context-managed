@@ -1,5 +1,7 @@
 """Native windows stay whole; portable notes split only when their budget requires it."""
 import asyncio
+import copy
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -40,6 +42,169 @@ async def context(**config):
 def finished(manager):
     return [call.args[1] for call in manager.hooks.emit.call_args_list
             if call.args[0] == "context:compaction_finished"][-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("equal_count", [False, True], ids=["two-reductions", "equal-count-rejection"])
+async def test_provider_wire_measurements_survive_context_compaction(equal_count):
+    """Real context + provider + SDK; fake only HTTP count/compact/create.
+
+    Counts are a deterministic serialized-length oracle or an explicit equal
+    count counterexample, not vendor tokenization or historical incident proof.
+    """
+    httpx = pytest.importorskip("httpx")
+    openai = pytest.importorskip("openai")
+    provider_module = pytest.importorskip("amplifier_module_provider_openai")
+    counts, compactions, completions, provider_events, attempts = [], [], [], [], []
+
+    async def transport(req):
+        body = json.loads(req.content)
+        if req.url.path.endswith("/input_tokens"):
+            count = max(1, len(json.dumps(body, sort_keys=True)) // 4)
+            if equal_count and "Current request:" in json.dumps(body):
+                count = 499947
+            counts.append((copy.deepcopy(body), count))
+            return httpx.Response(200, json={"input_tokens": count})
+        if req.url.path.endswith("/compact"):
+            # Deterministic native fixture retains objectives and completed
+            # results as JSON values; opaque state is synthetic, not a summary.
+            window = [copy.deepcopy(item) for item in body["input"]
+                      if item.get("role") == "user"
+                      or item.get("type") in {"function_call", "function_call_output"}]
+            window.append({"type": "compaction", "encrypted_content": f"fixture-{len(compactions)}"})
+            compactions.append((copy.deepcopy(body), copy.deepcopy(window)))
+            return httpx.Response(200, json={
+                "id": f"compact-{len(compactions)}", "object": "response.compaction", "created_at": 1,
+                "output": window, "usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110},
+            })
+        assert req.url.path.endswith("/responses")
+        completions.append(copy.deepcopy(body))
+        return httpx.Response(200, json={
+            "id": f"response-{len(completions)}", "object": "response", "created_at": 1,
+            "model": "gpt-6.1-sol", "status": "completed", "output": [],
+            "usage": {"input_tokens": counts[-1][1], "output_tokens": 0, "total_tokens": counts[-1][1]},
+        })
+
+    sdk = openai.AsyncOpenAI(api_key="synthetic-not-live",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(transport)))
+    provider = provider_module.OpenAIProvider(client=sdk, config={
+        "default_model": "gpt-6.1-sol", "use_streaming": False, "max_retries": 0,
+    })
+
+    async def observe(event, data):
+        if event == "provider:request_attribution":
+            provider_events.append(copy.deepcopy(data))
+
+    provider.coordinator = SimpleNamespace(hooks=SimpleNamespace(emit=observe))
+    manager = BoundaryContextManager({
+        "max_tokens": 200000, "summarize_trigger": .1, "native_min_new_tokens": 0,
+        "compaction_notice_enabled": False, "durable_checkpoints": True,
+        "archive_recovery": False,
+    }, SimpleNamespace(emit=AsyncMock()))
+    identity = {"provider": "openai", "model": "gpt-6.1-sol"}
+    manager.checkpoint_identity = lambda: identity
+    source = originals(350000)
+    source[3:3] = [
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "effect-done", "name": "save", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "effect-done", "content": "COMPLETED-EFFECT-17"},
+    ]
+    reminder = {"role": "user", "content": "Do not repeat completed effects.",
+                "metadata": {"source": "hook", "ephemeral": True, "persisted": True}}
+    source.insert(1, reminder)
+    await manager.set_messages(source)
+    tool = ToolSpec(name="save", description="Synthetic completed operation",
+                    parameters={"type": "object"})
+
+    async def measure(view):
+        request = ChatRequest(messages=[Message(**row) for row in view],
+                              model="gpt-6.1-sol", tools=[tool], max_output_tokens=1000)
+        budget = await provider.request_budget(request, context_estimate=0)
+        attempts.append(copy.deepcopy(budget))
+        return {"dispatch": request, "budget_decision": budget}
+
+    async def prepare():
+        return await manager.get_measured_request_view(
+            provider=provider, retain_contents=[reminder["content"]], count_view=measure)
+
+    try:
+        if equal_count:
+            with pytest.raises(CompactionError) as caught:
+                await prepare()
+            assert caught.value.code == "native_no_reduction"
+            event = finished(manager)
+            assert event["input_tokens_before"] == event["native_input_tokens_after"] == 499947
+            assert event["measurement_before"]["attribution"] == attempts[0]["measurement"]["attribution"]
+            assert event["measurement_after"]["attribution"] == attempts[1]["measurement"]["attribution"]
+            before_tag = event["measurement_before"]["attribution"]["request"]["payload_tag"]
+            after_tag = event["measurement_after"]["attribution"]["request"]["payload_tag"]
+            assert before_tag != after_tag
+            assert event["outcome"] == "failed" and "input_tokens_after" not in event
+            assert manager.summary is None and not completions and len(compactions) == 1
+            with pytest.raises(CompactionError) as unchanged:
+                await prepare()
+            assert unchanged.value.code == "previous_failure" and len(compactions) == 1
+            assert await manager.get_messages() == source
+            return
+
+        saved_events = []
+        for cycle in range(2):
+            result = await prepare()
+            event = copy.deepcopy(finished(manager))
+            saved_events.append(event)
+            assert event["input_tokens_after"] < event["input_tokens_before"]
+            assert event["measurement_before"]["attribution"]["count_id"] != event["measurement_after"]["attribution"]["count_id"]
+            final = result["final_attempt"]
+            assert event["measurement_after"]["attribution"] == final["budget_decision"]["measurement"]["attribution"]
+            assert final["budget_decision"]["estimated_input_tokens"] < final["budget_decision"]["input_limit_tokens"]
+            rows = result["base_view"]
+            assert next(row for row in rows if row.get("content") == reminder["content"]) == reminder
+            assert rows[0]["content"] == "Preserve original evidence."
+            covered = manager.summary[0]
+            request = final["dispatch"]
+            await provider.complete(request)
+            # Compare the actual count HTTP projection with actual create JSON.
+            projection = {key: value for key, value in completions[-1].items()
+                          if key in {"conversation", "input", "instructions", "model",
+                                     "parallel_tool_calls", "previous_response_id", "reasoning",
+                                     "text", "tool_choice", "tools", "truncation"}}
+            assert counts[-1][0] == projection
+            ready = [row for row in provider_events
+                     if row["operation"] == "responses.create" and row["stage"] == "dispatch_ready"][-1]
+            assert ready["binding"] == "matched"
+            assert ready["attribution"]["request"] == event["measurement_after"]["attribution"]["request"]
+            assert "COMPLETED-EFFECT-17" in json.dumps(completions[-1])
+            assert "FIRST objective: preserve ORBIT." in json.dumps(completions[-1])
+            assert "Latest correction: budget 25." in json.dumps(completions[-1])
+            if cycle == 0:
+                first_checkpoint = copy.deepcopy(manager.export_checkpoint(identity))
+                for row in [
+                    {"role": "assistant", "content": "Additional saved evidence " + "y" * 350000},
+                    {"role": "user", "content": "Latest correction: ship Tuesday."},
+                    {"role": "assistant", "content": "Confirmed next step"},
+                    {"role": "user", "content": "Current request: continue with retained results."},
+                ]:
+                    source.append(row)
+                    await manager.add_message(row)
+                first_covered = covered
+            else:
+                assert covered > first_covered
+                second_input = compactions[1][0]["input"]
+                first_window = compactions[0][1]
+                assert second_input[:len(first_window)] == first_window
+                assert "ship Tuesday" in json.dumps(completions[-1])
+                assert manager.export_checkpoint(identity) != first_checkpoint
+        assert len(compactions) == len(completions) == 2
+        assert saved_events[0] == [call.args[1] for call in manager.hooks.emit.call_args_list
+                                  if call.args[0] == "context:compaction_finished"][0]
+        assert saved_events[0]["measurement_after"] != saved_events[1]["measurement_after"]
+        assert await manager.get_messages() == source
+        assert sum(row.get("tool_call_id") == "effect-done" for row in source) == 1
+        event_json = json.dumps(saved_events)
+        assert all(secret not in event_json for secret in
+                   ("COMPLETED-EFFECT-17", "ORBIT", "fixture-0", "Do not repeat"))
+    finally:
+        await provider.close()
 
 
 @pytest.mark.asyncio
