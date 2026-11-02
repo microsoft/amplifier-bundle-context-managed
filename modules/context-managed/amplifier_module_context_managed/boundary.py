@@ -282,10 +282,10 @@ class BoundaryContextManager:
         if isinstance(text, dict):
             # The provider-owned checkpoint remains opaque and intact. Current
             # instructions/reminders are carried outside newly compacted input.
-            keep = [row for row in messages[:end] if row.get("role") == "system"
+            keep = [row for row in messages[:end] if row.get("role") in {"system", "developer"}
                     or row in carry or self._retained_reminder(row, retain)]
-            return self._project([row for row in keep if row.get("role") == "system"]
-                + [text] + [row for row in keep if row.get("role") != "system"]
+            return self._project([row for row in keep if row.get("role") in {"system", "developer"}]
+                + [text] + [row for row in keep if row.get("role") not in {"system", "developer"}]
                 + messages[end:], retain, carry, unknown)
         first = next((i for i, row in enumerate(messages) if self._human(row)), None)
         keep = [row for i, row in enumerate(messages[:end])

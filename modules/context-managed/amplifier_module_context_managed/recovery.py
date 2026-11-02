@@ -426,18 +426,23 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
             raise CompactionError("recovery_request_changed", "Recovery verification changed the request envelope, output reservation or hard allowance.")
         if after >= before:
             raise CompactionError("native_no_reduction", "The recovered ordinary request did not strictly reduce the effective prior request.")
-        if after > limit:
+        # The authoritative count proves reduction; the conservative estimate
+        # still owns hard safety, exactly as in ordinary RequestContext fitting.
+        if after_decision["estimated_input_tokens"] > limit:
             raise CompactionError("native_input_oversized", "The recovered ordinary request still exceeds its unchanged hard allowance.")
         verification = {"status": "verified", "before": before, "after": after,
                         "limit": limit, "throughMessage": end, "sha256": record["sha256"]}
         validated.checkpoint_status = {"status": "ready", "throughMessage": end, "originalsAvailable": True}
         activation = {key: copy.deepcopy(getattr(validated, key)) for key in fields}
+        final_snapshot = copy.deepcopy(final_envelope)
         acknowledged = await _guarded(check, install, copy.deepcopy(record), copy.deepcopy(verification))
         if isinstance(acknowledged, dict) and set(acknowledged) == {"sha256"}:
             acknowledged = acknowledged.get("sha256")
         if type(acknowledged) is not str or acknowledged != record["sha256"]:
             raise CompactionError("recovery_install_unconfirmed", "The host did not acknowledge this exact checkpoint; active state is unchanged and storage needs reconciliation.")
         check()
+        if final_envelope != final_snapshot:
+            raise CompactionError("recovery_request_changed", "The measured request changed during checkpoint installation; reconcile the stored checkpoint before continuing.")
         # No await and no destructive global restore between approval and activation.
         for key, value in activation.items():
             setattr(context, key, value)

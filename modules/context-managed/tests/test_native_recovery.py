@@ -928,13 +928,26 @@ async def test_explicit_recovery_authorized_prefix_rejects_changed_source():
 
 
 @pytest.mark.asyncio
-async def test_explicit_recovery_authorized_prefix_keeps_appended_evidence_outside_window():
-    state = request_recovery_fixture(prior=False)
+@pytest.mark.parametrize("fits", [False, True])
+async def test_explicit_recovery_authorized_prefix_keeps_appended_evidence_outside_window(fits):
+    rows = request_recovery_history()
+    if fits:
+        for row in rows[4:6]:
+            row["content"] = row["content"][:40]
+    state = request_recovery_fixture(prior=False, rows=rows)
     source_revision = {"messages": 4, "sha256": digest(state.ctx.messages[:4])}
-    result = await run_request_recovery(state, source_revision=source_revision)
-    assert result["recovery"]["throughMessage"] == 4
+    if fits:
+        result = await run_request_recovery(state, source_revision=source_revision)
+        assert result["recovery"]["throughMessage"] == 4
+        view = result["base_view"]
+    else:
+        with pytest.raises(CompactionError, match="native_input_oversized"):
+            await run_request_recovery(state, source_revision=source_revision)
+        assert_request_recovery_unchanged(state)
+        state.install.assert_not_called()
+        view = state.views[-1]
     for row in state.ctx.messages[4:]:
-        assert row in result["base_view"]
+        assert row in view
     for call in state.provider.compact_context.await_args_list:
         assert not any(row.content == state.ctx.messages[4]["content"] for row in call.args[0].messages)
 
@@ -981,3 +994,61 @@ async def test_pending_recovery_hook_runs_only_when_host_supplies_it():
         provider=None, retain_contents=[], count_view=count_view) is result
     ctx._prepare.assert_not_called()
     count_view.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior", [False, True])
+async def test_explicit_recovery_respects_conservative_hard_safety_estimate(prior):
+    state = request_recovery_fixture(prior=prior)
+    count = state.count_view.side_effect
+    async def conservative(view):
+        result = await count(view)
+        if any((row.get("metadata") or {}).get("canonical_window", [{}])[0].get("id") == "candidate"
+               for row in view):
+            assert result["budget_decision"]["measurement"]["input_tokens"] < REQUEST_LIMIT
+            result["budget_decision"]["estimated_input_tokens"] = REQUEST_LIMIT + 500
+        return result
+    state.count_view.side_effect = conservative
+    with pytest.raises(CompactionError, match="native_input_oversized"):
+        await run_request_recovery(state)
+    state.install.assert_not_called()
+    assert_request_recovery_unchanged(state)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior", [False, True])
+async def test_explicit_recovery_preserves_covered_canonical_developer_instructions(prior):
+    rows = request_recovery_history()
+    rows[3] = {"role": "developer", "content": "Canonical developer: retain exact receipt R-17."}
+    state = request_recovery_fixture(prior=prior, rows=rows)
+    result = await run_request_recovery(state)
+    current = [row for row in result["base_view"] if row["role"] == "developer"]
+    assert current == [rows[3]]
+    ordinary = state.ctx._assembled(state.ctx.messages, state.ctx.summary, (REQUEST_REMINDER,))
+    assert [row for row in ordinary if row["role"] == "developer"] == current
+    assert state.ctx.messages == rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["request", "decision"])
+async def test_explicit_recovery_rejects_final_envelope_mutation_during_install(field):
+    state = request_recovery_fixture()
+    count = state.count_view.side_effect
+    envelopes = []
+    async def retain(view):
+        result = await count(view)
+        envelopes.append(result)
+        return result
+    async def mutate(record, verification):
+        await asyncio.sleep(0)
+        if field == "request":
+            envelopes[-1]["dispatch"].messages[-1].content = "Changed after count"
+        else:
+            envelopes[-1]["budget_decision"]["input_limit_tokens"] += 1
+        return {"sha256": record["sha256"]}
+    state.count_view.side_effect = retain
+    state.install.side_effect = mutate
+    with pytest.raises(CompactionError, match="recovery_request_changed"):
+        await run_request_recovery(state)
+    state.install.assert_awaited_once()  # Storage may have committed: not rollback.
+    assert_request_recovery_unchanged(state)
