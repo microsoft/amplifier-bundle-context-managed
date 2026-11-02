@@ -66,6 +66,7 @@ class BoundaryContextManager:
         self._restored_progress = None
         self.persist_checkpoint = None
         self.recovery = None
+        self.run_pending_recovery = None
 
     @staticmethod
     def _same_prefix(record, messages):
@@ -141,6 +142,21 @@ class BoundaryContextManager:
         self._restored_progress = None
         self.summary_failure = None
         return restore_checkpoint(self, record, identity)
+
+    async def recover_request(self, *, provider, count_view, identity, save_progress,
+                              install, guard, retain_contents=(), target_bytes=1_500_000,
+                              progress=None, source_revision=None):
+        """Explicit verified recovery, never an automatic failure fallback.
+
+        The host supplies a count-only ordinary-request callback, a synchronous
+        ownership guard and an exact-SHA installation acknowledgement. See
+        recovery.recover_request for progress, retention and failure semantics.
+        """
+        from .recovery import recover_request
+        return await recover_request(self, provider=provider, count_view=count_view,
+            identity=identity, save_progress=save_progress, install=install, guard=guard,
+            retain_contents=retain_contents, target_bytes=target_bytes, progress=progress,
+            source_revision=source_revision)
 
     async def clear(self):
         await self.set_messages([])
@@ -865,6 +881,14 @@ class BoundaryContextManager:
             return result
 
     async def get_measured_request_view(self, *, provider, retain_contents, count_view, fit_output=None):
+        # A host may consume an explicitly requested one-shot recovery here.
+        # It owns intent/Stop/storage admission; absence does not change policy.
+        # The recovery entry acquires this context's lock itself.
+        if self.run_pending_recovery:
+            recovered = await self.run_pending_recovery(
+                provider=provider, retain_contents=retain_contents, count_view=count_view)
+            if recovered is not None:
+                return recovered
         async with self.lock:
             revision = self.revision
             measurement = RequestMeasurement(count_view)
@@ -906,6 +930,11 @@ async def mount_boundary(coordinator, config):
         coordinator.register_capability("context.checkpoint.export", context.export_checkpoint)
         coordinator.register_capability("context.checkpoint.restore", context.restore_checkpoint)
         coordinator.register_capability("context.checkpoint.status", lambda: copy.deepcopy(context.checkpoint_status))
+        coordinator.register_capability("context.recovery.recover", context.recover_request)
+        async def run_pending(**kwargs):
+            callback = coordinator.get_capability("context.recovery.run_pending")
+            return await callback(**kwargs) if callback else None
+        context.run_pending_recovery = run_pending
     # Hosts may provide an isolated utility provider without coupling this module
     # to provider SDKs. Resolve lazily because providers mount after context.
     if config.get("separate_summary_provider"):
