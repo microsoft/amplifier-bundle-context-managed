@@ -16,6 +16,19 @@ from .errors import CompactionError
 from .summary import request_fits
 
 
+def _pending_receipt(content):
+    """Queued results are protocol observations, not completed exchanges."""
+    if isinstance(content, list):
+        return any(_pending_receipt(block.get("text", ""))
+                   for block in content if isinstance(block, dict) and block.get("type") == "text")
+    try:
+        receipt = json.loads(content) if isinstance(content, str) else content
+    except (ValueError, TypeError):
+        return False
+    return (isinstance(receipt, dict) and receipt.get("status") in {"queued", "pending"}
+            and bool(receipt.get("job_id")))
+
+
 def settled_boundaries(messages, start=0):
     """Complete protocol exchanges, including batches of parallel tool calls."""
     pending = set()
@@ -29,15 +42,11 @@ def settled_boundaries(messages, start=0):
             if call.get("id"):
                 pending.add(call["id"])
         if row.get("role") == "tool":
-            try:
-                receipt = json.loads(row.get("content", ""))
-            except (TypeError, ValueError):
-                receipt = None
-            if not (isinstance(receipt, dict) and receipt.get("status") in {"queued", "pending"} and receipt.get("job_id")):
+            if not _pending_receipt(content):
                 pending.discard(row.get("tool_call_id"))
         if isinstance(content, list):
             for block in content:
-                if block.get("type") == "tool_result":
+                if block.get("type") == "tool_result" and not _pending_receipt(block.get("content")):
                     pending.discard(block.get("tool_use_id"))
         if not pending and index + 1 > start:
             boundaries.append(index + 1)
@@ -62,18 +71,32 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
         raise ValueError("target_bytes must be positive")
     source = copy.deepcopy(context.messages)
     source_digest = digest(source)
+    boundaries = settled_boundaries(source)
+    if source and (not boundaries or boundaries[-1] != len(source)):
+        raise CompactionError("native_checkpoint_invalid", "History contains an unresolved tool exchange; resolve its actual outcome before recovery.")
     if progress is not None:
-        state = context.restore_checkpoint(progress, identity)
-        if state["status"] != "restored" or not isinstance(context.summary[1], dict):
-            raise CompactionError("native_checkpoint_invalid", "Recovery progress is incompatible with this history or model.")
+        # Restore is destructive by design for a newly mounted context. Rejecting
+        # supplied recovery progress must not erase an already accepted checkpoint
+        # or its failure latch in this caller-owned context.
+        fields = ("summary", "summary_identity", "summary_failure", "_summary_progress",
+                  "_restored_progress", "evidence_refs", "recovery", "checkpoint_status")
+        prior = {key: copy.deepcopy(getattr(context, key)) for key in fields}
+        try:
+            state = context.restore_checkpoint(progress, identity)
+            if (state["status"] != "restored" or context.summary is None
+                    or not isinstance(context.summary[1], dict)
+                    or context.summary[0] not in boundaries
+                    or not provider.validate_compacted_context(context.summary[1])):
+                raise CompactionError("native_checkpoint_invalid", "Recovery progress is incompatible with this history or model.")
+        except BaseException:
+            for key, value in prior.items():
+                setattr(context, key, value)
+            raise
     elif context.summary is not None:
         raise ValueError("Pass the existing checkpoint explicitly as recovery progress")
     start, previous = context.summary if context.summary else (0, None)
     if previous and not provider.validate_compacted_context(previous):
         raise CompactionError("native_checkpoint_invalid", "The provider rejected the recovery checkpoint.")
-    boundaries = settled_boundaries(source, start)
-    if start < len(source) and (not boundaries or boundaries[-1] != len(source)):
-        raise CompactionError("native_checkpoint_invalid", "History contains an unresolved tool exchange; resolve its actual outcome before recovery.")
     while start < len(source):
         candidates = [end for end in boundaries if end > start]
         total = 0
@@ -88,8 +111,13 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
         candidate_index = candidates.index(end)
         while True:
             rows = ([copy.deepcopy(previous)] if previous else []) + copy.deepcopy(source[start:end])
+            # Current prompt instructions belong to the request envelope, not
+            # whichever historical batch happens to contain an old prompt.
+            instructions = [row.model_copy(deep=True) for row in template.messages
+                            if row.role in {"system", "developer"}]
+            roles = {row.role for row in instructions}
             request = template.model_copy(deep=True, update={
-                "messages": [Message(**row) for row in rows],
+                "messages": instructions + [Message(**row) for row in rows if row.get("role") not in roles],
                 "metadata": {**(template.metadata or {}), "purpose": "context-compaction",
                              "stream": False, "native_compaction_request_context": True}})
             fits, decision = await request_fits(provider, request)

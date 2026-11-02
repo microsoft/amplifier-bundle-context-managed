@@ -155,7 +155,10 @@ async def request_fits(provider, request):
     check = getattr(provider, "request_budget", None)
     if not callable(check):
         return True, None
-    decision = check(request, context_estimate=len(request.messages[-1].content))
+    # Empty/absent assistant content is valid protocol input. This fallback
+    # estimate must not prevent the authoritative provider measurement.
+    content = request.messages[-1].content if request.messages else None
+    decision = check(request, context_estimate=len(content) if content is not None else 0)
     if inspect.isawaitable(decision):
         decision = await decision
     if not isinstance(decision, dict):
