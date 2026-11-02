@@ -448,10 +448,11 @@ async def test_rejected_recovery_progress_must_end_at_settled_boundary(pending):
 
 
 @pytest.mark.asyncio
-async def test_recovery_null_final_content_reaches_authoritative_measurement():
-    rows = [{"role": "user", "content": "objective"}, {"role": "assistant", "content": None}]
+@pytest.mark.parametrize("empty", ["", []])
+async def test_recovery_empty_final_content_reaches_authoritative_measurement(empty):
+    rows = [{"role": "user", "content": "objective"}, {"role": "assistant", "content": empty}]
     ctx, provider = context(rows), fixture()
     await recover_native(ctx, provider, ChatRequest(messages=[]), IDENTITY, save_progress=lambda *args: None)
     assert provider.request_budget.await_count == provider.compact_context.await_count == 1
-    assert provider.request_budget.await_args.args[0].messages[-1].content is None
+    assert provider.request_budget.await_args.args[0].messages[-1].content == empty
     assert ctx.messages == rows
