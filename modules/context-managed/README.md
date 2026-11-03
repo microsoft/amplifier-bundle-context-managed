@@ -128,6 +128,20 @@ or queued background job. Current human instructions and the latest persisted
 reminder snapshot remain outside newly compacted input. Older replacement reminder
 snapshots stay in canonical history but leave the working request.
 
+Native checkpoints record canonical `omittedIndices` for covered messages kept
+outside the native window. An earlier carried instruction stays in subsequent
+requests even after newer inputs replace it in the latest-two carry set. Its
+offset is removed only when a later accepted native compaction includes that
+message; failed or cancelled candidates preserve the previous offsets. Canonical
+history and the provider's opaque native payload are not rewritten.
+
+These checkpoints use native-summary version 2 and checkpoint configuration
+contract 3. Older readers reject that contract instead of ignoring omission
+provenance. Compatible legacy native checkpoints without recovery exclusions
+remain readable. Legacy explicit recovery with a nonempty exclusion hash but no
+offsets is rejected because its retained messages cannot be reconstructed safely;
+original history remains available.
+
 An unanswered tool call before later ordinary input no longer pins all
 subsequent completed work. Request preparation adds a truthful unknown-outcome
 observation without editing history or running tools. Exact unresolved identities
