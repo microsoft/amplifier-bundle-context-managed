@@ -47,6 +47,9 @@ class BoundaryContextManager:
         self.messages = []
         self.revision = 0
         self.summary = None
+        # Canonical offsets deliberately kept outside this native summary.
+        # Unlike latest-two carry, these survive later ordinary input.
+        self.summary_omitted_indices = []
         self.factory = None
         self.is_compacting = False
         self.lock = asyncio.Lock()
@@ -116,6 +119,7 @@ class BoundaryContextManager:
             self._restored_progress = None
         if not keep_summary:
             self.summary = None
+            self.summary_omitted_indices = []
             self.summary_identity = None
             self.recovery = None
             self.checkpoint_status = {"status": "invalidated", "reason": "Canonical history was replaced.", "originalsAvailable": True}
@@ -211,12 +215,16 @@ class BoundaryContextManager:
         indices = set(humans[-2:] + snapshots[-1:])
         return [row for i, row in enumerate(messages) if i in indices]
 
-    def _project(self, messages, retain=(), carry=(), unknown=()):
+    def _visible_reminder(self, row, retain, carry):
         # Only the loop's explicitly marked, replaceable aggregate snapshots
-        # supersede one another. Arbitrary ephemeral messages remain evidence.
+        # supersede one another, even if omitted from an earlier native window.
+        # Explicit retention still wins; other ephemeral rows remain evidence.
+        return (not self._reminder_snapshot(row) or row in carry
+                or (isinstance(row.get("content"), str) and row["content"] in retain))
+
+    def _project(self, messages, retain=(), carry=(), unknown=()):
         rows = [copy.deepcopy(row) for row in messages
-                if not self._reminder_snapshot(row) or row in carry
-                or (isinstance(row.get("content"), str) and row["content"] in retain)]
+                if self._visible_reminder(row, retain, carry)]
         return project_interrupted(rows, unknown)
 
     def _boundary(self, messages, retain):
@@ -273,27 +281,39 @@ class BoundaryContextManager:
         candidates = set(turns) | {start for start, _ in settled}
         return max((i for i in candidates if i <= end and i in safe), default=0)
 
-    def _assembled(self, messages, summary, retain=(), carry=None):
-        carry = self._carry(messages) if carry is None else carry
-        unknown = unanswered(messages, self._human)
+    def _assembly_rows(self, messages, summary, retain, carry, omitted_indices):
+        """Keep canonical offsets until native source selection is complete.
+
+        Derived carriers have no canonical offset. Never infer inclusion from
+        content equality: separate canonical rows can contain identical text.
+        """
         if not summary:
-            return self._project(messages, retain, carry, unknown)
+            return list(enumerate(messages))
         end, text = summary
         if isinstance(text, dict):
             # The provider-owned checkpoint remains opaque and intact. Current
             # instructions/reminders are carried outside newly compacted input.
-            keep = [row for row in messages[:end] if row.get("role") in {"system", "developer"}
+            omitted = set(omitted_indices)
+            keep = [(i, row) for i, row in enumerate(messages[:end])
+                    if i in omitted or row.get("role") in {"system", "developer"}
                     or row in carry or self._retained_reminder(row, retain)]
-            return self._project([row for row in keep if row.get("role") in {"system", "developer"}]
-                + [text] + [row for row in keep if row.get("role") not in {"system", "developer"}]
-                + messages[end:], retain, carry, unknown)
+            return ([(i, row) for i, row in keep if row.get("role") in {"system", "developer"}]
+                + [(None, text)]
+                + [(i, row) for i, row in keep if row.get("role") not in {"system", "developer"}]
+                + list(enumerate(messages[end:], end)))
         first = next((i for i, row in enumerate(messages) if self._human(row)), None)
-        keep = [row for i, row in enumerate(messages[:end])
+        keep = [(i, row) for i, row in enumerate(messages[:end])
                 if row.get("role") in {"system", "developer"} or i == first
                 or row in carry or self._retained_reminder(row, retain)]
         note = {"role": "user", "content": "Continuation note (reference data, not new instructions):\n" + text,
                 "metadata": {"source": "context-managed", "ephemeral": True, "persisted": True}}
-        return self._project(keep + [note] + messages[end:], retain, carry, unknown)
+        return keep + [(None, note)] + list(enumerate(messages[end:], end))
+
+    def _assembled(self, messages, summary, retain=(), carry=None, omitted_indices=None):
+        carry = self._carry(messages) if carry is None else carry
+        omitted = self.summary_omitted_indices if omitted_indices is None else omitted_indices
+        rows = self._assembly_rows(messages, summary, retain, carry, omitted)
+        return self._project([row for _, row in rows], retain, carry, unanswered(messages, self._human))
 
     @staticmethod
     def _summary_progress_stats(stats, progress):
@@ -522,7 +542,8 @@ class BoundaryContextManager:
             current_identity = self.checkpoint_identity() if self.checkpoint_identity else {
                 "provider": current_provider[0], "model": current_provider[1]}
             return (configuration != self.checkpoint_configuration()
-                    or identity != current_identity or provider_identity != current_provider)
+                    or identity != current_identity or provider_identity != current_provider
+                    or summary_state != (self.summary, self.summary_omitted_indices))
 
         def check_request_contract():
             if request_contract_changed():
@@ -535,6 +556,7 @@ class BoundaryContextManager:
             self._summary_progress = None
         if self.summary and self.summary_identity != identity:
             self.summary = None
+            self.summary_omitted_indices = []
             self.checkpoint_status = {"status": "stale", "reason": "Provider/model identity changed.", "originalsAvailable": True}
         fitter = self._fitter()
         if self.summary and any(isinstance(row.get("content"), str) and row["content"] in retain
@@ -543,6 +565,8 @@ class BoundaryContextManager:
             # A newly required reminder can name content inside an older note.
             # Reassemble from originals instead of pretending it survived.
             self.summary = None
+            self.summary_omitted_indices = []
+        summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices))
         assembled = self._assembled(messages, self.summary, retain, carry)
         native = getattr(provider, "supports_native_compaction", None)
         validate_native = getattr(provider, "validate_compacted_context", None)
@@ -567,6 +591,7 @@ class BoundaryContextManager:
         covered_unknown = [call for call in unknown if call["source_message"] < end]
         recovery = None
         recovery_source = None
+        recovery_rows = None
         # Legacy archives may be much larger than one provider window. Select
         # the explicit archive-backed working view BEFORE any remote count.
         # Ordinary native failures still fail; this is not an error fallback.
@@ -590,6 +615,18 @@ class BoundaryContextManager:
                     recovery["previousThroughMessage"] = start
                     recovery["sourceMessages"] = end
                     recovery["selectedRanges"] = [[a + start, b + start] for a, b in recovery["selectedRanges"]]
+                    # select_window returns these canonical ranges in order,
+                    # with one archive notice before the first non-instruction.
+                    # Keep that sidecar instead of matching copied row contents.
+                    indices = [i for a, b in recovery["selectedRanges"] for i in range(a, b)]
+                    notice_at = next((n for n, i in enumerate(indices)
+                                      if messages[i].get("role") not in {"system", "developer"}), len(indices))
+                    if len(selected) != len(indices) + 1:
+                        raise ValueError("Archive selection lost canonical provenance")
+                    selected_rows = [(i, messages[i]) for i in indices]
+                    selected_rows.insert(notice_at, (None, selected[notice_at]))
+                    recovery_rows = self._assembly_rows(messages[:start], self.summary, retain, carry,
+                        self.summary_omitted_indices) + selected_rows
                     recovery_source = project_interrupted(base + selected, covered_unknown)
                     assembled = project_interrupted(recovery_source + copy.deepcopy(suffix), unknown)
         if self._summary_progress and self._summary_progress["source_revision"]["messages"] != end:
@@ -661,6 +698,27 @@ class BoundaryContextManager:
             # prefix. A failed unchanged prefix must not create a retry storm.
             source = recovery_source if recovery else self._assembled(messages[:end], self.summary, retain, carry)
             source = project_interrupted(source, covered_unknown)
+            candidate_omissions = []
+            native_source = None
+            if use_native:
+                previous_end = self.summary[0] if self.summary else 0
+                carried = {id(row) for row in carry}
+                excluded = {i for i, row in enumerate(messages[:end])
+                            if id(row) in carried or self._retained_reminder(row, retain)}
+                indexed = (recovery_rows if recovery else self._assembly_rows(
+                    messages[:end], self.summary, retain, carry, self.summary_omitted_indices))
+                indexed = [(i, row) for i, row in indexed if i not in excluded
+                           and self._visible_reminder(row, retain, carry)]
+                included = {i for i, row in indexed if i is not None
+                            and not (isinstance(template, ChatRequest) and row.get("role") == "system")
+                            and not (covered_unknown and row.get("role") == "user"
+                                     and (row.get("metadata") or {}).get("source") == "context-managed-interrupted")}
+                # Old omissions outside this source (including archive selection)
+                # remain external. A newly required row already in the old native
+                # window is not retroactively declared uncompacted.
+                candidate_omissions = sorted((set(self.summary_omitted_indices) - included)
+                    | {i for i in excluded if i >= previous_end})
+                native_source = project_interrupted([row for _, row in indexed], covered_unknown)
             fingerprint = digest({"source": source, "identity": identity,
                 "provider": getattr(summarizer, "name", type(summarizer).__name__),
                 "model": getattr(summarizer, "default_model", None), "configuration": self.checkpoint_configuration()})
@@ -692,7 +750,6 @@ class BoundaryContextManager:
                         try:
                             # Required persisted reminders stay verbatim outside the
                             # native window, so they must not also enter it.
-                            native_source = [row for row in source if row not in carry and not self._retained_reminder(row, retain)]
                             if isinstance(template, ChatRequest):
                                 # Reuse the loop's exact model/tools/options and
                                 # current instructions. Only settled history is
@@ -730,7 +787,8 @@ class BoundaryContextManager:
                                 raise CompactionError("native_checkpoint_invalid", "Native compaction returned no valid checkpoint.")
                             if not validate_native(result["message"]):
                                 raise CompactionError("native_checkpoint_invalid", "Native compaction returned an invalid transport envelope.")
-                            native_candidate = self._assembled(messages, (end, result["message"]), retain, carry)
+                            native_candidate = self._assembled(messages, (end, result["message"]), retain, carry,
+                                                               candidate_omissions)
                             if measurement is not None:
                                 candidate_tokens, _, candidate_kind = await measurement.measure(fitter, pressure_view(native_candidate))
                                 if candidate_kind != "provider_count":
@@ -762,7 +820,7 @@ class BoundaryContextManager:
                 if revision != self.revision:
                     outcome = "superseded"
                     raise RuntimeError("History changed during compaction; stale summary was discarded")
-                candidate = self._assembled(messages, (end, text), retain, carry)
+                candidate = self._assembled(messages, (end, text), retain, carry, candidate_omissions)
                 portable_baseline = messages if self.summary and isinstance(self.summary[1], dict) else assembled
                 if stats.get("method") != "native" and estimate_pressure(fitter, candidate) >= estimate_pressure(fitter, portable_baseline):
                     raise ValueError("Compaction did not reduce the request")
@@ -777,8 +835,13 @@ class BoundaryContextManager:
                     raise RuntimeError("History changed during compaction; stale summary was discarded")
                 check_summary_contract()
                 self.summary = (end, text)
+                self.summary_omitted_indices = candidate_omissions if isinstance(text, dict) else []
                 if recovery:
                     self.recovery = copy.deepcopy(recovery)
+                elif isinstance(self.recovery, dict) and self.recovery.get("kind") == "native-recovery":
+                    self.recovery = ({"kind": "native-recovery", "version": 1,
+                                      "retentionSha256": digest(candidate_omissions)}
+                                     if isinstance(text, dict) else None)
                 self.summary_failure = None
                 self._summary_progress = None
                 self.summary_identity = copy.deepcopy(identity)

@@ -475,6 +475,7 @@ REQUEST_STATE_FIELDS = (
     "messages", "revision", "summary", "summary_identity", "summary_failure",
     "_summary_progress", "_restored_progress", "evidence_refs",
     "checkpoint_status", "recovery", "last_budget", "is_compacting",
+    "summary_omitted_indices",
 )
 
 
@@ -765,6 +766,220 @@ async def test_explicit_recovery_installs_only_acknowledged_measured_candidate(p
                    for row in request.messages)
         assert baseline_request.messages[-1] not in request.messages
     assert_request_recovery_no_replay(state)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restore", [False, True], ids=["direct", "restored"])
+async def test_explicit_recovery_preserves_carried_input_after_carry_rotation(restore):
+    carried = {"role": "user", "content": "A: Keep audit stamp ALPHA-17 on every export."}
+    rows = [carried]
+    for i in range(6):
+        call_id = "write-1" if i == 0 else f"check-{i}"
+        rows.extend([
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": call_id, "name": "fixture", "arguments": {}}]},
+            {"role": "tool", "tool_call_id": call_id,
+             "content": f"Completed {call_id}. " + (
+                 REQUEST_NOTE + "x" * 1600 if i < 2 else "Verified.")},
+        ])
+    state = request_recovery_fixture(prior=False, rows=rows)
+    ctx = state.ctx
+    assert state.end == 5  # A and two exchanges covered; four exchanges stay verbatim.
+    recovered = await run_request_recovery(state)
+    assert recovered["recovery"]["status"] == "installed"
+    assert ctx.summary[0] == state.end
+    assert recovered["base_view"].count(carried) == 1
+    assert carried["content"] not in json.dumps(ctx.summary[1])
+    for call in state.provider.compact_context.await_args_list:
+        assert all(row.content != carried["content"] for row in call.args[0].messages)
+    assert recovered["measured_before"] > REQUEST_LIMIT >= recovered["measured_after"]
+    assert recovered["measured_after"] < recovered["measured_before"]
+    assert ctx.messages == rows
+    assert ctx.revision == state.before["revision"]
+    assert_request_recovery_no_replay(state)
+    compactions = state.provider.compact_context.await_count
+    assert compactions > 0
+
+    # Exercise real ordinary preparation, not the recovery-only rejection sentinel.
+    del ctx._prepare
+    later = [
+        {"role": "user", "content": "B: Check the CSV header."},
+        {"role": "user", "content": "C: Check the row count."},
+    ]
+    for row in later:
+        await ctx.add_message(row)
+    assert ctx._carry(ctx.messages) == later
+    # Fit must remain possible WITH A, not become possible only by dropping it.
+    assert request_recovery_size(request_recovery_dispatch(
+        recovered["base_view"] + later)) <= REQUEST_LIMIT
+    record = json.loads(json.dumps(ctx.export_checkpoint(IDENTITY)))
+    assert record["sourceRevision"] == {"messages": 5, "sha256": digest(rows[:5])}
+    if restore:
+        ctx = context(state.ctx.messages)
+        for name in ("checkpoint_identity", "preserve_evidence", "persist_checkpoint",
+                     "_summarize", "tool_executor"):
+            setattr(ctx, name, getattr(state.ctx, name))
+        assert ctx.restore_checkpoint(record, IDENTITY)["status"] == "restored"
+    revision = ctx.revision
+
+    async def count_view(view):
+        # The recovery fixture's callback guards the OLD active state; ordinary
+        # preparation needs a fresh callback with the same serialized count.
+        request = request_recovery_dispatch(view)
+        return {"dispatch": request,
+                "budget_decision": await state.provider.request_budget(request)}
+
+    ordinary = await ctx.get_measured_request_view(
+        provider=state.provider, retain_contents=(REQUEST_REMINDER,), count_view=count_view)
+    assert state.provider.compact_context.await_count == compactions
+    assert ctx.messages == rows + later
+    assert ctx.revision == revision
+    assert ctx.export_checkpoint(IDENTITY) == record
+    for envelope in [*state.envelopes, ordinary["final_attempt"]]:
+        assert envelope["dispatch"].max_output_tokens == 73
+        decision = envelope["budget_decision"]
+        assert decision["input_limit_tokens"] == REQUEST_LIMIT
+        assert decision["measurement"]["input_tokens"] == request_recovery_size(envelope["dispatch"])
+    assert ordinary["final_attempt"]["budget_decision"]["estimated_input_tokens"] <= REQUEST_LIMIT
+    state.ctx._summarize.assert_not_called()
+    state.ctx.persist_checkpoint.assert_not_called()
+    state.ctx.tool_executor.assert_not_called()
+    state.provider.complete.assert_not_called()
+    state.provider.stream.assert_not_called()
+    assert state.effects == {"write-1": 1}
+    assert ordinary["base_view"].count(carried) == 1
+    assert sum(row.role == "user" and row.content == carried["content"]
+               for row in ordinary["final_attempt"]["dispatch"].messages) == 1
+
+
+def omitted_input_fixture():
+    carried = {"role": "user", "content": "A: Keep audit stamp ALPHA-17 on every export."}
+    rows = [carried]
+    for i in range(6):
+        rows += [
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": f"settled-{i}", "name": "fixture", "arguments": {}}]},
+            {"role": "tool", "tool_call_id": f"settled-{i}",
+             "content": REQUEST_NOTE + "x" * 1600 if i < 2 else "Completed."},
+        ]
+    state = request_recovery_fixture(prior=False, rows=rows)
+    # Set the unchanged auxiliary reservation before creating any checkpoint.
+    state.ctx.config["native_compaction_max_output_tokens"] = 73
+    state.before = request_recovery_state(state.ctx)
+    return state, carried
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["accepted", "nonreducing", "cancelled"])
+async def test_omitted_input_adjacent_compaction_commits_provenance_only_on_acceptance(outcome):
+    state, carried = omitted_input_fixture()
+    ctx, provider = state.ctx, state.provider
+    await run_request_recovery(state)
+    assert ctx.summary_omitted_indices == [0]
+    del ctx._prepare
+    for text in ("B: Check headers.", "C: Check rows."):
+        await ctx.add_message({"role": "user", "content": text})
+    for i in range(6):
+        await ctx.add_message({"role": "assistant", "content": "", "tool_calls": [
+            {"id": f"adjacent-{i}", "name": "fixture", "arguments": {}}]})
+        await ctx.add_message({"role": "tool", "tool_call_id": f"adjacent-{i}",
+                               "content": "New settled evidence. " + ("z" * 600 if i < 2 else "done")})
+    originals = copy.deepcopy(ctx.messages)
+    accepted = ctx.export_checkpoint(IDENTITY)
+    assert ctx._carry(originals) == originals[13:15]
+    calls = provider.compact_context.await_count
+    counts = []
+
+    async def count_view(view):
+        request = request_recovery_dispatch(view)
+        counts.append(copy.deepcopy(request))
+        return {"dispatch": request, "budget_decision": await provider.request_budget(request)}
+
+    async def compact(request):
+        assert sum(row.content == carried["content"] for row in request.messages) == 1
+        assert not any(row.content in ("B: Check headers.", "C: Check rows.") for row in request.messages)
+        assert request.max_output_tokens == 73
+        assert request_recovery_size(request) <= REQUEST_LIMIT
+        assert ctx.export_checkpoint(IDENTITY) == accepted
+        if outcome == "cancelled":
+            raise asyncio.CancelledError()
+        window = request_recovery_window("adjacent")
+        window["content"] += " " + carried["content"]
+        window["metadata"]["canonical_window"][0]["summary"] = window["content"]
+        if outcome == "nonreducing":
+            window["metadata"]["canonical_window"][0]["padding"] = "n" * 10000
+        return {"kind": "native", "message": window}
+
+    provider.compact_context.side_effect = compact
+    # Ordinary persistence is allowed only after candidate acceptance.
+    ctx.persist_checkpoint = AsyncMock()
+    if outcome != "accepted":
+        error = asyncio.CancelledError if outcome == "cancelled" else CompactionError
+        with pytest.raises(error) as caught:
+            await ctx.get_measured_request_view(provider=provider, retain_contents=(), count_view=count_view)
+        if outcome == "nonreducing":
+            assert caught.value.code == "native_no_reduction"
+        assert ctx.export_checkpoint(IDENTITY) == accepted
+        assert ctx.summary_omitted_indices == [0]
+    else:
+        result = await ctx.get_measured_request_view(provider=provider, retain_contents=(), count_view=count_view)
+        assert ctx.summary[0] == 19 > accepted["summary"]["throughMessage"]
+        assert ctx.summary_omitted_indices == [13, 14]
+        assert result["final_attempt"]["budget_decision"]["estimated_input_tokens"] <= REQUEST_LIMIT
+        dispatch = result["final_attempt"]["dispatch"]
+        assert request_recovery_size(dispatch) < request_recovery_size(counts[0])
+        for content in ("B: Check headers.", "C: Check rows."):
+            assert sum(row.content == content for row in dispatch.messages) == 1
+        assert not any(row.content == carried["content"] for row in dispatch.messages)
+        assert sum(carried["content"] in str(row.content) for row in dispatch.messages) == 1
+        record = json.loads(json.dumps(ctx.export_checkpoint(IDENTITY)))
+        restored = BoundaryContextManager(copy.deepcopy(ctx.config))
+        restored.messages = copy.deepcopy(originals)
+        assert restored.restore_checkpoint(record, IDENTITY)["status"] == "restored"
+        assert restored.summary_omitted_indices == ctx.summary_omitted_indices
+        assert restored._assembled(originals, restored.summary) == ctx._assembled(originals, ctx.summary)
+    assert provider.compact_context.await_count == calls + 1
+    assert ctx.messages == originals
+    assert state.effects == {"write-1": 1}
+    ctx.tool_executor.assert_not_called()
+    ctx._summarize.assert_not_called()
+    provider.complete.assert_not_called()
+    provider.stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("indices", [[True], [-1], [5], [0, 0], [1, 0], "0", None])
+async def test_checkpoint_rejects_malformed_omission_provenance(indices):
+    state, _ = omitted_input_fixture()
+    await run_request_recovery(state)
+    record = state.ctx.export_checkpoint(IDENTITY)
+    record["summary"]["omittedIndices"] = indices
+    record["sha256"] = digest({k: v for k, v in record.items() if k != "sha256"})
+    restored = BoundaryContextManager(copy.deepcopy(state.ctx.config))
+    restored.messages = copy.deepcopy(state.ctx.messages)
+    assert restored.restore_checkpoint(record, IDENTITY)["status"] == "rejected"
+    assert restored.summary is None and restored.summary_omitted_indices == []
+    assert restored.messages == state.ctx.messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", [False, True])
+async def test_legacy_recovery_hash_requires_reconstructible_omissions(empty):
+    state = request_recovery_fixture(prior=False) if empty else omitted_input_fixture()[0]
+    await run_request_recovery(state)
+    assert state.ctx.summary_omitted_indices == ([] if empty else [0])
+    record = state.ctx.export_checkpoint(IDENTITY)
+    del record["summary"]["omittedIndices"]
+    record["summary"].pop("version", None)
+    record["configurationVersion"] = 2
+    # A legacy empty binding is safe; a nonempty one cannot reveal its offsets.
+    record["recovery"] = {"kind": "native-recovery", "version": 1,
+                          "retentionSha256": digest([] if empty else [0])}
+    record["sha256"] = digest({k: v for k, v in record.items() if k != "sha256"})
+    restored = BoundaryContextManager(copy.deepcopy(state.ctx.config))
+    restored.messages = copy.deepcopy(state.ctx.messages)
+    assert restored.restore_checkpoint(record, IDENTITY)["status"] == ("restored" if empty else "rejected")
+    assert restored.summary_omitted_indices == []
 
 
 @pytest.mark.asyncio

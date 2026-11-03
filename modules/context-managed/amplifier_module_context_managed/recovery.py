@@ -54,6 +54,14 @@ def _retention_binding(excluded, through):
             "retentionSha256": digest(sorted(i for i in excluded if i < through))}
 
 
+def _check_retention(context, excluded):
+    # Carry can rotate after saved progress. Historical omissions must survive;
+    # new exclusions inside prior coverage need evidence they were omitted then.
+    through = context.summary[0]
+    if not {i for i in excluded if i < through} <= set(context.summary_omitted_indices):
+        raise CompactionError("recovery_retention_changed", "Saved progress does not verify the required retained canonical rows.")
+
+
 def _pending_receipt(content):
     """Queued results are protocol observations, not completed exchanges."""
     if isinstance(content, list):
@@ -106,8 +114,9 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
 
     ``through_message`` bounds work without truncating canonical history.
     ``exclude_indices`` retains canonical offsets/digests while omitting those
-    rows from batches. Bounded/excluding recovery requires matching retention
-    metadata on supplied progress. ``guard`` fences every count, compact and save.
+    rows from batches. Supplied progress must verify any exclusions inside its
+    prefix; historical omissions carry forward even after retention rotates.
+    ``guard`` fences every count, compact and save.
     """
     _check_guard(guard)
     if not provider.supports_native_compaction():
@@ -132,7 +141,7 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
         # Restore is destructive by design for a newly mounted context. Rejecting
         # supplied recovery progress must not erase an already accepted checkpoint
         # or its failure latch in this caller-owned context.
-        fields = ("summary", "summary_identity", "summary_failure", "_summary_progress",
+        fields = ("summary", "summary_omitted_indices", "summary_identity", "summary_failure", "_summary_progress",
                   "_restored_progress", "evidence_refs", "recovery", "checkpoint_status")
         prior = {key: copy.deepcopy(getattr(context, key)) for key in fields}
         try:
@@ -142,8 +151,7 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
                     or context.summary[0] not in boundaries
                     or not provider.validate_compacted_context(context.summary[1])):
                 raise CompactionError("native_checkpoint_invalid", "Recovery progress is incompatible with this history or model.")
-            if bind_retention and context.recovery != _retention_binding(excluded, context.summary[0]):
-                raise CompactionError("recovery_retention_changed", "Saved progress does not verify the required retained canonical rows.")
+            _check_retention(context, excluded)
         except BaseException:
             for key, value in prior.items():
                 setattr(context, key, value)
@@ -202,17 +210,24 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
         if digest(context.messages) != source_digest:
             raise RuntimeError("History changed during recovery; new checkpoint was not installed")
         prior_summary, prior_identity, prior_recovery = context.summary, context.summary_identity, context.recovery
+        prior_omissions = context.summary_omitted_indices
         try:
             context.summary = (end, copy.deepcopy(message))
+            # Batches begin after the covered prefix; they never consume its
+            # external omissions merely because those rows left current carry.
+            context.summary_omitted_indices = sorted(set(prior_omissions)
+                | {i for i in excluded if start <= i < end})
             context.summary_identity = copy.deepcopy(identity)
-            if bind_retention:
-                context.recovery = _retention_binding(excluded, end)
+            if bind_retention and (context.recovery is None or
+                    isinstance(context.recovery, dict) and context.recovery.get("kind") == "native-recovery"):
+                context.recovery = _retention_binding(context.summary_omitted_indices, end)
             record = context.export_checkpoint(identity)
             await _guarded(guard, save_progress, record, {"fromMessage": start, "throughMessage": end,
                 "totalMessages": len(source), "inputTokens": decision["input_tokens"],
                 "inputLimit": decision["input_limit_tokens"]})
         except BaseException:
             context.summary, context.summary_identity = prior_summary, prior_identity
+            context.summary_omitted_indices = prior_omissions
             context.recovery = prior_recovery
             raise
         start, previous = end, message
@@ -276,7 +291,7 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
         identity_getter, preserve = context.checkpoint_identity, context.preserve_evidence
         provider_identity = (getattr(provider, "name", type(provider).__name__),
                              getattr(provider, "default_model", None))
-        fields = ("summary", "summary_identity", "summary_failure", "_summary_progress",
+        fields = ("summary", "summary_omitted_indices", "summary_identity", "summary_failure", "_summary_progress",
                   "_restored_progress", "evidence_refs", "recovery", "checkpoint_status")
         originals = {key: copy.deepcopy(getattr(context, key)) for key in fields}
 
@@ -315,8 +330,9 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
 
         baseline = fresh()
         carry = baseline._carry(source)
+        carried = {id(row) for row in carry}
         excluded = {i for i, row in enumerate(source)
-                    if row in carry or baseline._retained_reminder(row, retain)}
+                    if id(row) in carried or baseline._retained_reminder(row, retain)}
         end = min(baseline._boundary(source, retain), maximum)
         boundaries = settled_boundaries(source)
 
@@ -336,7 +352,7 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
 
         active_record = None
         if originals["summary"] is not None:
-            for key in ("summary", "summary_identity", "evidence_refs", "recovery"):
+            for key in ("summary", "summary_omitted_indices", "summary_identity", "evidence_refs", "recovery"):
                 setattr(baseline, key, copy.deepcopy(originals[key]))
             active_record = baseline.export_checkpoint(identity)
             baseline = validate(active_record)
@@ -352,14 +368,7 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
             through = staged.summary[0]
             if not prior_end <= through <= end:
                 raise CompactionError("native_checkpoint_invalid", "Recovery progress would rewind accepted coverage or cross the eligible prefix.")
-            binding = _retention_binding(excluded, through)
-            if staged.recovery != binding:
-                # Only the actual accepted checkpoint may lack new metadata.
-                # Opaque saved progress alone cannot prove exclusion compatibility.
-                if (seed != active_record or staged.recovery is not None
-                        or any(i < through for i in excluded)):
-                    raise CompactionError("recovery_retention_changed", "Saved progress cannot verify the current retained canonical indices.")
-                staged.recovery = binding
+            _check_retention(staged, excluded)
 
         fitter = baseline._fitter()
         policy_limit = fitter._calculate_budget(None, provider)
@@ -378,8 +387,9 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
             raise CompactionError("recovery_evidence_required", "The host did not return durable references for the full canonical history.")
         staged.evidence_refs = copy.deepcopy(refs)
 
-        def view(summary):
-            rows = baseline._assembled(source, summary, retain, carry)
+        def view(candidate):
+            rows = candidate._assembled(source, candidate.summary, retain, carry,
+                                        candidate.summary_omitted_indices)
             if factory:
                 rows = [{"role": "system", "content": system_prompt}] + [
                     row for row in rows if row.get("role") != "system"
@@ -399,22 +409,25 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
             count, _estimate, limit, _source = measured
             return count, limit, envelope
 
-        before, hard_limit, before_envelope = await _guarded(check, measure, view(baseline.summary))
+        before, hard_limit, before_envelope = await _guarded(check, measure, view(baseline))
         template = before_envelope["dispatch"].model_copy(deep=True)
         before_decision = copy.deepcopy(before_envelope["budget_decision"])
         limit = min(policy_limit, hard_limit)
         # Seed with freshly preserved references, never with a caller's stale refs.
         seed = staged.export_checkpoint(identity) if staged.summary else None
+        start = staged.summary[0] if staged.summary else 0
+        expected_omissions = sorted(set(staged.summary_omitted_indices)
+            | {i for i in excluded if start <= i < end})
         record = await _guarded(check, recover_native, staged, provider, template, identity,
             save_progress=save_progress, target_bytes=target_bytes, progress=seed,
             through_message=end, exclude_indices=excluded, guard=check)
         # Restore the exact export against full originals on a disposable context.
         # Active restore would erase latches/progress even on rejection.
         validated = validate(record)
-        if (validated.summary[0] != end or validated.recovery != _retention_binding(excluded, end)
+        if (validated.summary[0] != end or validated.summary_omitted_indices != expected_omissions
                 or validated.export_checkpoint(identity) != record):
             raise CompactionError("native_checkpoint_invalid", "The candidate checkpoint did not round-trip exactly.")
-        final_view = view(validated.summary)
+        final_view = view(validated)
         after, final_limit, final_envelope = await _guarded(check, measure, final_view)
         final_request, after_decision = final_envelope["dispatch"], final_envelope["budget_decision"]
         instructions = lambda request: [row.model_dump() for row in request.messages
