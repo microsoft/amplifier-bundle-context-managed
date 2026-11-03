@@ -215,16 +215,17 @@ class BoundaryContextManager:
         indices = set(humans[-2:] + snapshots[-1:])
         return [row for i, row in enumerate(messages) if i in indices]
 
-    def _visible_reminder(self, row, retain, carry):
+    def _visible_reminder(self, row, retain, carry, *, native=False):
         # Only the loop's explicitly marked, replaceable aggregate snapshots
         # supersede one another, even if omitted from an earlier native window.
         # Explicit retention still wins; other ephemeral rows remain evidence.
-        return (not self._reminder_snapshot(row) or row in carry
+        return (not self._reminder_snapshot(row)
+                or (any(row is carried for carried in carry) if native else row in carry)
                 or (isinstance(row.get("content"), str) and row["content"] in retain))
 
-    def _project(self, messages, retain=(), carry=(), unknown=()):
+    def _project(self, messages, retain=(), carry=(), unknown=(), *, native=False):
         rows = [copy.deepcopy(row) for row in messages
-                if self._visible_reminder(row, retain, carry)]
+                if self._visible_reminder(row, retain, carry, native=native)]
         return project_interrupted(rows, unknown)
 
     def _boundary(self, messages, retain):
@@ -294,9 +295,10 @@ class BoundaryContextManager:
             # The provider-owned checkpoint remains opaque and intact. Current
             # instructions/reminders are carried outside newly compacted input.
             omitted = set(omitted_indices)
+            carried = {id(row) for row in carry}
             keep = [(i, row) for i, row in enumerate(messages[:end])
                     if i in omitted or row.get("role") in {"system", "developer"}
-                    or row in carry or self._retained_reminder(row, retain)]
+                    or id(row) in carried or self._retained_reminder(row, retain)]
             return ([(i, row) for i, row in keep if row.get("role") in {"system", "developer"}]
                 + [(None, text)]
                 + [(i, row) for i, row in keep if row.get("role") not in {"system", "developer"}]
@@ -313,7 +315,8 @@ class BoundaryContextManager:
         carry = self._carry(messages) if carry is None else carry
         omitted = self.summary_omitted_indices if omitted_indices is None else omitted_indices
         rows = self._assembly_rows(messages, summary, retain, carry, omitted)
-        return self._project([row for _, row in rows], retain, carry, unanswered(messages, self._human))
+        return self._project([row for _, row in rows], retain, carry, unanswered(messages, self._human),
+                             native=bool(summary and isinstance(summary[1], dict)))
 
     @staticmethod
     def _summary_progress_stats(stats, progress):
@@ -543,7 +546,7 @@ class BoundaryContextManager:
                 "provider": current_provider[0], "model": current_provider[1]}
             return (configuration != self.checkpoint_configuration()
                     or identity != current_identity or provider_identity != current_provider
-                    or summary_state != (self.summary, self.summary_omitted_indices))
+                    or summary_state != (self.summary, self.summary_omitted_indices, self.summary_identity))
 
         def check_request_contract():
             if request_contract_changed():
@@ -566,7 +569,7 @@ class BoundaryContextManager:
             # Reassemble from originals instead of pretending it survived.
             self.summary = None
             self.summary_omitted_indices = []
-        summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices))
+        summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
         assembled = self._assembled(messages, self.summary, retain, carry)
         native = getattr(provider, "supports_native_compaction", None)
         validate_native = getattr(provider, "validate_compacted_context", None)
@@ -708,9 +711,15 @@ class BoundaryContextManager:
                 indexed = (recovery_rows if recovery else self._assembly_rows(
                     messages[:end], self.summary, retain, carry, self.summary_omitted_indices))
                 indexed = [(i, row) for i, row in indexed if i not in excluded
-                           and self._visible_reminder(row, retain, carry)]
+                           and self._visible_reminder(row, retain, carry, native=True)]
+                # Match explicit recovery: fresh instructions override only
+                # their own roles; absent roles fall back to canonical input.
+                native_instructions = ([row.model_copy(deep=True) for row in template.messages
+                                        if row.role in {"system", "developer"}]
+                                       if isinstance(template, ChatRequest) else [])
+                instruction_roles = {row.role for row in native_instructions}
                 included = {i for i, row in indexed if i is not None
-                            and not (isinstance(template, ChatRequest) and row.get("role") == "system")
+                            and row.get("role") not in instruction_roles
                             and not (covered_unknown and row.get("role") == "user"
                                      and (row.get("metadata") or {}).get("source") == "context-managed-interrupted")}
                 # Old omissions outside this source (including archive selection)
@@ -754,8 +763,8 @@ class BoundaryContextManager:
                                 # Reuse the loop's exact model/tools/options and
                                 # current instructions. Only settled history is
                                 # compacted; current-turn overlays stay outside.
-                                rows = [row.model_copy(deep=True) for row in template.messages if row.role == "system"]
-                                rows += [Message(**row) for row in native_source if row.get("role") != "system"]
+                                rows = native_instructions + [Message(**row) for row in native_source
+                                                              if row.get("role") not in instruction_roles]
                                 request = template.model_copy(deep=True, update={"messages": rows})
                             else:
                                 request = ChatRequest(messages=[Message(**row) for row in native_source])
@@ -846,6 +855,10 @@ class BoundaryContextManager:
                 self._summary_progress = None
                 self.summary_identity = copy.deepcopy(identity)
                 self.checkpoint_status = {"status": "ready", "throughMessage": end, "originalsAvailable": True}
+                # Our accepted commit advances the expected state. Observers
+                # and final fitting may suspend, but may not replace this view's
+                # checkpoint behind an unchanged canonical history revision.
+                summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
                 assembled, outcome = candidate, "completed"
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -900,6 +913,7 @@ class BoundaryContextManager:
                 self.is_compacting = False
                 await self._emit("context:compaction_finished", revision=revision, outcome=outcome,
                                  elapsed_ms=round((time.monotonic() - started) * 1000), **stats)
+        check_request_contract()
         protected = list(retain)
         if self.summary:
             protected.append(next(row["content"] for row in assembled if (row.get("metadata") or {}).get("source") == "context-managed"))
@@ -908,10 +922,12 @@ class BoundaryContextManager:
                 "metadata": {"ephemeral": True, "persisted": True, "source": "context-managed-operations"}})
             protected.append(manifest)
         await fitter.set_messages(assembled)
+        check_request_contract()
         if self.factory:
             async def captured_system_prompt():
                 return system_prompt
             await fitter.set_system_prompt_factory(captured_system_prompt)
+        check_request_contract()
         return fitter, protected
 
     async def _budget_failure(self, error):
@@ -929,6 +945,7 @@ class BoundaryContextManager:
             revision = self.revision
             try:
                 fitter, retain = await self._prepare(provider, token_budget, retain_contents)
+                summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
                 result = await fitter.get_messages_for_request_retaining(retain_contents=retain, provider=provider,
                     token_budget=token_budget, hard_fit=hard_fit)
             except asyncio.CancelledError:
@@ -941,6 +958,8 @@ class BoundaryContextManager:
                 raise
             if revision != self.revision:
                 raise RuntimeError("History changed during request preparation")
+            if summary_state != (self.summary, self.summary_omitted_indices, self.summary_identity):
+                raise RuntimeError("Checkpoint changed during request preparation")
             return result
 
     async def get_measured_request_view(self, *, provider, retain_contents, count_view, fit_output=None):
@@ -957,6 +976,7 @@ class BoundaryContextManager:
             measurement = RequestMeasurement(count_view)
             try:
                 fitter, retain = await self._prepare(provider, None, retain_contents, measurement)
+                summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
                 result = await fitter.get_measured_request_view(provider=provider, retain_contents=retain,
                     count_view=measurement.count, fit_output=fit_output)
             except asyncio.CancelledError:
@@ -968,10 +988,13 @@ class BoundaryContextManager:
                 await self._budget_failure(error)
                 raise
             result["count_calls"] += measurement.preflight_calls - measurement.reused_calls
-            if revision != self.revision:
+            if (revision != self.revision
+                    or summary_state != (self.summary, self.summary_omitted_indices, self.summary_identity)):
                 if result.get("transaction"):
                     result["transaction"].rollback()
-                raise RuntimeError("History changed during request preparation")
+                if revision != self.revision:
+                    raise RuntimeError("History changed during request preparation")
+                raise RuntimeError("Checkpoint changed during request preparation")
             return result
 
 

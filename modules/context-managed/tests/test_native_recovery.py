@@ -870,7 +870,7 @@ def omitted_input_fixture():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["accepted", "nonreducing", "cancelled"])
+@pytest.mark.parametrize("outcome", ["accepted", "nonreducing", "cancelled", "observer_restore"])
 async def test_omitted_input_adjacent_compaction_commits_provenance_only_on_acceptance(outcome):
     state, carried = omitted_input_fixture()
     ctx, provider = state.ctx, state.provider
@@ -898,6 +898,8 @@ async def test_omitted_input_adjacent_compaction_commits_provenance_only_on_acce
     async def compact(request):
         assert sum(row.content == carried["content"] for row in request.messages) == 1
         assert not any(row.content in ("B: Check headers.", "C: Check rows.") for row in request.messages)
+        assert [row.content for row in request.messages if row.role == "developer"] == [
+            "Current developer CSV instructions."]
         assert request.max_output_tokens == 73
         assert request_recovery_size(request) <= REQUEST_LIMIT
         assert ctx.export_checkpoint(IDENTITY) == accepted
@@ -911,14 +913,22 @@ async def test_omitted_input_adjacent_compaction_commits_provenance_only_on_acce
         return {"kind": "native", "message": window}
 
     provider.compact_context.side_effect = compact
+    if outcome == "observer_restore":
+        async def observer(event, data):
+            if event == "context:compaction_finished" and data.get("outcome") == "completed":
+                assert ctx.restore_checkpoint(accepted, IDENTITY)["status"] == "restored"
+        ctx.hooks = SimpleNamespace(emit=AsyncMock(side_effect=observer))
     # Ordinary persistence is allowed only after candidate acceptance.
     ctx.persist_checkpoint = AsyncMock()
     if outcome != "accepted":
-        error = asyncio.CancelledError if outcome == "cancelled" else CompactionError
+        error = (asyncio.CancelledError if outcome == "cancelled" else
+                 RuntimeError if outcome == "observer_restore" else CompactionError)
         with pytest.raises(error) as caught:
             await ctx.get_measured_request_view(provider=provider, retain_contents=(), count_view=count_view)
         if outcome == "nonreducing":
             assert caught.value.code == "native_no_reduction"
+        if outcome == "observer_restore":
+            assert "changed" in str(caught.value).lower()
         assert ctx.export_checkpoint(IDENTITY) == accepted
         assert ctx.summary_omitted_indices == [0]
     else:
@@ -947,6 +957,62 @@ async def test_omitted_input_adjacent_compaction_commits_provenance_only_on_acce
     provider.stream.assert_not_called()
 
 
+def test_native_assembly_does_not_resurrect_equal_valued_covered_carry():
+    rows = [
+        {"role": "user", "content": "continue"},
+        {"role": "assistant", "content": "Already in native state."},
+        {"role": "user", "content": "continue"},
+        {"role": "user", "content": "Finish."},
+    ]
+    ctx = context(rows)
+    ctx.summary = (2, request_recovery_window("accepted"))
+    ctx.summary_identity = copy.deepcopy(IDENTITY)
+    assert ctx.messages[0] == ctx.messages[2] and ctx.messages[0] is not ctx.messages[2]
+    view = ctx._assembled(ctx.messages, ctx.summary)
+    assert sum(row.get("content") == "continue" for row in view) == 1
+    # The sidecar must distinguish actual carry from a duplicate-valued old row.
+    indexed = ctx._assembly_rows(ctx.messages[:3], ctx.summary, (), ctx._carry(ctx.messages), [])
+    assert 0 not in [i for i, _ in indexed]
+    assert 2 in [i for i, _ in indexed]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_save", [False, True])
+async def test_resumed_helper_preserves_old_omissions_after_carry_rotates(fail_save):
+    state, carried = omitted_input_fixture()
+    ctx, provider = state.ctx, state.provider
+    await run_request_recovery(state)
+    for text in ("B: continue", "C: continue"):
+        await ctx.add_message({"role": "user", "content": text})
+    prior = ctx.export_checkpoint(IDENTITY)
+    originals = copy.deepcopy(ctx.messages)
+    calls = provider.compact_context.await_count
+    provider.compact_context.side_effect = lambda request: {
+        "kind": "native", "message": request_recovery_window("resumed")}
+
+    async def save(record, report):
+        assert record["summary"]["omittedIndices"] == [0]
+        if fail_save:
+            raise asyncio.CancelledError()
+
+    arguments = dict(progress=prior, through_message=9, exclude_indices=(),
+                     save_progress=save, guard=lambda: None)
+    template = request_recovery_dispatch([])
+    if fail_save:
+        with pytest.raises(asyncio.CancelledError):
+            await recover_native(ctx, provider, template, IDENTITY, **arguments)
+        assert ctx.export_checkpoint(IDENTITY) == prior
+    else:
+        record = await recover_native(ctx, provider, template, IDENTITY, **arguments)
+        assert record["summary"]["throughMessage"] == 9
+        assert record["summary"]["omittedIndices"] == [0]
+    assert provider.compact_context.await_count == calls + 1
+    assert ctx._assembled(ctx.messages, ctx.summary).count(carried) == 1
+    assert ctx.messages == originals
+    assert state.effects == {"write-1": 1}
+    ctx.tool_executor.assert_not_called()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("indices", [[True], [-1], [5], [0, 0], [1, 0], "0", None])
 async def test_checkpoint_rejects_malformed_omission_provenance(indices):
@@ -960,6 +1026,39 @@ async def test_checkpoint_rejects_malformed_omission_provenance(indices):
     assert restored.restore_checkpoint(record, IDENTITY)["status"] == "rejected"
     assert restored.summary is None and restored.summary_omitted_indices == []
     assert restored.messages == state.ctx.messages
+
+
+@pytest.mark.asyncio
+async def test_final_count_cannot_return_after_same_revision_checkpoint_change(monkeypatch):
+    from amplifier_module_context_managed.request_context import RequestContext
+
+    state, _ = omitted_input_fixture()
+    ctx = state.ctx
+    await run_request_recovery(state)
+    del ctx._prepare
+    revision = ctx.revision
+    original = RequestContext.get_measured_request_view
+
+    async def finish_then_invalidate(fitter, **kwargs):
+        result = await original(fitter, **kwargs)
+        # An independently restored derived state need not edit canonical rows.
+        ctx.summary_omitted_indices = []
+        assert ctx.revision == revision
+        return result
+
+    monkeypatch.setattr(RequestContext, "get_measured_request_view", finish_then_invalidate)
+
+    async def count_view(view):
+        dispatch = request_recovery_dispatch(view)
+        return {"dispatch": dispatch, "budget_decision": await state.provider.request_budget(dispatch)}
+
+    calls = state.provider.compact_context.await_count
+    with pytest.raises(RuntimeError, match="Checkpoint changed"):
+        await ctx.get_measured_request_view(provider=state.provider, retain_contents=(), count_view=count_view)
+    assert state.provider.compact_context.await_count == calls
+    assert state.effects == {"write-1": 1}
+    ctx.tool_executor.assert_not_called()
+    state.provider.complete.assert_not_called()
 
 
 @pytest.mark.asyncio
