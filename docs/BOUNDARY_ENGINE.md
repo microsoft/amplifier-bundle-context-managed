@@ -14,6 +14,17 @@ unchanged prefix can retain its checkpoint while the recent tail changes. No
 private transcript is loaded or written here. The transcript tool uses the host's
 canonical history through `context.history` and `context.history_authority: host`.
 
+Checkpoint export compares an exact typed, detached structure of the covered
+prefix before reusing its canonical JSON hash. It still checks nested values on
+every export; neither object identity nor a context revision alone proves that
+history is unchanged. The private witness owns at most 8 MiB of structure and
+references immutable source strings without copying their payloads. History
+replacement and checkpoint restore discard it; a hit replaces its references
+with those of the current prefix. Unsupported values or an exhausted witness
+budget use the ordinary serializer, with its existing failure behavior. This is
+an in-memory export optimization, not a history limit, persisted index, second
+transcript, or change to the checkpoint validation/recovery contract.
+
 Old saved data is a separate read-only interface: hosts can approve explicit
 archive IDs for `read_transcript`, including original large-result sidecars.
 Archive selection takes precedence over host history and returns bounded raw

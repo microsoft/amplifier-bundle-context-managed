@@ -17,6 +17,7 @@ from .errors import CompactionError
 
 from .interrupted import project as project_interrupted, unanswered
 from .checkpoint import digest
+from .prefix_digest import PrefixDigest
 from .measurement import RequestMeasurement, estimate_pressure
 from .summary import add_usage, public_messages, request_fits, source_fragments, summary_request
 
@@ -45,6 +46,7 @@ class BoundaryContextManager:
         self.config.setdefault("token_meter", "actual")
         self.hooks = hooks
         self.messages = []
+        self._checkpoint_prefix_digest = PrefixDigest()
         self.revision = 0
         self.summary = None
         # Canonical offsets deliberately kept outside this native summary.
@@ -91,6 +93,7 @@ class BoundaryContextManager:
 
     async def set_messages(self, messages):
         replacement = copy.deepcopy(messages)
+        self._checkpoint_prefix_digest.clear()
         # A completed background job can replace a tool receipt in the recent
         # tail. A checkpoint still describes the same evidence if its entire
         # covered canonical prefix is unchanged. Use the durable checkpoint's
