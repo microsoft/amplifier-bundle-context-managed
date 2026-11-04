@@ -47,6 +47,18 @@ checkpoints retain their original, stricter configuration validation.
 Normalized omitted-engine mounts keep the configuration identity of old explicit
 `engine: boundary` mounts. Legacy summary markers are not Boundary checkpoints.
 
+Export may reuse a bounded, exact witness of unchanged covered history. If the
+whole witness exceeds its 8 MiB budget, only complete leading rows are retained;
+the remaining rows are still checked and canonically hashed on every export.
+Borrowed nested edits, row order, scalar/container types and serializer settings
+must invalidate reuse. The digest and restore validation remain the canonical
+whole-prefix JSON digest, including ordinary serializer errors for unsupported
+values. This is a private optimization, not a second history store or a weaker
+checkpoint boundary. Performance checks must include many small rows after large
+leading results, so exceeding the witness budget cannot silently restore repeated
+whole-history serialization. Host transcript writes and partial-summary progress
+validation are separate work and are not reduced by this cache.
+
 Hosts can optionally register `context.persist_checkpoint()` to save each completed
 portable-summary piece into the same checkpoint file. Sync or async callbacks
 returning `None` (legacy acknowledgement) or `True` accept the piece. Explicit
