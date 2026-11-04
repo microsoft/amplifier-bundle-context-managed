@@ -6,8 +6,12 @@ import json
 FORMAT = "context-managed-boundary-v1"
 
 
+def canonical_bytes(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+
+
 def digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+    return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
 def export_checkpoint(context, identity):
@@ -41,7 +45,7 @@ def export_checkpoint(context, identity):
               # unchanged; portable notes retain the version 2 contract.
               "configuration": context.checkpoint_configuration(),
               "configurationVersion": 3 if isinstance(text, dict) else 2,
-              "sourceRevision": {"messages": through, "sha256": context._checkpoint_prefix_digest.digest(context.messages[:through], digest)},
+              "sourceRevision": {"messages": through, "sha256": context._checkpoint_prefix_digest.digest(context.messages[:through], digest, canonical_bytes)},
               "summary": ({"throughMessage": through, **({"message": copy.deepcopy(text), "kind": "native",
                           "version": 2, "omittedIndices": copy.deepcopy(context.summary_omitted_indices)}
                           if isinstance(text, dict) else {"text": text})} if context.summary else None),
