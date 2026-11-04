@@ -63,7 +63,9 @@ class PrefixDigest:
                 active.remove(id(item))
 
         try:
-            witness = freeze(value)
+            # Python's process-wide integer conversion limit can make the same
+            # exact integer fail JSON encoding after an earlier successful hash.
+            witness = owned((owned(sys.get_int_max_str_digits()), freeze(value)))
             if self.sha256 is not None and witness == self.witness:
                 self.witness, self.charge = witness, charge
                 return self.sha256

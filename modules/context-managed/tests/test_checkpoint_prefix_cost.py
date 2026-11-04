@@ -224,6 +224,24 @@ def test_large_integer_conversion_failure_leaves_no_digest_reuse():
         sys.set_int_max_str_digits(previous_limit)
 
 
+def test_changed_integer_conversion_limit_cannot_reuse_a_previously_valid_digest():
+    saved = cache()
+    previous_limit = sys.get_int_max_str_digits()
+    value = {"large": 10 ** 1000}
+    try:
+        sys.set_int_max_str_digits(4300)
+        assert saved.digest(value, checkpoint.digest) == checkpoint.digest(value)
+        sys.set_int_max_str_digits(640)
+        with pytest.raises(ValueError) as expected:
+            checkpoint.digest(value)
+        with pytest.raises(ValueError) as actual:
+            saved.digest(value, checkpoint.digest)
+        assert str(actual.value) == str(expected.value)
+        assert saved.witness is None
+    finally:
+        sys.set_int_max_str_digits(previous_limit)
+
+
 @pytest.mark.parametrize("depth", [400, 1500])
 def test_deeply_nested_values_use_original_serializer_if_witness_recurses_too_far(depth):
     value = "leaf"
@@ -280,6 +298,6 @@ def test_retained_structure_is_charged_and_equal_hits_refresh_string_ownership()
         if type(value) is bytes: return sys.getsizeof(value)
         return 0
 
-    assert saved.charge == charge(saved.witness)
+    assert saved.charge == charge(saved.witness) + sys.getsizeof(saved.witness[0])
     saved.clear()
     assert saved.witness is None and saved.sha256 is None and saved.charge == 0
