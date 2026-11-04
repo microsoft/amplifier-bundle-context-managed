@@ -12,13 +12,16 @@ def digest(value):
 
 def export_checkpoint(context, identity):
     if not context.config.get("durable_checkpoints"):
+        context._checkpoint_prefix_digest.clear()
         return None
     progress = context._summary_progress
     if not context.summary and not (progress and progress["completed"]):
+        context._checkpoint_prefix_digest.clear()
         return None
     if not isinstance(identity, dict) or not identity.get("provider") or not identity.get("model"):
         raise ValueError("Checkpoint identity needs an explicit provider and model")
     if context.summary and context.summary_identity != identity:
+        context._checkpoint_prefix_digest.clear()
         context.checkpoint_status = {"status": "stale", "reason": "The summary belongs to a different provider/model identity."}
         return None
     through, text = context.summary if context.summary else (progress["source_revision"]["messages"], None)
@@ -38,7 +41,7 @@ def export_checkpoint(context, identity):
               # unchanged; portable notes retain the version 2 contract.
               "configuration": context.checkpoint_configuration(),
               "configurationVersion": 3 if isinstance(text, dict) else 2,
-              "sourceRevision": {"messages": through, "sha256": digest(context.messages[:through])},
+              "sourceRevision": {"messages": through, "sha256": context._checkpoint_prefix_digest.digest(context.messages[:through], digest)},
               "summary": ({"throughMessage": through, **({"message": copy.deepcopy(text), "kind": "native",
                           "version": 2, "omittedIndices": copy.deepcopy(context.summary_omitted_indices)}
                           if isinstance(text, dict) else {"text": text})} if context.summary else None),
@@ -50,6 +53,7 @@ def export_checkpoint(context, identity):
 
 
 def restore_checkpoint(context, record, identity):
+    context._checkpoint_prefix_digest.clear()
     context.summary = None
     context.summary_omitted_indices = []
     context.summary_identity = None
