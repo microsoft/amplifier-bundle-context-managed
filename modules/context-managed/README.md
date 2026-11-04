@@ -128,6 +128,20 @@ or queued background job. Current human instructions and the latest persisted
 reminder snapshot remain outside newly compacted input. Older replacement reminder
 snapshots stay in canonical history but leave the working request.
 
+Native checkpoints record canonical `omittedIndices` for covered messages kept
+outside the native window. An earlier carried instruction stays in subsequent
+requests even after newer inputs replace it in the latest-two carry set. Its
+offset is removed only when a later accepted native compaction includes that
+message; failed or cancelled candidates preserve the previous offsets. Canonical
+history and the provider's opaque native payload are not rewritten.
+
+These checkpoints use native-summary version 2 and checkpoint configuration
+contract 3. Older readers reject that contract instead of ignoring omission
+provenance. Compatible legacy native checkpoints without recovery exclusions
+remain readable. Legacy explicit recovery with a nonempty exclusion hash but no
+offsets is rejected because its retained messages cannot be reconstructed safely;
+original history remains available.
+
 An unanswered tool call before later ordinary input no longer pins all
 subsequent completed work. Request preparation adds a truthful unknown-outcome
 observation without editing history or running tools. Exact unresolved identities
@@ -154,3 +168,30 @@ If exporting or saving a piece raises or is cancelled, the helper restores the
 last accepted summary and identity and propagates the original exception.
 Canonical messages and accepted earlier pieces remain intact. Completed provider
 calls are not undone, and callbacks must make their own storage writes atomic.
+
+With durable checkpoints, `context.recovery.recover` exposes the explicit
+request-level entry. It uses a detached context and the caller's count-only
+`count_view` to verify the complete ordinary request, not just each compact input.
+Native counts must strictly decrease; the conservative hard-safety estimate must
+fit the unchanged allowance. Current instructions, retained reminders, recent
+history and operation observations remain in the final request. An indivisible
+oversized exchange, unresolved exchange or still-oversized required suffix can
+legitimately refuse recovery without changing the accepted checkpoint.
+
+The host supplies exclusive custody, a synchronous `guard`, `save_progress`,
+and `install(record, verification)`. Installation must acknowledge the exact
+record digest (a string or `{"sha256": digest}`); only then does the module
+activate prevalidated state. Cancellation, a failed acknowledgement, or changed
+authority leaves active state untouched. Storage may nevertheless have committed:
+the host must reconcile its receipt before another attempt, not replay the write.
+Progress records bind retained canonical indices and are not accepted checkpoints.
+
+A host can register `context.recovery.run_pending` to consume an **explicit
+one-shot intent** at the beginning of a later independently authorized measured
+preparation. It receives the real `provider`, `retain_contents`, and `count_view`.
+No intent returns `None` and leaves ordinary preparation unchanged. Success
+returns the measured-view result; failure stops that preparation. An optional
+`source_revision` bounds recovery to the authorized canonical prefix while
+appended input stays outside it. The host owns intent persistence, source/model/
+configuration/Stop checks, and uncertain-outcome reconciliation. Overflow must
+not create or re-arm an intent, submit input, resume a task, or replay a tool.

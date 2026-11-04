@@ -347,8 +347,10 @@ async def test_native_window_is_preserved_across_repeat_checkpoint_and_resume():
     assert carrier["metadata"]["openai:compaction"] == first_checkpoint["metadata"]["openai:compaction"]
     contents = [row.get("content") for row in rows]
     for row in originals[:covered]:
-        if row["role"] != "system":  # Current instructions travel separately.
+        if row["role"] not in {"system", "developer"}:  # Current instructions travel separately.
             assert row["content"] not in contents
+        else:
+            assert contents.count(row["content"]) == 1
     for row in originals[covered:manager.summary[0]]:
         assert row["content"] in contents
     assert "ship on Tuesday" in str(second)

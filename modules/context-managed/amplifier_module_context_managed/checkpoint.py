@@ -33,9 +33,14 @@ def export_checkpoint(context, identity):
                     "segments", "text", "calls", "completed")}
         partial["provider"] = list(partial["provider"])
     record = {"format": FORMAT, "identity": copy.deepcopy(identity),
-              "configuration": context.checkpoint_configuration(), "configurationVersion": 2,
+              # Version 3 fences older readers that would silently discard the
+              # native summary's omission offsets. The configuration hash is
+              # unchanged; portable notes retain the version 2 contract.
+              "configuration": context.checkpoint_configuration(),
+              "configurationVersion": 3 if isinstance(text, dict) else 2,
               "sourceRevision": {"messages": through, "sha256": digest(context.messages[:through])},
-              "summary": ({"throughMessage": through, **({"message": copy.deepcopy(text), "kind": "native"}
+              "summary": ({"throughMessage": through, **({"message": copy.deepcopy(text), "kind": "native",
+                          "version": 2, "omittedIndices": copy.deepcopy(context.summary_omitted_indices)}
                           if isinstance(text, dict) else {"text": text})} if context.summary else None),
               "progress": partial,
               "evidenceRefs": copy.deepcopy(context.evidence_refs),
@@ -46,6 +51,7 @@ def export_checkpoint(context, identity):
 
 def restore_checkpoint(context, record, identity):
     context.summary = None
+    context.summary_omitted_indices = []
     context.summary_identity = None
     context.evidence_refs = []
     context.recovery = None
@@ -63,11 +69,15 @@ def restore_checkpoint(context, record, identity):
         if record.get("configurationVersion", 1) == 1:
             from .boundary import SUMMARY_PROMPT
             configuration = digest({"config": context.config, "prompt": SUMMARY_PROMPT})
-        elif record.get("configurationVersion") != 2:
+        elif record.get("configurationVersion") not in {2, 3}:
             raise ValueError("Checkpoint configuration contract is unsupported")
         if record.get("configuration") != configuration:
             raise ValueError("Summary configuration or prompt changed")
         source, summary = record["sourceRevision"], record.get("summary")
+        if record.get("configurationVersion") == 3 and (
+                not isinstance(summary, dict) or summary.get("kind") != "native"
+                or summary.get("version") != 2):
+            raise ValueError("Checkpoint requires the native omission contract")
         partial = record.get("progress")
         if summary is None:
             if not partial:
@@ -79,9 +89,35 @@ def restore_checkpoint(context, record, identity):
             raise ValueError("Checkpoint source boundary is incompatible")
         if source["sha256"] != digest(context.messages[:end]):
             raise ValueError("Canonical source prefix changed")
+        omitted = []
         if summary is None:
             text = None
         elif summary.get("kind") == "native":
+            version = summary.get("version", 1)
+            if type(version) is not int or version not in {1, 2}:
+                raise ValueError("Native summary contract is unsupported")
+            recovery = record.get("recovery")
+            allowed = {"throughMessage", "message", "kind", "version"}
+            if version == 2:
+                if record.get("configurationVersion") != 3:
+                    raise ValueError("Native omission contract requires checkpoint version 3")
+                allowed.add("omittedIndices")
+                # The only reconstructible hash-only provenance is known empty.
+                empty_binding = {"kind": "native-recovery", "version": 1,
+                                 "retentionSha256": digest([])}
+                omitted = summary.get("omittedIndices", [] if recovery == empty_binding else None)
+                if (not isinstance(omitted, list)
+                        or any(type(i) is not int or not 0 <= i < end for i in omitted)
+                        or omitted != sorted(set(omitted))):
+                    raise ValueError("Native summary omission indices are invalid")
+            if set(summary) - allowed:
+                raise ValueError("Native summary contains unsupported metadata")
+            if isinstance(recovery, dict) and recovery.get("kind") == "native-recovery":
+                # Hash-only legacy records cannot reconstruct retained rows.
+                # Only the known-empty hash is safe without explicit offsets.
+                if recovery != {"kind": "native-recovery", "version": 1,
+                                "retentionSha256": digest(omitted)}:
+                    raise ValueError("Native recovery omission provenance is incompatible")
             text = summary.get("message")
             if (not isinstance(text, dict) or text.get("role") != "user" or not text.get("content")
                     or not isinstance(text.get("metadata"), dict)
@@ -90,6 +126,8 @@ def restore_checkpoint(context, record, identity):
                     or text["metadata"].get("persisted") is not True):
                 raise ValueError("Native checkpoint message is invalid")
         else:
+            if "omittedIndices" in summary or "version" in summary:
+                raise ValueError("Omission metadata requires a native summary")
             text = summary.get("text")
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("Checkpoint summary is empty")
@@ -110,6 +148,7 @@ def restore_checkpoint(context, record, identity):
                 raise ValueError("Saved summary progress is incompatible")
         context._restored_progress = copy.deepcopy(partial)
         context.summary = (end, copy.deepcopy(text)) if summary is not None else None
+        context.summary_omitted_indices = copy.deepcopy(omitted)
         context.summary_identity = copy.deepcopy(identity) if summary is not None else None
         context.evidence_refs = copy.deepcopy(record.get("evidenceRefs", []))
         context.recovery = copy.deepcopy(record.get("recovery"))
