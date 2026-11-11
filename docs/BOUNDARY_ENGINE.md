@@ -97,6 +97,42 @@ it does not prove human authorship or authorize replay. Same-row duplicate call
 representations qualify only when their tool names and arguments agree; conflicts
 remain unresolved barriers, as do repeated call ids across different messages.
 
+## Request-view continuity and provider reasoning
+
+Canonical history and a provider request are different views. The loop's marked
+aggregate reminder snapshots (`ephemeral`, `persisted`, and `reminder_placement`
+of `tail` or `pre_user`) replace one another in the working view. Only the latest
+snapshot and any explicitly required text remain visible. This projection also
+applies before the first compaction. Unmarked ephemeral evidence is not treated
+as a replaceable aggregate. Snapshot selection follows canonical row identity,
+not body equality: an A → B → A refresh carries only the latest A, unless the host
+explicitly requires the earlier text too.
+
+A changed reminder body can therefore remove a row **before** an otherwise
+unchanged assistant reasoning/tool-call exchange. Compaction, refreshed system
+instructions, operation observations and request-only overlays can also change
+the provider-visible prefix. An unchanged canonical covered-prefix digest is
+checkpoint compatibility evidence, not proof that opaque provider reasoning is
+still valid in the assembled request.
+
+The context engine preserves opaque reasoning, tool calls and recorded results
+in detached views; it does not authenticate provider signatures or execute tools.
+Provider adapters own their reasoning-binding rules on the actual assembled
+request, including count/preflight, completion and native compaction. Where a
+provider binds reasoning to its preceding prefix, use its supported binding
+policy or narrowly invalidate incompatible reasoning in the request transport.
+Do not retain stale capability, authority, memory or surface snapshots just to
+preserve a signature, strip reasoning for unrelated providers, rewrite canonical
+history, or replay tools. Existing explicit retention and strict request-fit
+checks still apply. A provider policy is not permission to drop required context
+or an automatic retry after an uncertain effect.
+
+Offline regressions in `test_autonomous_compaction.py` cover unchanged and changed
+snapshots, measured and unmeasured views, bounded obsolete snapshots, and native
+and portable compaction with checkpoint restore. Their synthetic signatures prove
+projection and detachment only; live signature acceptance belongs to provider
+qualification.
+
 ## Native window and portable notes
 
 Native compaction receives the previous complete provider checkpoint plus the

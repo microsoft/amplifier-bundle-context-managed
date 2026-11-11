@@ -89,6 +89,150 @@ def test_reminder_projection_retains_current_and_explicitly_required_snapshots()
     assert rows == before
 
 
+@pytest.mark.parametrize('method', ['none', 'semantic', 'native'])
+@pytest.mark.parametrize('placement', ['tail', 'pre_user'])
+@pytest.mark.parametrize('retain', [False, True])
+def test_recurring_snapshot_uses_latest_canonical_row_not_equal_historical_rows(method, placement, retain):
+    ctx = BoundaryContextManager()
+    original = snapshot('Recurring selected context A.', placement)
+    intermediate = snapshot('Different selected context B.', placement)
+    latest = copy.deepcopy(original)
+    rows = [{'role': 'user', 'content': 'task'}, original,
+            {'role': 'assistant', 'content': 'completed'}, intermediate, latest]
+    summary = None if method == 'none' else (3, 'portable note' if method == 'semantic' else {
+        'role': 'user', 'content': 'opaque checkpoint', 'metadata': {'opaque': 'fixture'}})
+    before = copy.deepcopy(rows)
+    view = ctx._assembled(rows, summary, [original['content']] if retain else [], omitted_indices=[1])
+    assert view.count(latest) == (2 if retain else 1)
+    assert intermediate not in view
+    assert view[-1] == latest
+    assert rows == before
+
+
+def signed_exchange():
+    """Opaque provider state belongs to the provider, not the history projector."""
+    rows = exchange('signed', result='The tool already ran; do not replay it.')
+    rows[0]['content'] = [
+        {'type': 'thinking', 'thinking': 'fixture reasoning', 'signature': 'fixture-signature'},
+        {'type': 'text', 'text': 'Inspect the recorded result.'},
+    ]
+    return rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('placement', ['tail', 'pre_user'])
+@pytest.mark.parametrize('changed', [False, True])
+@pytest.mark.parametrize('measured', [False, True])
+async def test_reminder_refresh_can_change_prefix_before_unchanged_provider_reasoning(placement, changed, measured):
+    ctx = BoundaryContextManager({'max_tokens': 5000})
+    old = snapshot('Current capabilities: selected A; live surface revision 1.', placement)
+    rows = [{'role': 'user', 'content': 'Complete the authorized task.'}, old] + signed_exchange()
+    await ctx.set_messages(rows)
+    counted = []
+
+    async def request_view():
+        if not measured:
+            return await ctx.get_messages_for_request()
+
+        async def count(view):
+            counted.append(copy.deepcopy(view))
+            return {'dispatch': object(), 'budget_decision': {
+                'estimated_input_tokens': 100, 'input_limit_tokens': 5000,
+                'measurement': {'kind': 'provider_count', 'input_tokens': 100}}}
+
+        result = await ctx.get_measured_request_view(provider=None, retain_contents=[], count_view=count)
+        assert result['count_calls'] == 1
+        assert result['base_view'] == counted[-1]
+        return result['base_view']
+
+    before = await request_view()
+    refreshed = snapshot('Current capabilities: A revoked; live surface unavailable.', placement)
+    if changed:
+        # The loop deduplicates unchanged snapshots but appends changed bodies.
+        await ctx.add_message(refreshed)
+    canonical = await ctx.get_messages()
+    after = await request_view()
+
+    assert ctx.summary is None  # A legal projection change, not just compaction.
+    assert old in canonical
+    assert (old in after) is not changed
+    assert after.count(refreshed) == int(changed)
+    thinking_before = next(i for i, row in enumerate(before) if row.get('tool_calls'))
+    thinking_after = next(i for i, row in enumerate(after) if row.get('tool_calls'))
+    assert (before[:thinking_before] == after[:thinking_after]) is not changed
+    assert before[thinking_before:] == after[thinking_after:thinking_after + 2]
+    assert after[thinking_after:thinking_after + 2] == signed_exchange()
+    assert await ctx.get_messages() == canonical
+    # Providers receive detached views; their binding/invalidation must not edit
+    # canonical thinking, receipts, reminders or trigger tool execution.
+    after[thinking_after]['content'][0]['signature'] = 'request-only change'
+    assert await ctx.get_messages() == canonical
+
+
+@pytest.mark.asyncio
+async def test_superseded_snapshots_do_not_consume_request_window_to_preserve_reasoning():
+    ctx = BoundaryContextManager({'max_tokens': 1000})
+    rows = [{'role': 'user', 'content': 'Keep current context bounded.'}]
+    for i in range(40):
+        rows.append(snapshot(f'Obsolete revision {i}: ' + 'old surface and capability data ' * 200))
+    current = snapshot('Only current selected context is available.')
+    rows += [current] + signed_exchange()
+    await ctx.set_messages(rows)
+    view = await ctx.get_messages_for_request()
+    assert view == [rows[0], current] + signed_exchange()
+    assert ctx.summary is None
+    assert await ctx.get_messages() == rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('method', ['native', 'semantic'])
+@pytest.mark.parametrize('placement', ['tail', 'pre_user'])
+async def test_replaced_snapshot_stays_current_only_across_compaction_and_restore(method, placement):
+    model = provider()
+    if method == 'semantic':
+        model.supports_native_compaction = lambda: False
+        model.complete = AsyncMock(return_value=SimpleNamespace(content=[
+            SimpleNamespace(type='text', text='Historical exchanges completed; preserve their recorded evidence.')]))
+    ctx = BoundaryContextManager({'max_tokens': 5000, 'summarize_trigger': .35,
+                                  'durable_checkpoints': True, 'native_min_new_tokens': 0})
+    identity = {'provider': model.name, 'model': model.default_model}
+    ctx.checkpoint_identity = lambda: identity
+    stale = snapshot('Stale selected capability and surface revision.', placement)
+    current = snapshot('Current selected capability; previous surface unavailable.', placement)
+    rows = [{'role': 'user', 'content': 'Complete the authorized task.'}, stale]
+    for i in range(12):
+        rows += exchange(i)
+    rows += [current] + signed_exchange()
+    await ctx.set_messages(rows)
+    view = await ctx.get_messages_for_request(provider=model)
+    assert ctx.summary and ctx.summary[0] > 2
+    assert stale not in view and view.count(current) == 1
+    assert view[-2:] == signed_exchange()
+    # The superseded aggregate must not be baked into a new native window or
+    # portable summary source. Provider binding sees this projected source too.
+    operation = model.compact_context if method == 'native' else model.complete
+    assert operation.await_count == 1
+    assert stale['content'] not in str(operation.await_args)
+
+    ctx.config['summarize_trigger'] = 100  # Reuse the unchanged accepted prefix.
+    record = ctx.export_checkpoint(identity)
+    refreshed = snapshot('Current capability revoked; no live surface.', placement)
+    await ctx.add_message(refreshed)
+    canonical = await ctx.get_messages()
+    updated = await ctx.get_messages_for_request(provider=model)
+    restored = BoundaryContextManager(ctx.config)
+    await restored.set_messages(canonical)
+    assert restored.restore_checkpoint(record, identity)['status'] == 'restored'
+    resumed = await restored.get_messages_for_request(provider=model)
+    assert resumed == updated
+    assert stale not in resumed and current not in resumed
+    assert resumed.count(refreshed) == 1
+    assert [row for row in resumed if row.get('tool_call_id') == 'signed'] == [signed_exchange()[1]]
+    assert next(row for row in resumed if row.get('tool_calls') == signed_exchange()[0]['tool_calls']) == signed_exchange()[0]
+    assert operation.await_count == 1
+    assert await ctx.get_messages() == canonical == await restored.get_messages()
+
+
 @pytest.mark.asyncio
 async def test_safe_budget_failure_records_counts_and_boundary_without_content():
     hooks = SimpleNamespace(emit=AsyncMock())
