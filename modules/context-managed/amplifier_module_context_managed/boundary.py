@@ -232,17 +232,19 @@ class BoundaryContextManager:
         indices = set(humans[-2:] + snapshots[-1:])
         return [row for i, row in enumerate(messages) if i in indices]
 
-    def _visible_reminder(self, row, retain, carry, *, native=False):
+    def _visible_reminder(self, row, retain, carry):
         # Only the loop's explicitly marked, replaceable aggregate snapshots
         # supersede one another, even if omitted from an earlier native window.
         # Explicit retention still wins; other ephemeral rows remain evidence.
+        # Equal snapshot bodies can recur (A -> B -> A). Only the current
+        # canonical row is carried; equality would resurrect older copies.
         return (not self._reminder_snapshot(row)
-                or (any(row is carried for carried in carry) if native else row in carry)
+                or any(row is carried for carried in carry)
                 or (isinstance(row.get("content"), str) and row["content"] in retain))
 
-    def _project(self, messages, retain=(), carry=(), unknown=(), *, native=False):
+    def _project(self, messages, retain=(), carry=(), unknown=()):
         rows = [copy.deepcopy(row) for row in messages
-                if self._visible_reminder(row, retain, carry, native=native)]
+                if self._visible_reminder(row, retain, carry)]
         return project_interrupted(rows, unknown)
 
     def _boundary(self, messages, retain):
@@ -332,8 +334,7 @@ class BoundaryContextManager:
         carry = self._carry(messages) if carry is None else carry
         omitted = self.summary_omitted_indices if omitted_indices is None else omitted_indices
         rows = self._assembly_rows(messages, summary, retain, carry, omitted)
-        return self._project([row for _, row in rows], retain, carry, unanswered(messages, self._human),
-                             native=bool(summary and isinstance(summary[1], dict)))
+        return self._project([row for _, row in rows], retain, carry, unanswered(messages, self._human))
 
     @staticmethod
     def _summary_progress_stats(stats, progress):
@@ -728,7 +729,7 @@ class BoundaryContextManager:
                 indexed = (recovery_rows if recovery else self._assembly_rows(
                     messages[:end], self.summary, retain, carry, self.summary_omitted_indices))
                 indexed = [(i, row) for i, row in indexed if i not in excluded
-                           and self._visible_reminder(row, retain, carry, native=True)]
+                           and self._visible_reminder(row, retain, carry)]
                 # Match explicit recovery: fresh instructions override only
                 # their own roles; absent roles fall back to canonical input.
                 native_instructions = ([row.model_copy(deep=True) for row in template.messages
