@@ -14,6 +14,17 @@ unchanged prefix can retain its checkpoint while the recent tail changes. No
 private transcript is loaded or written here. The transcript tool uses the host's
 canonical history through `context.history` and `context.history_authority: host`.
 
+Hosts that immediately persist history may use the optional synchronous
+`context.history.visit(consumer)` capability. It lends complete current rows for
+one read-only callback, without making a detached snapshot. The consumer must
+not mutate or retain rows or nested values, or yield execution. It may retain
+newly owned projections such as immutable identifiers. The visitor returns
+`None`, never the consumer's result. Coroutine functions are rejected before
+being called; awaitable results are rejected and coroutine results are closed. Callback
+errors propagate without retry or rollback of any effects already performed.
+Ordinary `get_messages()` and `context.history` reads remain detached. Persistence,
+writer authority and recovery remain the host's responsibility.
+
 Checkpoint export compares an exact typed, detached structure of the covered
 prefix before reusing its canonical JSON hash. It still checks nested values on
 every export; neither object identity nor a context revision alone proves that

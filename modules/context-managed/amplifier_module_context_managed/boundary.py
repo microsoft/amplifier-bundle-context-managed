@@ -91,6 +91,20 @@ class BoundaryContextManager:
     async def get_messages(self):
         return copy.deepcopy(self.messages)
 
+    def visit_history(self, consumer):
+        """Lend complete history to one synchronous, read-only consumer.
+
+        The consumer must not mutate or retain the rows, or yield execution.
+        Its result never escapes this scope; ordinary readers use get_messages.
+        """
+        if inspect.iscoroutinefunction(consumer):
+            raise TypeError("History consumers must be synchronous")
+        result = consumer(self.messages)
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError("History consumers must not return an awaitable")
+
     async def set_messages(self, messages):
         replacement = copy.deepcopy(messages)
         self._checkpoint_prefix_digest.clear()
@@ -1040,6 +1054,7 @@ async def mount_boundary(coordinator, config):
     coordinator.register_capability("context.compacting", lambda: context.is_compacting)
     coordinator.register_capability("context.history_authority", "host")
     coordinator.register_capability("context.history", context.get_messages)
+    coordinator.register_capability("context.history.visit", context.visit_history)
     events = ["context:budget_exceeded", "context:compaction_started", "context:compaction_finished",
               "context:compaction_progress", "context:checkpoint_progress_rejected"]
     coordinator.register_contributor("observability.events", "context-managed", lambda: events)
