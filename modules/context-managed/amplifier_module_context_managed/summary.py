@@ -11,6 +11,59 @@ from decimal import Decimal, InvalidOperation
 
 from amplifier_core import ChatRequest, Message
 
+from .errors import CompactionError
+
+
+def _has_media_refs(rows):
+    for row in rows:
+        metadata = row.get("metadata") if isinstance(row, dict) else getattr(row, "metadata", None)
+        if isinstance(metadata, dict) and "experimental.media.v1" in metadata:
+            # Only the exact empty envelope is known not to contain refs.
+            # Malformed or unknown shapes must not bypass media admission.
+            if metadata["experimental.media.v1"] != {"refs": []}:
+                return True
+    return False
+
+
+async def require_media_budget(provider, request, decision, *, messages=()):
+    """Refs require the request owner's exact private projection/budget witness.
+
+    The public text projection is useful for semantic pressure, not hard media
+    safety. This module neither resolves references nor substitutes a different
+    request after counting. A host can instead freeze unavailable text at the
+    original positions before supplying the canonical request.
+    """
+    rows = list(messages)
+    if isinstance(request, ChatRequest):
+        rows.extend(request.messages)
+    if not _has_media_refs(rows):
+        return
+    valid = (isinstance(decision, dict)
+             and type(decision.get("estimated_input_tokens")) is int
+             and decision["estimated_input_tokens"] >= 0
+             and type(decision.get("input_limit_tokens")) is int
+             and decision["input_limit_tokens"] > 0)
+    witness = getattr(provider, "media_budget_witness", None)
+    if valid and isinstance(request, ChatRequest) and callable(witness):
+        try:
+            evidence = witness(request)
+            if inspect.isawaitable(evidence):
+                evidence = await evidence
+        except Exception:
+            evidence = None  # Do not expose private request data in diagnostics.
+        if isinstance(evidence, dict):
+            digest = evidence.get("projection_digest")
+            if (type(evidence.get("v")) is int and evidence["v"] == 1
+                    and evidence.get("validated") is True and isinstance(digest, str)
+                    and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)):
+                return
+    raise CompactionError(
+        "media_budget_unavailable",
+        "Media references require a valid media-aware request budget and an exact "
+        "media_budget_witness from the selected provider adapter. Restore that adapter "
+        "or supply an explicit position-preserving unavailable-text request before counting; "
+        "a text-only estimate cannot admit unresolved media.")
+
 
 def add_usage(stats, usage):
     """Preserve independent cache buckets and only sum known provider costs."""
@@ -154,10 +207,12 @@ async def request_fits(provider, request):
     """Use the provider's assembled-request budget when it supports one."""
     check = getattr(provider, "request_budget", None)
     if not callable(check):
+        await require_media_budget(provider, request, None)
         return True, None
     decision = check(request, context_estimate=len(request.messages[-1].content))
     if inspect.isawaitable(decision):
         decision = await decision
+    await require_media_budget(provider, request, decision)
     if not isinstance(decision, dict):
         return True, None
     measured = decision.get("estimated_input_tokens")

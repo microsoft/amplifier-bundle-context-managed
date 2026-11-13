@@ -5,7 +5,7 @@ import copy
 from amplifier_core import ChatRequest
 
 from .checkpoint import digest
-from .summary import public_messages
+from .summary import public_messages, require_media_budget
 
 
 def estimate_pressure(fitter, messages):
@@ -22,8 +22,9 @@ class RequestMeasurement:
     No model completion, history fit or tool execution occurs here.
     """
 
-    def __init__(self, count_view):
+    def __init__(self, count_view, provider=None):
         self.callback = count_view
+        self.provider = provider
         self.cached = None
         self.preflight_calls = 0
         self.reused_calls = 0
@@ -45,9 +46,11 @@ class RequestMeasurement:
         self.preflight_calls += 1
         if not isinstance(envelope, dict) or "dispatch" not in envelope:
             raise TypeError("count_view must return {dispatch, budget_decision}")
+        measurement = fitter._measured_budget_decision(envelope)
+        await require_media_budget(self.provider, envelope["dispatch"], envelope.get("budget_decision"),
+                                   messages=public_view)
         if self.dispatch is None and isinstance(envelope["dispatch"], ChatRequest):
             self.dispatch = envelope["dispatch"].model_copy(deep=True)
-        measurement = fitter._measured_budget_decision(envelope)
         self.cached = (self.key(public_view), envelope)
         decision = envelope.get("budget_decision")
         if measurement is not None:

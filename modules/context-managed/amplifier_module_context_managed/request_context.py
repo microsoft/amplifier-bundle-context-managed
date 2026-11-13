@@ -5,7 +5,7 @@ from amplifier_core import ChatRequest, Message
 from amplifier_core.llm_errors import ContextLengthError
 from amplifier_module_context_simple import SimpleContextManager
 
-from .summary import request_fits, public_messages
+from .summary import request_fits, public_messages, require_media_budget
 
 
 class RequestContext(SimpleContextManager):
@@ -51,6 +51,7 @@ class RequestContext(SimpleContextManager):
         if not isinstance(attempt, dict) or "dispatch" not in attempt:
             raise TypeError("count_view must return {dispatch, budget_decision}")
         measurement = self._measured_budget_decision(attempt)
+        await require_media_budget(provider, attempt["dispatch"], attempt.get("budget_decision"), messages=view)
         decision = attempt.get("budget_decision")
         count_calls = 1
         outcome = "unchanged"
@@ -60,6 +61,7 @@ class RequestContext(SimpleContextManager):
             if fitted:
                 attempt, measurement, extra = fitted
                 decision = attempt["budget_decision"]
+                await require_media_budget(provider, attempt["dispatch"], decision, messages=view)
                 count_calls += extra
                 outcome = "reduced_output"
             if decision["estimated_input_tokens"] > decision["input_limit_tokens"]:

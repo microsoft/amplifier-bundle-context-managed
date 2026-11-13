@@ -99,6 +99,30 @@ An unavailable or invalid native contract stops preparation without using a
 portable fallback or deleting canonical history.
 The utility summary provider/model is used only for portable notes.
 
+Reference-bearing requests using `Message.metadata["experimental.media.v1"]`
+cannot be admitted with the public-text estimate. Their selected provider adapter
+must return a valid request budget and expose
+`media_budget_witness(canonical_request, *, request_options=None)`, returning
+`{"v": 1, "projection_digest": "<64 lowercase hex>", "validated": true}` only for
+the exact privately projected request with an associated valid budget. The
+adapter owns validation of that association, authorization, effective options
+and projection identity; this module checks the structural witness without
+resolving images or importing the host's implementation. The measured callback's
+`dispatch` must be the canonical `ChatRequest`, not an opaque token, when refs
+are present. Preflight, final fitting and output-reserve replacements all require
+the witness. This is a host adapter contract, not proof that an arbitrary
+provider's numeric count includes images.
+
+Without that evidence, preparation reports the typed `CompactionError` code
+`media_budget_unavailable`: media cost is not certified, rather than a successful
+cheap-text fit. This is not a mandatory-vision policy. Optional/text-only media
+should receive the host's explicit original-position unavailable warning before
+counting; a text-only candidate without hydratable refs retains the ordinary
+no-budget fallback. The context manager does not mutate a ref-bearing canonical
+request or its cached dispatch into that candidate. Canonical metadata on
+surviving rows stays intact, while quoted portable-summary source does not
+inherit hydratable refs from removed rows.
+
 Native compaction sends one complete eligible window, using the loop's selected
 model, current instructions and request configuration. It never uses the text
 summary's fragment limits. Retain every returned canonical item unchanged.

@@ -990,7 +990,7 @@ class BoundaryContextManager:
                 return recovered
         async with self.lock:
             revision = self.revision
-            measurement = RequestMeasurement(count_view)
+            measurement = RequestMeasurement(count_view, provider)
             try:
                 fitter, retain = await self._prepare(provider, None, retain_contents, measurement)
                 summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
