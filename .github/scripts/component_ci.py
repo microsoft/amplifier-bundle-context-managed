@@ -71,8 +71,8 @@ def junit_identity(nodeid):
     return classname, parts[-1] + bracket + parameters
 
 
-def outcome_result(path, *, corrections=False):
-    data = json.loads(path.read_text())
+def outcome_statuses(data, *, corrections=False):
+    """Validate typed phase reports and normalize each collected case's status."""
     collected, reports = data["collected"], data["reports"]
     if data["exitstatus"] or data["collection_errors"]:
         raise ValueError("Unsuccessful pytest session/collection")
@@ -97,12 +97,23 @@ def outcome_result(path, *, corrections=False):
         if corrections and (outcome != "passed" or wasxfail):
             raise ValueError("Correction tests must not skip or xfail")
         grouped[nodeid][phase] = report
-    for phases in grouped.values():
+    statuses = {}
+    for nodeid, phases in grouped.items():
         expected_phases = {"setup", "teardown"}
         if phases.get("setup", {}).get("outcome") == "passed":
             expected_phases.add("call")
         if set(phases) != expected_phases:
             raise ValueError("Missing call/setup/teardown outcome")
+        skipped = sum(report["outcome"] == "skipped" for report in phases.values())
+        if skipped > 1:
+            raise ValueError("Multiple skipped phases for one test case")
+        statuses[nodeid] = "skipped" if skipped else "passed"
+    return statuses
+
+
+def outcome_result(path, *, corrections=False):
+    data = json.loads(path.read_text())
+    outcome_statuses(data, corrections=corrections)
     return data
 
 
@@ -123,11 +134,18 @@ def junit_result(path, outcomes, *, corrections=False):
     actual = Counter((case.get("classname"), case.get("name")) for case in cases)
     if expected != actual or any(count != 1 for count in actual.values()):
         raise ValueError("Missing/extra/duplicate/renamed JUnit test identities")
-    skipped = sum(any(report["nodeid"] == nodeid and report["outcome"] == "skipped"
-                      for report in outcomes["reports"])
-                  for nodeid in outcomes["collected"])
-    if counts["skipped"] != skipped:
-        raise ValueError("JUnit skips disagree with typed outcomes")
+    statuses = {
+        junit_identity(nodeid): status
+        for nodeid, status in outcome_statuses(outcomes, corrections=corrections).items()
+    }
+    for case in cases:
+        identity = (case.get("classname"), case.get("name"))
+        if any(child.tag not in {"skipped", "system-out", "system-err", "properties"}
+               for child in case) or len(case.findall("skipped")) > 1:
+            raise ValueError(f"Malformed JUnit test status: {identity!r}")
+        status = "skipped" if case.find("skipped") is not None else "passed"
+        if status != statuses[identity]:
+            raise ValueError(f"JUnit status disagrees with typed outcomes: {identity!r}")
     if corrections and counts["skipped"]:
         raise ValueError("Correction tests must not skip or xfail")
     return counts
