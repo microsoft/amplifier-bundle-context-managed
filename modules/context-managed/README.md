@@ -99,6 +99,45 @@ An unavailable or invalid native contract stops preparation without using a
 portable fallback or deleting canonical history.
 The utility summary provider/model is used only for portable notes.
 
+Reference-bearing requests using `Message.metadata["experimental.media.v1"]`
+cannot be admitted by estimating their labels as text. Their selected provider adapter
+must return a valid request budget and expose
+`media_budget_witness(canonical_request, *, request_options=None)`, returning
+`{"v": 1, "projection_digest": "<64 lowercase hex>", "validated": true}` only for
+the exact privately projected request with an associated valid budget. The
+adapter owns validation of that association, authorization, effective options
+and projection identity; this module checks the structural witness without
+resolving images or importing the host's implementation. The measured callback's
+`dispatch` must be the canonical `ChatRequest`, not an opaque token, when refs
+are present. The callback envelope's optional `request_options` must be the exact
+effective mapping used for counting; preflight, cached final fitting and
+output-reserve replacements pass that mapping unchanged to the witness. Missing
+or mismatched options are not guessed from provider defaults. The request owner
+must also use those same options for dispatch. This is a host adapter contract,
+not proof that an arbitrary
+provider's numeric count includes images.
+
+Without that evidence, preparation reports the typed `CompactionError` code
+`media_budget_unavailable`: media cost is not certified, rather than a successful
+cheap-text fit. This is not a mandatory-vision policy. Optional/text-only media
+should receive the host's explicit original-position unavailable warning before
+counting. For a **private** warning-only projection with no numeric budget, the
+adapter can expose async
+`media_text_fallback_witness(canonical_request, *, request_options=None)`. It
+validates the exact canonical/options/authority binding, freezes the same private
+candidate for dispatch, and returns the witness fields above plus `messages`:
+detached text-only message dictionaries for local estimation. The adapter must
+refuse hydrated/nontext/opaque state, forged/unowned refs and mandatory-vision
+requests. The local estimate includes the actual warnings, remains explicitly
+unmeasured, and does not certify image fit. A failed numeric-budget witness is
+not retried as this fallback. An ordinary no-ref text candidate still retains
+its existing no-budget behavior.
+
+The context manager never mutates a ref-bearing canonical
+request or cached dispatch into that private candidate. Canonical metadata on
+surviving rows stays intact, while quoted portable-summary source does not
+inherit hydratable refs from removed rows.
+
 Native compaction sends one complete eligible window, using the loop's selected
 model, current instructions and request configuration. It never uses the text
 summary's fragment limits. Retain every returned canonical item unchanged.
