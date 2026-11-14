@@ -430,28 +430,60 @@ class BoundaryContextManager:
                 request = summary_request(SUMMARY_PROMPT, fragment, progress["text"], progress["config"])
 
                 async def complete_fragment():
-                    fits, budget = await request_fits(summarizer, request)
-                    check_source()
-                    if budget:
-                        stats["last_request_budget"] = budget
-                    counted = budget is not None and budget["measurement_kind"] == "provider_count"
-                    # Missing/estimated counts cannot justify lifting the
-                    # safety cap. This check also applies after a retry whose
-                    # provider can no longer return an authoritative count.
-                    if not fits or (len(fragment) > limit and
-                                    (not preflight_whole or not counted)):
-                        raise ContextLengthError("Continuation note and required instructions exceed summary input allowance")
-                    stats["calls"] += 1
-                    progress["calls"] += 1
-                    info = summarizer.get_info() if callable(getattr(summarizer, "get_info", None)) else None
-                    if inspect.isawaitable(info):
-                        info = await info
-                    capabilities = info.get("capabilities", []) if isinstance(info, dict) else getattr(info, "capabilities", [])
-                    # This is an output-work bound, NEVER an elapsed deadline.
-                    # Providers that auto-continue must expose and honor the
-                    # per-call control. Ordinary chat keeps its configured policy.
-                    options = {"request_options": {"auto_continue": False}} if "completion:auto_continue:v1" in capabilities else {}
-                    return await summarizer.complete(request, **options)
+                    failed = False
+                    try:
+                        fits, budget = await request_fits(summarizer, request)
+                        check_source()
+                        if budget:
+                            stats["last_request_budget"] = budget
+                        counted = budget is not None and budget["measurement_kind"] == "provider_count"
+                        # Missing/estimated counts cannot justify lifting the
+                        # safety cap. This check also applies after a retry whose
+                        # provider can no longer return an authoritative count.
+                        if not fits or (len(fragment) > limit and
+                                        (not preflight_whole or not counted)):
+                            raise ContextLengthError("Continuation note and required instructions exceed summary input allowance")
+                        stats["calls"] += 1
+                        progress["calls"] += 1
+                        info = summarizer.get_info() if callable(getattr(summarizer, "get_info", None)) else None
+                        if inspect.isawaitable(info):
+                            info = await info
+                        capabilities = info.get("capabilities", []) if isinstance(info, dict) else getattr(info, "capabilities", [])
+                        # This is an output-work bound, NEVER an elapsed deadline.
+                        # Providers that auto-continue must expose and honor the
+                        # per-call control. Ordinary chat keeps its configured policy.
+                        options = {"request_options": {"auto_continue": False}} if "completion:auto_continue:v1" in capabilities else {}
+                        return await summarizer.complete(request, **options)
+                    except BaseException:
+                        failed = True
+                        raise
+                    finally:
+                        # Each summary request is ours, never a caller's measured
+                        # dispatch. Release before splitting/advancing, after the
+                        # directly awaited count/send has settled. Abandon the
+                        # exact canonical object with its original COUNT options
+                        # (None), not the later completion-only controls.
+                        task = asyncio.current_task()
+                        cancelling = task.cancelling() if task is not None else 0
+                        try:
+                            release = getattr(summarizer, "release_media_request", None)
+                            if callable(release):
+                                released = release(request, request_options=None)
+                                if inspect.isawaitable(released):
+                                    released = await released
+                                if released is False:
+                                    logging.getLogger(__name__).warning("Summary media request release was not confirmed")
+                        except asyncio.CancelledError:
+                            logging.getLogger(__name__).warning("Summary media request release was not confirmed")
+                            # A cleanup callback's own exception must not mask
+                            # the original failure. A NEW task cancellation is
+                            # different: never swallow it and continue splitting.
+                            if not failed or (task is not None and task.cancelling() > cancelling):
+                                raise
+                        except Exception:
+                            # No private transport/exception text; cleanup cannot
+                            # replace the original count, refusal or cancellation.
+                            logging.getLogger(__name__).warning("Summary media request release was not confirmed")
 
                 try:
                     response = await complete_fragment()

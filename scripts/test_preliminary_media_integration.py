@@ -257,6 +257,131 @@ async def test_actual_measured_handoff_retains_exact_dispatch_until_caller_finis
         wrapper.close()
 
 
+def summary_history(store):
+    return [
+        {"role": "user", "content": "Original objective."},
+        {"role": "assistant", "content": "Historical reference. " * 800},
+        {"role": "user", "content": "Second turn."},
+        {"role": "assistant", "content": "Reply."},
+        *store.history(),
+    ]
+
+
+class SummaryObserver(Observer):
+    """Observe real summary requests, without manually counting a candidate."""
+
+    def __init__(self, capability, mode):
+        super().__init__(capability)
+        self.mode = mode
+        self.ready = asyncio.Event()
+        self.wait_info = False
+        self.count_options = []
+        self.send_options = []
+        self.send_settled = False
+
+    @staticmethod
+    def is_summary(request):
+        return (request.metadata or {}).get("purpose") == "context-compaction"
+
+    def get_info(self):
+        if self.wait_info:
+            async def pause():
+                self.ready.set()
+                await asyncio.Event().wait()
+            return pause()
+        return {}
+
+    async def request_budget(self, request, *, context_estimate, request_options=None):
+        self.capability.validate(request, purpose="count", request_options=request_options or {})
+        self.counted.append(request)
+        self.count_options.append(request_options)
+        summary = self.is_summary(request)
+        if summary and self.mode == "cancel_info":
+            self.wait_info = True
+        if summary and self.mode == "cancel_count":
+            self.ready.set()
+            await asyncio.Event().wait()
+        if summary and self.mode == "count_error":
+            raise RuntimeError("fixture count failure")
+        n = 1200 if summary and (self.mode == "refuse" or
+                                 self.mode == "split" and len(self.counted) == 1) else 300
+        return {"estimated_input_tokens": n, "input_limit_tokens": 1000,
+                "context_token_budget": 1000,
+                "measurement": {"kind": "provider_count", "source": "offline.fixture", "input_tokens": n}}
+
+    async def complete(self, request, *, request_options=None):
+        self.capability.validate(request, purpose="transport", request_options=request_options or {})
+        self.sent.append(request)
+        self.send_options.append(request_options)
+        try:
+            if self.mode == "cancel_send":
+                self.ready.set()
+                await asyncio.Event().wait()
+            if self.mode == "send_error":
+                raise RuntimeError("fixture send failure")
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text="Verified continuation.")])
+        finally:
+            self.send_settled = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["cancel_info", "refuse", "success", "split", "cancel_count",
+                                 "cancel_send", "count_error", "send_error"])
+async def test_actual_summary_owned_request_lifetime(foundation, mode):
+    media, provider = foundation
+    store, graph = MemoryAdmission(), GraphAdmission()
+    capability = media.SessionMediaCapability(store, enabled=True)
+    observer = SummaryObserver(capability, mode)
+    wrapper = provider.MediaPreparedProvider(
+        observer, capability, provider_identity={"provider": observer.name, "account": "fixture", "generation": 1},
+        request_scope=graph.scope)
+    context = await managed(store)
+    await context.set_messages(summary_history(store))
+    original = await context.get_messages()
+    try:
+        if mode.startswith("cancel_"):
+            task = asyncio.create_task(context.get_messages_for_request(provider=wrapper))
+            try:
+                await asyncio.wait_for(observer.ready.wait(), timeout=5)
+                assert len(observer.counted) == 1
+                assert len(store._prepared) == graph.active == 1
+                assert len(observer.sent) == (1 if mode == "cancel_send" else 0)
+            finally:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        elif mode in {"refuse", "count_error", "send_error"}:
+            from amplifier_module_context_managed.errors import CompactionError
+            with pytest.raises(CompactionError):
+                await context.get_messages_for_request(provider=wrapper)
+        else:
+            await context.get_messages_for_request(provider=wrapper)
+            summary_counts = [q for q in observer.counted if observer.is_summary(q)]
+            assert len(summary_counts) == (3 if mode == "split" else 1)
+            assert len(observer.sent) == (2 if mode == "split" else 1)
+            assert all(any(q is sent for q in summary_counts) for sent in observer.sent)
+            assert context.summary is not None
+        if mode == "refuse":
+            assert len(observer.counted) == 7 and not observer.sent
+        if mode in {"cancel_send", "send_error"}:
+            assert observer.send_settled
+        # Observe before fixture teardown. No close or later request may fix a leak.
+        assert not store._prepared and graph.active == 0
+        assert len(store.registered) == len(store.unregistered)
+        assert all(options is None for options in observer.count_options)
+        assert await context.get_messages() == original
+        graph.transition()
+        # Same provider remains usable; a fresh context avoids the deliberate
+        # compaction-failure retry latch, without changing canonical history.
+        observer.mode, observer.wait_info = "success", False
+        next_context = await managed(store)
+        await next_context.get_messages_for_request(provider=wrapper)
+        assert not store._prepared and graph.active == 0
+        assert len(store.registered) == len(store.unregistered)
+    finally:
+        wrapper.close()
+
+
 @pytest.mark.asyncio
 async def test_actual_simple_preliminary_rows_do_not_count_or_acquire_media(foundation):
     store, graph, observer, wrapper = pairing(foundation)
