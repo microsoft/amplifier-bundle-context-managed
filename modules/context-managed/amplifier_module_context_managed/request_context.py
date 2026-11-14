@@ -1,11 +1,17 @@
 """Validate a compacted request without mechanically deleting or clipping history."""
+import asyncio
 import copy
+import inspect
+import logging
 
 from amplifier_core import ChatRequest, Message
 from amplifier_core.llm_errors import ContextLengthError
 from amplifier_module_context_simple import SimpleContextManager
 
 from .summary import request_fits, public_messages, require_media_budget
+
+
+logger = logging.getLogger(__name__)
 
 
 class RequestContext(SimpleContextManager):
@@ -38,13 +44,39 @@ class RequestContext(SimpleContextManager):
         view = await self._view()
         budget = self._calculate_budget(token_budget, provider)
         count = self._estimate_tokens(public_messages(view))
-        fits, decision = await request_fits(provider, ChatRequest(messages=[Message(**row) for row in view]),
-                                            estimate_tokens=self._estimate_tokens, fallback_budget=budget)
-        if decision:
-            count, budget = decision["input_tokens"], min(budget, decision["input_limit_tokens"])
-        if not fits or count > budget:
-            self._oversize(count, budget)
-        return view
+        request = ChatRequest(messages=[Message(**row) for row in view])
+        failed = False
+        try:
+            fits, decision = await request_fits(provider, request,
+                                                estimate_tokens=self._estimate_tokens, fallback_budget=budget)
+            if decision:
+                count, budget = decision["input_tokens"], min(budget, decision["input_limit_tokens"])
+            if not fits or count > budget:
+                self._oversize(count, budget)
+            return view
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            # Only rows escape this API, so nobody else can abandon this exact
+            # preliminary request. The measured-view API instead hands dispatch
+            # ownership to its caller and must not release it here.
+            try:
+                release = getattr(provider, "release_media_request", None)
+                if callable(release):
+                    released = release(request, request_options=None)
+                    if inspect.isawaitable(released):
+                        released = await released
+                    if released is False:
+                        logger.warning("Preliminary media request release was not confirmed")
+            except asyncio.CancelledError:
+                logger.warning("Preliminary media request release was not confirmed")
+                if not failed:
+                    raise
+            except Exception:
+                # Cleanup diagnostics must not expose private request transport
+                # or replace the original count/refusal/cancellation.
+                logger.warning("Preliminary media request release was not confirmed")
 
     async def get_measured_request_view(self, *, provider, retain_contents, count_view, fit_output=None):
         view = await self._view()
