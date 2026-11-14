@@ -463,6 +463,8 @@ class BoundaryContextManager:
                         # directly awaited count/send has settled. Abandon the
                         # exact canonical object with its original COUNT options
                         # (None), not the later completion-only controls.
+                        task = asyncio.current_task()
+                        cancelling = task.cancelling() if task is not None else 0
                         try:
                             release = getattr(summarizer, "release_media_request", None)
                             if callable(release):
@@ -473,7 +475,10 @@ class BoundaryContextManager:
                                     logging.getLogger(__name__).warning("Summary media request release was not confirmed")
                         except asyncio.CancelledError:
                             logging.getLogger(__name__).warning("Summary media request release was not confirmed")
-                            if not failed:
+                            # A cleanup callback's own exception must not mask
+                            # the original failure. A NEW task cancellation is
+                            # different: never swallow it and continue splitting.
+                            if not failed or (task is not None and task.cancelling() > cancelling):
                                 raise
                         except Exception:
                             # No private transport/exception text; cleanup cannot

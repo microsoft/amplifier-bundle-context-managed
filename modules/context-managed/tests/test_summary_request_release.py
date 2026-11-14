@@ -220,15 +220,21 @@ async def test_post_count_source_refusal_releases_without_send():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ambient_exception", [False, True])
-async def test_new_task_cancel_during_async_release_is_not_swallowed(ambient_exception):
-    owner = SummaryOwner()
+@pytest.mark.parametrize("edge", ["success", "refuse"])
+async def test_new_task_cancel_during_async_release_is_not_swallowed(ambient_exception, edge):
+    owner = SummaryOwner(edge)
     entered = asyncio.Event()
     results = []
 
     async def release(request, *, request_options):
         owner.releases.append(request)
-        entered.set()
-        await asyncio.Event().wait()
+        try:
+            if len(owner.releases) == 1:
+                entered.set()
+                await asyncio.Event().wait()
+            return True
+        finally:
+            owner.active = None
 
     owner.release_media_request = release
 
