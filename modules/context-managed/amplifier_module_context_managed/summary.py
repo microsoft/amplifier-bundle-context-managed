@@ -25,13 +25,47 @@ def _has_media_refs(rows):
     return False
 
 
-async def require_media_budget(provider, request, decision, *, messages=()):
-    """Refs require the request owner's exact private projection/budget witness.
+def _valid_media_witness(evidence):
+    if not isinstance(evidence, dict):
+        return False
+    digest = evidence.get("projection_digest")
+    return (type(evidence.get("v")) is int and evidence["v"] == 1
+            and evidence.get("validated") is True and isinstance(digest, str)
+            and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest))
+
+
+def _text_fallback_messages(evidence):
+    """Only consume the owner's detached text count view, never private pixels."""
+    if not _valid_media_witness(evidence):
+        return None
+    rows = evidence.get("messages")
+    if not isinstance(rows, list) or not rows:
+        return None
+    for row in rows:
+        if not isinstance(row, dict) or set(row) - {"role", "content", "name", "tool_call_id"}:
+            return None
+        if (row.get("role") not in {"system", "developer", "user", "assistant", "tool", "function"}
+                or any(row.get(key) is not None and not isinstance(row[key], str)
+                       for key in ("name", "tool_call_id"))):
+            return None
+        content = row.get("content")
+        if not isinstance(content, str):
+            if not isinstance(content, list) or any(
+                    not isinstance(block, dict) or set(block) - {"type", "text", "visibility"}
+                    or block.get("type") != "text" or not isinstance(block.get("text"), str)
+                    or block.get("visibility") not in (None, "internal", "developer", "user")
+                    for block in content):
+                return None
+    return copy.deepcopy(rows)
+
+
+async def require_media_budget(provider, request, decision, *, messages=(), request_options=None):
+    """Require an exact witness; return a detached text-only fallback count view.
 
     The public text projection is useful for semantic pressure, not hard media
     safety. This module neither resolves references nor substitutes a different
-    request after counting. A host can instead freeze unavailable text at the
-    original positions before supplying the canonical request.
+    request after counting. The host alone can freeze unavailable text privately
+    at the original positions, while the canonical request keeps its refs.
     """
     rows = list(messages)
     if isinstance(request, ChatRequest):
@@ -46,22 +80,33 @@ async def require_media_budget(provider, request, decision, *, messages=()):
     witness = getattr(provider, "media_budget_witness", None)
     if valid and isinstance(request, ChatRequest) and callable(witness):
         try:
-            evidence = witness(request)
+            evidence = (witness(request, request_options=request_options)
+                        if request_options is not None else witness(request))
             if inspect.isawaitable(evidence):
                 evidence = await evidence
         except Exception:
             evidence = None  # Do not expose private request data in diagnostics.
-        if isinstance(evidence, dict):
-            digest = evidence.get("projection_digest")
-            if (type(evidence.get("v")) is int and evidence["v"] == 1
-                    and evidence.get("validated") is True and isinstance(digest, str)
-                    and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)):
-                return
+        if _valid_media_witness(evidence):
+            return
+    # A warning-only private projection needs no image count. Its owner must
+    # validate exact canonical/options/authority identity and freeze that same
+    # private candidate for dispatch. Count the returned text, not canonical refs.
+    fallback = getattr(provider, "media_text_fallback_witness", None)
+    if decision is None and isinstance(request, ChatRequest) and callable(fallback):
+        try:
+            evidence = fallback(request, request_options=request_options)
+            if inspect.isawaitable(evidence):
+                evidence = await evidence
+        except Exception:
+            evidence = None
+        rows = _text_fallback_messages(evidence)
+        if rows is not None:
+            return rows
     raise CompactionError(
         "media_budget_unavailable",
-        "Media references require a valid media-aware request budget and an exact "
-        "media_budget_witness from the selected provider adapter. Restore that adapter "
-        "or supply an explicit position-preserving unavailable-text request before counting; "
+        "Media references require an exact media_budget_witness with a valid budget, "
+        "or an owner-validated media_text_fallback_witness for the private warning-only projection. "
+        "Restore that adapter or supply a position-preserving unavailable-text request before counting; "
         "a text-only estimate cannot admit unresolved media.")
 
 
@@ -203,16 +248,24 @@ def summary_request(prompt, source, previous, config):
     )
 
 
-async def request_fits(provider, request):
+async def request_fits(provider, request, *, request_options=None, estimate_tokens=None, fallback_budget=None):
     """Use the provider's assembled-request budget when it supports one."""
     check = getattr(provider, "request_budget", None)
-    if not callable(check):
-        await require_media_budget(provider, request, None)
-        return True, None
-    decision = check(request, context_estimate=len(request.messages[-1].content))
-    if inspect.isawaitable(decision):
-        decision = await decision
-    await require_media_budget(provider, request, decision)
+    decision = None
+    if callable(check):
+        kwargs = {"request_options": request_options} if request_options is not None else {}
+        decision = check(request, context_estimate=len(request.messages[-1].content), **kwargs)
+        if inspect.isawaitable(decision):
+            decision = await decision
+    fallback_rows = await require_media_budget(provider, request, decision, request_options=request_options)
+    if fallback_rows is not None:
+        if estimate_tokens is None or type(fallback_budget) is not int or fallback_budget <= 0:
+            raise CompactionError("media_budget_unavailable",
+                                  "The warning-only projection needs the caller's text-budget validation.")
+        count = estimate_tokens(fallback_rows)
+        return count <= fallback_budget, {
+            "input_tokens": count, "input_limit_tokens": fallback_budget,
+            "output_reserve": request.max_output_tokens, "measurement_kind": "public_estimate"}
     if not isinstance(decision, dict):
         return True, None
     measured = decision.get("estimated_input_tokens")

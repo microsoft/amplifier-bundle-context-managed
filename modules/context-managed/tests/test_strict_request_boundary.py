@@ -382,6 +382,68 @@ async def test_malformed_ref_metadata_does_not_sneak_through_no_budget_fallback(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_rows", [
+    [{"role": "tool", "content": "warning", "metadata": {MEDIA: {"refs": ["hidden"]}}}],
+    [{"role": "user", "content": [{"type": "image", "source": {"data": "private"}}]}],
+    [{"role": "user", "content": "warning", "opaque": "uncounted"}],
+    [{"role": "user", "content": [{"text": "missing type"}]}],
+    [],
+])
+async def test_private_fallback_witness_cannot_return_hidden_nontext_or_opaque_rows(invalid_rows):
+    fitter = RequestContext(max_tokens=10000)
+    await fitter.set_messages(media_history())
+
+    async def fallback(request, *, request_options=None):
+        return {"v": 1, "validated": True, "projection_digest": "a" * 64, "messages": invalid_rows}
+
+    async def count_view(view):
+        return {"dispatch": ChatRequest(messages=[Message(**row) for row in view]), "budget_decision": None}
+
+    with pytest.raises(CompactionError, match="media_budget_unavailable"):
+        await fitter.get_measured_request_view(provider=SimpleNamespace(media_text_fallback_witness=fallback),
+                                               retain_contents=[], count_view=count_view)
+
+
+@pytest.mark.asyncio
+async def test_failed_numeric_witness_does_not_retry_warning_only_fallback():
+    fitter = RequestContext(max_tokens=10000)
+    await fitter.set_messages(media_history())
+    provider = SimpleNamespace(media_budget_witness=lambda request: None,
+                               media_text_fallback_witness=AsyncMock())
+
+    async def count_view(view):
+        return {"dispatch": ChatRequest(messages=[Message(**row) for row in view]), "budget_decision": media_budget()}
+
+    with pytest.raises(CompactionError):
+        await fitter.get_measured_request_view(provider=provider, retain_contents=[], count_view=count_view)
+    provider.media_text_fallback_witness.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preflight", [False, True])
+async def test_zero_limit_decision_cannot_bypass_warning_text_estimation(preflight):
+    from amplifier_module_context_managed.measurement import RequestMeasurement
+
+    fitter = RequestContext(max_tokens=100)
+    await fitter.set_messages(media_history())
+    fallback = AsyncMock(return_value={
+        "v": 1, "validated": True, "projection_digest": "a" * 64,
+        "messages": [{"role": "user", "content": "Warning text " * 10000}]})
+    provider = SimpleNamespace(media_text_fallback_witness=fallback)
+
+    async def count_view(view):
+        return {"dispatch": ChatRequest(messages=[Message(**row) for row in view]),
+                "budget_decision": {"estimated_input_tokens": 0, "input_limit_tokens": 0}}
+
+    with pytest.raises(CompactionError, match="media_budget_unavailable"):
+        if preflight:
+            await RequestMeasurement(count_view, provider).measure(fitter, await fitter._view())
+        else:
+            await fitter.get_measured_request_view(provider=provider, retain_contents=[], count_view=count_view)
+    fallback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_canonical_and_request_view_deep_copies_preserve_ref_order_and_multiplicity():
     original = media_history()
     context = BoundaryContextManager()

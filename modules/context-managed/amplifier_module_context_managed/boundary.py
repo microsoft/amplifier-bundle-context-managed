@@ -794,7 +794,8 @@ class BoundaryContextManager:
                             # portable summaries on unsupported providers, never native compact.
                             # A healthy native response may take many minutes.
                             # Elapsed time must not cancel it or start a fallback.
-                            fits, compact_budget = await request_fits(provider, request)
+                            options = measurement.request_options if measurement is not None else None
+                            fits, compact_budget = await request_fits(provider, request, request_options=options)
                             if not fits:
                                 # Native compaction accepts one complete eligible
                                 # window, never fragments. Oversized legacy history
@@ -804,7 +805,8 @@ class BoundaryContextManager:
                                 stats["native_request_budget"] = compact_budget
                                 raise CompactionError("native_input_oversized", "Native input exceeds the provider allowance. Restore the last compatible checkpoint or explicitly recover this oversized history; it was not sent to native compaction.")
                             stats["calls"] += 1
-                            result = await provider.compact_context(request)
+                            result = await provider.compact_context(request, **(
+                                {"request_options": options} if options is not None else {}))
                             if revision != self.revision:
                                 raise RuntimeError("History changed during compaction; stale summary was discarded")
                             check_summary_contract()

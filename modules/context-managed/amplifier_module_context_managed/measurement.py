@@ -29,6 +29,7 @@ class RequestMeasurement:
         self.preflight_calls = 0
         self.reused_calls = 0
         self.dispatch = None
+        self.request_options = None
 
     @staticmethod
     def key(view):
@@ -47,10 +48,11 @@ class RequestMeasurement:
         if not isinstance(envelope, dict) or "dispatch" not in envelope:
             raise TypeError("count_view must return {dispatch, budget_decision}")
         measurement = fitter._measured_budget_decision(envelope)
-        await require_media_budget(self.provider, envelope["dispatch"], envelope.get("budget_decision"),
-                                   messages=public_view)
+        fallback_rows = await require_media_budget(self.provider, envelope["dispatch"], envelope.get("budget_decision"),
+                                                   messages=public_view, request_options=envelope.get("request_options"))
         if self.dispatch is None and isinstance(envelope["dispatch"], ChatRequest):
             self.dispatch = envelope["dispatch"].model_copy(deep=True)
+            self.request_options = copy.deepcopy(envelope.get("request_options"))
         self.cached = (self.key(public_view), envelope)
         decision = envelope.get("budget_decision")
         if measurement is not None:
@@ -60,6 +62,8 @@ class RequestMeasurement:
             # The validator above checks these original hard-safety fields
             # even when a provider-native measurement is unavailable.
             return decision["estimated_input_tokens"], decision["input_limit_tokens"], "provider_estimate"
+        if fallback_rows is not None:
+            return fitter._estimate_tokens(fallback_rows), None, "public_estimate"
         return None, None, "public_estimate"
 
     async def count(self, view):
