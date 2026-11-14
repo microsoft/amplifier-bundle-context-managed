@@ -4,6 +4,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+from collections import Counter
 from pathlib import Path
 import platform
 import subprocess
@@ -12,6 +13,7 @@ import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[2]
+INVENTORY = Path(__file__).with_name("correction-nodeids.txt")
 CONFIG = ["-c", "modules/context-managed/pyproject.toml"]
 CORRECTIONS = (
     "test_summary_request_release",
@@ -32,7 +34,79 @@ SUITES = {
 }
 
 
-def junit_result(path, *, corrections=False):
+class OutcomeRecorder:
+    """Public pytest hooks retain collection and outcomes, including non-strict XPASS."""
+
+    def __init__(self, path):
+        self.path = path
+        self.collected = []
+        self.reports = []
+        self.collection_errors = []
+
+    def pytest_collection_finish(self, session):
+        self.collected = [item.nodeid for item in session.items]
+
+    def pytest_collectreport(self, report):
+        if report.failed:
+            self.collection_errors.append(report.nodeid)
+
+    def pytest_runtest_logreport(self, report):
+        self.reports.append({
+            "nodeid": report.nodeid, "when": report.when,
+            "outcome": report.outcome, "wasxfail": hasattr(report, "wasxfail"),
+        })
+
+    def pytest_sessionfinish(self, session, exitstatus):
+        self.path.write_text(json.dumps({
+            "collected": self.collected, "reports": self.reports,
+            "collection_errors": self.collection_errors, "exitstatus": int(exitstatus),
+        }, indent=2) + "\n")
+
+
+def junit_identity(nodeid):
+    # Match pytest's path/class/function encoding, preserving parameter text.
+    address, bracket, parameters = nodeid.partition("[")
+    parts = address.split("::")
+    classname = ".".join([parts[0].removesuffix(".py").replace("/", "."), *parts[1:-1]])
+    return classname, parts[-1] + bracket + parameters
+
+
+def outcome_result(path, *, corrections=False):
+    data = json.loads(path.read_text())
+    collected, reports = data["collected"], data["reports"]
+    if data["exitstatus"] or data["collection_errors"]:
+        raise ValueError("Unsuccessful pytest session/collection")
+    if not collected or len(set(collected)) != len(collected):
+        raise ValueError("Empty or duplicate collected node IDs")
+    if corrections:
+        expected = INVENTORY.read_text().splitlines()
+        if len(set(expected)) != len(expected) or Counter(collected) != Counter(expected):
+            raise ValueError("Correction collected node IDs differ from reviewed inventory")
+    grouped = {nodeid: {} for nodeid in collected}
+    for report in reports:
+        nodeid, phase = report["nodeid"], report["when"]
+        if nodeid not in grouped or phase not in {"setup", "call", "teardown"}:
+            raise ValueError("Extra/renamed outcome node ID or unknown phase")
+        if phase in grouped[nodeid]:
+            raise ValueError("Duplicate outcome node ID/phase")
+        outcome, wasxfail = report["outcome"], report["wasxfail"]
+        if outcome not in {"passed", "failed", "skipped"} or type(wasxfail) is not bool:
+            raise ValueError("Invalid typed outcome")
+        if outcome == "failed" or (outcome == "passed" and wasxfail):
+            raise ValueError("Failed or XPASS outcome (including strict=False)")
+        if corrections and (outcome != "passed" or wasxfail):
+            raise ValueError("Correction tests must not skip or xfail")
+        grouped[nodeid][phase] = report
+    for phases in grouped.values():
+        expected_phases = {"setup", "teardown"}
+        if phases.get("setup", {}).get("outcome") == "passed":
+            expected_phases.add("call")
+        if set(phases) != expected_phases:
+            raise ValueError("Missing call/setup/teardown outcome")
+    return data
+
+
+def junit_result(path, outcomes, *, corrections=False):
     root = ET.parse(path).getroot()
     cases = root.findall(".//testcase")
     counts = {
@@ -45,13 +119,17 @@ def junit_result(path, *, corrections=False):
         raise ValueError("No test cases collected")
     if counts["failures"] or counts["errors"]:
         raise ValueError(f"Unsuccessful JUnit: {counts}")
-    if corrections:
-        if counts["skipped"]:
-            raise ValueError("Correction tests must not skip or xfail")
-        for name in CORRECTIONS:
-            if not any(case.get("classname", "").split(".")[-1] == name
-                       for case in cases):
-                raise ValueError(f"Missing correction module: {name}")
+    expected = Counter(junit_identity(nodeid) for nodeid in outcomes["collected"])
+    actual = Counter((case.get("classname"), case.get("name")) for case in cases)
+    if expected != actual or any(count != 1 for count in actual.values()):
+        raise ValueError("Missing/extra/duplicate/renamed JUnit test identities")
+    skipped = sum(any(report["nodeid"] == nodeid and report["outcome"] == "skipped"
+                      for report in outcomes["reports"])
+                  for nodeid in outcomes["collected"])
+    if counts["skipped"] != skipped:
+        raise ValueError("JUnit skips disagree with typed outcomes")
+    if corrections and counts["skipped"]:
+        raise ValueError("Correction tests must not skip or xfail")
     return counts
 
 
@@ -60,7 +138,8 @@ def main():
     evidence = ROOT / "component-evidence"
     # Fail rather than combine fresh results with stale reports.
     evidence.mkdir(exist_ok=True)
-    if any(evidence.glob("*.xml")) or (evidence / "results.json").exists():
+    if (any(evidence.glob("*.xml")) or any(evidence.glob("*-outcomes.json"))
+            or (evidence / "results.json").exists()):
         raise RuntimeError("Use a fresh component-evidence directory")
     metadata = {
         "scope": "component only; no Foundation/F1 pairing or installed media graph",
@@ -87,7 +166,9 @@ def main():
     results = {}
     for name, selectors in SUITES.items():
         report = evidence / f"{name}.xml"
-        command = [sys.executable, "-m", "pytest", *selectors, "-ra",
+        outcomes_path = evidence / f"{name}-outcomes.json"
+        command = [sys.executable, str(Path(__file__).resolve()), "--pytest",
+                   str(outcomes_path), *selectors, "-ra",
                    f"--junitxml={report}"]
         print(f"\n=== {name}: {command!r} ===", flush=True)
         with (evidence / f"{name}.log").open("w") as log:
@@ -99,8 +180,10 @@ def main():
                 returncode = process.wait()
         result = {"command": command, "returncode": returncode}
         try:
-            result["junit"] = junit_result(report, corrections=name == "corrections")
-        except (OSError, ET.ParseError, ValueError) as error:
+            outcomes = outcome_result(outcomes_path, corrections=name == "corrections")
+            result["junit"] = junit_result(
+                report, outcomes, corrections=name == "corrections")
+        except (OSError, ET.ParseError, ValueError, KeyError, TypeError) as error:
             result["report_error"] = str(error)
         results[name] = result
     (evidence / "results.json").write_text(json.dumps(results, indent=2) + "\n")
@@ -121,4 +204,9 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if len(sys.argv) > 1 and sys.argv[1] == "--pytest":
+        import pytest
+
+        sys.exit(pytest.main(sys.argv[3:], plugins=[OutcomeRecorder(Path(sys.argv[2]))]))
+    else:
+        sys.exit(main())
