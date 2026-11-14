@@ -131,13 +131,83 @@ class EvidenceTests(unittest.TestCase):
         data["reports"][1].update(outcome="skipped", wasxfail=True)
         self.check_outcomes(data)
         body = junit_body(data["collected"])
-        with self.assertRaisesRegex(ValueError, "skips disagree"):
+        with self.assertRaisesRegex(ValueError, "status disagrees"):
             self.check_junit(body, data)
         ET.SubElement(body[0], "skipped")
         self.assertEqual(self.check_junit(body, data)["skipped"], 1)
         data["reports"][1].update(outcome="passed")
         with self.assertRaisesRegex(ValueError, "XPASS"):
             self.check_outcomes(data)
+
+    def test_count_preserving_skip_swap_is_rejected_per_identity(self):
+        ids = ["test_required.py::test_required", "test_optional.py::test_optional"]
+        data = typed_outcomes(ids)
+        data["reports"][4]["outcome"] = "skipped"
+        self.check_outcomes(data)  # A valid broader-suite optional call skip.
+        body = junit_body(ids)
+        ET.SubElement(body[0], "skipped")  # Same totals, wrong test skipped.
+        with self.assertRaisesRegex(ValueError, "status disagrees"):
+            self.check_junit(body, data)
+
+    def test_consistent_optional_skips_join_by_identity_not_order(self):
+        ids = ["test_required.py::test_required", "test_optional.py::test_optional"]
+        for phase in ("setup", "call", "teardown"):
+            for xfail in (False, True):
+                data = typed_outcomes(ids)
+                for report in data["reports"]:
+                    if report["nodeid"] == ids[1] and report["when"] == phase:
+                        report.update(outcome="skipped", wasxfail=xfail)
+                if phase == "setup":
+                    data["reports"] = [r for r in data["reports"]
+                                       if not (r["nodeid"] == ids[1] and r["when"] == "call")]
+                body = junit_body(list(reversed(ids)))
+                ET.SubElement(body[0], "skipped")
+                with self.subTest(phase=phase, xfail=xfail):
+                    self.check_outcomes(data)
+                    self.assertEqual(
+                        self.check_junit(body, data),
+                        {"tests": 2, "failures": 0, "errors": 0, "skipped": 1},
+                    )
+
+    def test_malformed_optional_phase_states_are_rejected_by_both_readers(self):
+        variants = []
+        data = typed_outcomes(["test_optional.py::test_optional"])
+        for mode in ("duplicate", "missing", "setup_skip_with_call", "multiple_skips",
+                     "unknown_phase", "unknown_outcome", "untyped_xfail"):
+            changed = copy.deepcopy(data)
+            if mode == "duplicate":
+                changed["reports"].append(changed["reports"][1])
+            elif mode == "missing":
+                changed["reports"].pop()
+            elif mode == "setup_skip_with_call":
+                changed["reports"][0]["outcome"] = "skipped"
+            elif mode == "multiple_skips":
+                changed["reports"][1]["outcome"] = "skipped"
+                changed["reports"][2]["outcome"] = "skipped"
+            elif mode == "unknown_phase":
+                changed["reports"][1]["when"] = "unknown"
+            elif mode == "unknown_outcome":
+                changed["reports"][1]["outcome"] = "unknown"
+            else:
+                changed["reports"][1]["wasxfail"] = "false"
+            variants.append((mode, changed))
+        for mode, changed in variants:
+            with self.subTest(mode=mode):
+                with self.assertRaises(ValueError):
+                    self.check_outcomes(changed)
+                with self.assertRaises(ValueError):
+                    self.check_junit(junit_body(changed["collected"]), changed)
+
+    def test_malformed_junit_statuses_are_rejected(self):
+        ids = ["test_optional.py::test_optional"]
+        data = typed_outcomes(ids)
+        data["reports"][1]["outcome"] = "skipped"
+        for tags in (("skipped", "skipped"), ("passed",), ("unknown",)):
+            body = junit_body(ids)
+            for tag in tags:
+                ET.SubElement(body[0], tag)
+            with self.subTest(tags=tags), self.assertRaisesRegex(ValueError, "Malformed JUnit"):
+                self.check_junit(body, data)
 
 
 class RealPytestHookTests(unittest.TestCase):
@@ -158,11 +228,16 @@ class RealPytestHookTests(unittest.TestCase):
             )
             return result.returncode, json.loads(outcomes.read_text()), ET.parse(report).getroot()
 
-    def validate_probe(self, data, *, corrections=False):
+    def validate_probe(self, data, xml=None, *, corrections=False):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "outcomes.json"
             path.write_text(json.dumps(data))
-            return ci.outcome_result(path, corrections=corrections)
+            result = ci.outcome_result(path, corrections=corrections)
+            if xml is not None:
+                report = Path(directory) / "report.xml"
+                ET.ElementTree(xml).write(report)
+                ci.junit_result(report, result, corrections=corrections)
+            return result
 
     def test_actual_strict_false_xpass_is_rejected_despite_plain_junit_pass(self):
         code, data, xml = self.run_probe(
@@ -178,7 +253,7 @@ class RealPytestHookTests(unittest.TestCase):
             "import pytest\n@pytest.mark.xfail(strict=False)\ndef test_probe(): assert False\n")
         self.assertEqual(code, 0)
         self.assertIsNotNone(xml.find(".//skipped"))
-        self.validate_probe(data)  # Broader expected failures stay explicit skips.
+        self.validate_probe(data, xml)  # Broader expected failures stay explicit skips.
         # Use the real outcome for a reviewed ID to isolate the correction skip gate.
         first = ci.INVENTORY.read_text().splitlines()[0]
         full = typed_outcomes(ci.INVENTORY.read_text().splitlines())
@@ -189,9 +264,36 @@ class RealPytestHookTests(unittest.TestCase):
     def test_actual_ordinary_pass_has_all_phases(self):
         code, data, xml = self.run_probe("def test_probe(): pass\n")
         self.assertEqual(code, 0)
-        self.validate_probe(data)
+        self.validate_probe(data, xml)
         self.assertEqual([r["when"] for r in data["reports"]], ["setup", "call", "teardown"])
         self.assertEqual(len(xml.findall(".//testcase")), 1)
+
+    def test_actual_setup_call_and_teardown_skips_join_per_identity(self):
+        code, data, xml = self.run_probe(
+            "import pytest\n"
+            "@pytest.fixture\n"
+            "def setup_skip(): pytest.skip('optional setup')\n"
+            "@pytest.fixture\n"
+            "def teardown_skip():\n"
+            "    yield\n"
+            "    pytest.skip('optional teardown')\n"
+            "def test_required(): pass\n"
+            "def test_setup(setup_skip): pass\n"
+            "def test_call(): pytest.skip('optional call')\n"
+            "def test_teardown(teardown_skip): pass\n"
+        )
+        self.assertEqual(code, 0)
+        self.validate_probe(data, xml)
+        self.assertEqual(list(ci.outcome_statuses(data).values()).count("skipped"), 3)
+        self.assertEqual(len(xml.findall(".//skipped")), 3)
+        # Keep the same count and identities but move one skip to the required pass.
+        cases = xml.findall(".//testcase")
+        skipped = next(case for case in cases if case.find("skipped") is not None)
+        marker = skipped.find("skipped")
+        skipped.remove(marker)
+        next(case for case in cases if case.get("name") == "test_required").append(marker)
+        with self.assertRaisesRegex(ValueError, "status disagrees"):
+            self.validate_probe(data, xml)
 
 
 if __name__ == "__main__":
