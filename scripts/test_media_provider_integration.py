@@ -1,7 +1,8 @@
 """Explicit offline owner-wrapper integration; run with MEDIA_PROVIDER_SOURCE.
 
 The source path must be an exported, exact committed media_provider.py from
-Foundation. It is loaded only by this test, never imported by the context module.
+Foundation, with that Foundation package on PYTHONPATH for relative imports.
+It is loaded only by this test, never imported by the context module.
 A structural prepared-capability fixture substitutes for assets/authorization;
 no pixels, image decoding, provider SDK, network or inference is involved.
 """
@@ -35,7 +36,8 @@ def wrapper_type():
     path = Path(os.environ["MEDIA_PROVIDER_SOURCE"])
     expected = os.environ["MEDIA_PROVIDER_SHA256"]
     assert hashlib.sha256(path.read_bytes()).hexdigest() == expected
-    spec = importlib.util.spec_from_file_location("_owner_media_provider_integration", path)
+    importlib.import_module("amplifier_foundation.session")
+    spec = importlib.util.spec_from_file_location("amplifier_foundation.session._owner_media_provider_integration", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -326,6 +328,7 @@ async def test_actual_wrapper_direct_warning_only_no_counter_uses_projected_warn
         result = await fitter.get_messages_for_request_retaining(provider=wrapper, retain_contents=[])
         assert result[-1]["metadata"] == original[-1]["metadata"]
         assert len(capability.prepared) == 1
+        assert capability.prepared[0].release_calls == 1
         assert not provider.counted and not provider.sent
         assert await fitter.get_messages() == original
     finally:
