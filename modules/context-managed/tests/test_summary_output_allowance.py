@@ -9,6 +9,7 @@ from amplifier_core.llm_errors import ContextLengthError
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 from amplifier_module_context_managed.checkpoint import digest
 from amplifier_module_context_managed.errors import CompactionError
+from amplifier_module_context_managed.summary import request_fits, summary_config, summary_request
 
 
 IDENTITY = {"provider": "fixture", "model": "large"}
@@ -216,7 +217,9 @@ async def test_metadata_await_cannot_dispatch_under_changed_contract(change):
         return original_info
 
     model.get_info = get_info
-    task = asyncio.create_task(context._prepare(model, None, []))
+    task = asyncio.create_task(context._summarize(model, original, context.revision,
+        {"calls": 0}, fingerprint="fixture",
+        source_revision={"messages": len(original), "sha256": digest(original)}, identity=IDENTITY))
     await entered.wait()
     if change == "cost":
         context.config["summary_max_output_tokens"] = 4096
@@ -247,3 +250,36 @@ async def test_dispatch_output_refusal_is_not_repaired_by_splitting():
         await context._prepare(model, None, [])
     assert len(model.calls) == 1 and len(model.counts) == 1
     assert context.summary is None
+
+
+@pytest.mark.asyncio
+async def test_larger_output_reservation_can_refuse_a_previously_fitting_request():
+    model = provider(37000, 128000, finish="end_turn")
+    # Advisory metadata selects the workload, not the actual assembled limit.
+    model.get_info = lambda: SimpleNamespace(defaults={
+        "model": "large", "context_window": 1000000, "max_output_tokens": 128000})
+    resolved, _ = await summary_config(model, {})
+    request = summary_request("required instructions " * 40, "source " * 1000, "previous note", resolved)
+    fits, budget = await request_fits(model, request)
+    assert not fits and budget["output_reserve"] == 32768
+    small = request.model_copy(update={"max_output_tokens": 8192})
+    assert (await request_fits(model, small))[0]
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_unbound_partial_progress_is_recomputed_not_reused():
+    context, model = await manager(summary_max_calls=1), provider()
+    with pytest.raises(CompactionError):
+        await context._prepare(model, None, [])
+    record = context.export_checkpoint(IDENTITY)
+    record["configurationVersion"] = 2
+    record["progress"].pop("generation_contract")
+    record["sha256"] = digest({k: v for k, v in record.items() if k != "sha256"})
+    cold = await manager()
+    assert cold.restore_checkpoint(record, IDENTITY)["status"] == "resuming"
+    await cold._prepare(provider(), None, [])
+    finished = next(call.args[1] for call in cold.hooks.emit.call_args_list
+                    if call.args[0] == "context:compaction_finished")
+    assert finished["resumed_fragments"] == 0
+    assert cold.summary is not None

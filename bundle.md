@@ -118,7 +118,7 @@ The bundled `summary_target_tokens` value is accepted for compatibility, but is
 inert in Boundary. Portable generation uses `summary_max_output_tokens`; native
 generation has a separate allowance. An explicit positive integer is preserved,
 including smaller cost limits. Without one, the portable policy uses 32768 when
-the summarizer advertises a matching model, at least 262144 context tokens and
+the summarizer advertises a matching model, at least 131072 context tokens and
 32768 output tokens; otherwise it retains 8192, lowered by a smaller advertised
 output allowance. These are workload defaults, not capability discovery:
 wrappers can advertise inherited or foreground defaults. The selected provider

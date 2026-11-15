@@ -22,7 +22,8 @@ async def summary_config(provider, config):
     Published defaults select a conservative workload profile, not a promise of
     model capability. The provider still owns the selected model's hard ceiling
     and complete assembled-request admission. In particular, a wrapper may
-    advertise a foreground allowance here; this helper never raises it.
+    advertise a foreground allowance here; only an explicit summary override
+    may exceed it. An implicit policy is never raised above that advertisement.
     """
     resolved = copy.deepcopy(config)
     explicit = config.get("summary_max_output_tokens")
@@ -38,11 +39,12 @@ async def summary_config(provider, config):
         defaults = info.get("defaults", {}) if isinstance(info, dict) else getattr(info, "defaults", {})
     defaults = defaults if isinstance(defaults, dict) else {}
     model = config.get("summarization_model") or getattr(provider, "default_model", None)
-    # Do not interpret another model's defaults as this summarizer's profile.
+    # Ignore an explicitly different model. Equality is only advisory: wrappers
+    # may overlay model/output defaults while retaining an inherited window.
     bound = isinstance(model, str) and defaults.get("model") == model
     window, output = (defaults.get("context_window"), defaults.get("max_output_tokens")) if bound else (None, None)
     output = output if type(output) is int and output > 0 else None
-    large = type(window) is int and window >= 262144 and output is not None and output >= 32768
+    large = type(window) is int and window >= 131072 and output is not None and output >= 32768
     allowance = explicit if explicit is not None else (32768 if large else 8192)
     if explicit is None and output is not None:
         allowance = min(allowance, output)
