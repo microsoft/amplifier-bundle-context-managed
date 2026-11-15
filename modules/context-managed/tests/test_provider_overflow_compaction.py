@@ -171,3 +171,75 @@ async def test_cancellation_in_forced_preparation_keeps_canonical_and_prior_chec
     assert await context.get_messages() == original
     assert context.summary is None
     assert not context.is_compacting
+
+
+@pytest.mark.asyncio
+async def test_completed_semantic_checkpoint_survives_unavailable_final_count_and_restore():
+    config = {"max_tokens": 1_000_000, "durable_checkpoints": True}
+    identity = {"provider": "fixture", "model": "fixture-model"}
+    context = BoundaryContextManager(config)
+    context.checkpoint_identity = lambda: copy.deepcopy(identity)
+    original = history()
+    await context.set_messages(original)
+    provider = model()
+    uncounted = await context.get_measured_request_view(
+        provider=provider, retain_contents=[], count_view=counter([], unavailable=True),
+        reason="provider_overflow")
+    # Context prepared a source-validated note; this is NOT retry admission.
+    # The Loop must reject this final None decision without committing a request.
+    assert uncounted["final_attempt"]["budget_decision"] is None
+    assert uncounted["transaction"] is None
+    assert context.summary is not None
+    calls = provider.complete.await_count
+    record = context.export_checkpoint(identity)
+    restored = BoundaryContextManager(config)
+    restored.checkpoint_identity = context.checkpoint_identity
+    await restored.set_messages(original)
+    assert restored.restore_checkpoint(record, identity)["status"] == "restored"
+    counted = await restored.get_measured_request_view(
+        provider=provider, retain_contents=[], count_view=counter([]))
+    assert counted["final_attempt"]["budget_decision"]["measurement"]["kind"] == "provider_count"
+    assert provider.complete.await_count == calls
+    assert await restored.get_messages() == original
+
+
+@pytest.mark.asyncio
+async def test_forced_native_compaction_does_not_skip_small_new_eligible_prefix():
+    context = BoundaryContextManager({"max_tokens": 1_000_000, "native_min_new_tokens": 500})
+    original = history()
+    await context.set_messages(original)
+    provider = model()
+    provider.supports_native_compaction = lambda: True
+    provider.native_compaction_requires_request_context = True
+    provider.validate_compacted_context = lambda row: bool((row.get("metadata") or {}).get("native"))
+    rounds = []
+
+    async def compact(request):
+        rounds.append(request)
+        return {"kind": "native", "message": {
+            "role": "user", "content": "Native checkpoint",
+            "metadata": {"source": "context-managed", "native": len(rounds)}}}
+
+    provider.compact_context = compact
+
+    async def count(view):
+        native = next(((row.get("metadata") or {}).get("native") for row in view
+                       if (row.get("metadata") or {}).get("native")), 0)
+        tokens = 10_000 if not native else 1_000 if native == 1 else 900
+        return {"dispatch": ChatRequest(messages=[Message(**row) for row in view]),
+            "budget_decision": {"estimated_input_tokens": tokens, "input_limit_tokens": 1_000_000,
+                "measurement": {"kind": "provider_count", "source": "fixture.count", "input_tokens": tokens}}}
+
+    await context.get_measured_request_view(
+        provider=provider, retain_contents=[], count_view=count, reason="provider_overflow")
+    assert len(rounds) == 1
+    # The next eligible prefix is tiny and below both ordinary native triggers,
+    # but a consumed provider rejection explicitly requests legal compaction.
+    await context.add_message({"role": "assistant", "content": "Recent result."})
+    await context.add_message({"role": "user", "content": "Next human turn."})
+    result = await context.get_measured_request_view(
+        provider=provider, retain_contents=[], count_view=count, reason="provider_overflow")
+    assert len(rounds) == 2
+    provider.complete.assert_not_awaited()
+    assert result["final_attempt"]["budget_decision"]["measurement"]["input_tokens"] == 900
+    assert (await context.get_messages())[:len(original)] == original
