@@ -90,6 +90,20 @@ required reminder text or grant authority from historical content.
 
 ### Bounded and native compaction
 
+The optional `context.measured_request_view` capability accepts
+`reason="provider_overflow"` from an orchestrator that has consumed valid,
+provider-owned rejection feedback. This requests compaction of the next legal
+settled prefix even when public semantic pressure is below the normal trigger:
+opaque signed state can dominate the rejected wire request. It never extends the
+eligible boundary, changes canonical originals, includes private reasoning in a
+portable note, or bypasses native compaction requirements. Other reasons fail
+before preparation. Ordinary measured requests keep their existing trigger.
+
+The reason is not proof of a fit. The orchestrator must require an authoritative
+provider count of its complete exact replacement request, a changed input view,
+and a reduction from the rejected input before any bounded foreground retry.
+An unavailable or estimate-only count cannot authorize that retry.
+
 The boundary engine requires an advertised continuation provider's native
 compaction contract: `supports_native_compaction()`,
 `validate_compacted_context(message)`, `compact_context(request)`, and a

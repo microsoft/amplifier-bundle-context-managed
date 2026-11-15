@@ -528,7 +528,7 @@ class BoundaryContextManager:
         count = measured.get("input_tokens")
         return count if measured.get("kind") == "provider_count" and type(count) is int and count >= 0 else None
 
-    async def _prepare(self, provider, token_budget, retain, measurement=None):
+    async def _prepare(self, provider, token_budget, retain, measurement=None, *, reason=None):
         messages, revision = copy.deepcopy(self.messages), self.revision
         carry = self._carry(messages)
         # Materialize dynamic instructions and operation observations once for
@@ -686,8 +686,10 @@ class BoundaryContextManager:
             "retained_tail_messages": len(messages) - end,
             "unanswered_historical_calls": len(unknown)}
         should_summarize = (provider is not None and end > (self.summary[0] if self.summary else 0)
-                            and (recovery is not None or assembled_tokens >= budget * threshold))
-        if should_summarize and use_native and self.summary and isinstance(self.summary[1], dict):
+                            and (reason == "provider_overflow" or recovery is not None
+                                 or assembled_tokens >= budget * threshold))
+        if (should_summarize and reason != "provider_overflow" and use_native
+                and self.summary and isinstance(self.summary[1], dict)):
             # Large recent turns may trigger the full-window threshold even
             # though only a few new words are eligible behind the safe boundary.
             # Recompacting that tiny prefix costs a call and can enlarge state.
@@ -980,7 +982,12 @@ class BoundaryContextManager:
                 raise RuntimeError("Checkpoint changed during request preparation")
             return result
 
-    async def get_measured_request_view(self, *, provider, retain_contents, count_view, fit_output=None):
+    async def get_measured_request_view(self, *, provider, retain_contents, count_view, fit_output=None, reason=None):
+        # Only the orchestrator that consumed provider-owned rejection feedback
+        # may request this path. The reason forces legal prefix compaction, not
+        # a fit: the caller must still prove the exact replacement with a count.
+        if reason not in (None, "provider_overflow"):
+            raise ValueError("Unknown measured request preparation reason")
         # A host may consume an explicitly requested one-shot recovery here.
         # It owns intent/Stop/storage admission; absence does not change policy.
         # The recovery entry acquires this context's lock itself.
@@ -993,7 +1000,7 @@ class BoundaryContextManager:
             revision = self.revision
             measurement = RequestMeasurement(count_view)
             try:
-                fitter, retain = await self._prepare(provider, None, retain_contents, measurement)
+                fitter, retain = await self._prepare(provider, None, retain_contents, measurement, reason=reason)
                 summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
                 result = await fitter.get_measured_request_view(provider=provider, retain_contents=retain,
                     count_view=measurement.count, fit_output=fit_output)
