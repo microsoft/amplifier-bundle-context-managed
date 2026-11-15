@@ -39,6 +39,8 @@ def export_checkpoint(context, identity):
                    ("fingerprint", "source_revision", "identity", "provider", "parts_digest",
                     "segments", "text", "calls", "completed")}
         partial["provider"] = list(partial["provider"])
+        if "generation_contract" in progress:
+            partial["generation_contract"] = copy.deepcopy(progress["generation_contract"])
     record = {"format": FORMAT, "identity": copy.deepcopy(identity),
               # Version 3 fences older readers that would silently discard the
               # native summary's omission offsets. The configuration hash is

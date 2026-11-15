@@ -115,8 +115,25 @@ omitting the setting now selects the same engine. Legacy engine selection and
 Legacy-only options fail with removal guidance. See [configuration](docs/CONFIGURATION.md).
 
 The bundled `summary_target_tokens` value is accepted for compatibility, but is
-inert in Boundary. Portable generation uses `summary_max_output_tokens` (8192 by
-default); native generation has a separate allowance.
+inert in Boundary. Portable generation uses `summary_max_output_tokens`; native
+generation has a separate allowance. An explicit positive integer is preserved,
+including smaller cost limits. Without one, the portable policy uses 32768 when
+the summarizer advertises a matching model, at least 262144 context tokens and
+32768 output tokens; otherwise it retains 8192, lowered by a smaller advertised
+output allowance. These are workload defaults, not capability discovery:
+wrappers can advertise inherited or foreground defaults. The selected provider
+must still clamp or reject its actual model limit and admit the whole request,
+including instructions, previous note, source and output reservation.
+
+The allowance covers combined thinking and text where the provider accounts
+for both. It is a ceiling, not a summary length target or an adequacy guarantee.
+Incomplete responses remain rejected. Unclassified provider limit errors stop
+instead of causing repeated input splitting. No output-escalation retry is added.
+Partial checkpoint progress now binds the resolved generation contract; legacy
+or changed contracts are recomputed from originals, not silently reused. Paid
+pieces may therefore need regeneration. Completed notes remain compatible.
+An already latched failure needs a supported configuration change or replacement
+worker with the updated component; changing metadata alone does not clear it.
 
 ## Transcript Tool
 

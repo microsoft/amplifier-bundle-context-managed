@@ -12,6 +12,44 @@ from decimal import Decimal, InvalidOperation
 from amplifier_core import ChatRequest, Message
 
 
+class SummaryInputTooLarge(Exception):
+    """Only a local input-fit refusal authorizes splitting summary source."""
+
+
+async def summary_config(provider, config):
+    """Resolve an absent-only output policy without model discovery or inference.
+
+    Published defaults select a conservative workload profile, not a promise of
+    model capability. The provider still owns the selected model's hard ceiling
+    and complete assembled-request admission. In particular, a wrapper may
+    advertise a foreground allowance here; this helper never raises it.
+    """
+    resolved = copy.deepcopy(config)
+    explicit = config.get("summary_max_output_tokens")
+    if "summary_max_output_tokens" in config and (type(explicit) is not int or explicit <= 0):
+        raise ValueError("summary_max_output_tokens must be a positive integer")
+    defaults = {}
+    info = None
+    getter = getattr(provider, "get_info", None)
+    if callable(getter):
+        info = getter()
+        if inspect.isawaitable(info):
+            info = await info
+        defaults = info.get("defaults", {}) if isinstance(info, dict) else getattr(info, "defaults", {})
+    defaults = defaults if isinstance(defaults, dict) else {}
+    model = config.get("summarization_model") or getattr(provider, "default_model", None)
+    # Do not interpret another model's defaults as this summarizer's profile.
+    bound = isinstance(model, str) and defaults.get("model") == model
+    window, output = (defaults.get("context_window"), defaults.get("max_output_tokens")) if bound else (None, None)
+    output = output if type(output) is int and output > 0 else None
+    large = type(window) is int and window >= 262144 and output is not None and output >= 32768
+    allowance = explicit if explicit is not None else (32768 if large else 8192)
+    if explicit is None and output is not None:
+        allowance = min(allowance, output)
+    resolved["summary_max_output_tokens"] = allowance
+    return resolved, info
+
+
 def add_usage(stats, usage):
     """Preserve independent cache buckets and only sum known provider costs."""
     if hasattr(usage, "model_dump"):
