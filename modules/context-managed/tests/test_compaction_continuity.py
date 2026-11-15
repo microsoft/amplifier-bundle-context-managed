@@ -188,7 +188,7 @@ async def test_huge_tool_evidence_splits_after_input_budget_refusal_and_commits_
         # Reserve the explicit output as well as the 2000-character synthetic
         # source allowance; this fixture's count units are characters.
         return {"estimated_input_tokens": total,
-                "input_limit_tokens": overhead + 2000 + request.max_output_tokens,
+                "input_limit_tokens": overhead + 2000 + (request.max_output_tokens or 0),
                 "measurement": {"kind": "provider_count", "input_tokens": total}}
 
     model = SimpleNamespace(complete=complete, request_budget=budget)
