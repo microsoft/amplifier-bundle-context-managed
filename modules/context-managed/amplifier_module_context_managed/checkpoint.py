@@ -121,7 +121,7 @@ def restore_checkpoint(context, record, identity):
             recovery = record.get("recovery")
             allowed = {"throughMessage", "message", "kind", "version"}
             if version == 2:
-                if record.get("configurationVersion") != 3:
+                if record.get("configurationVersion") not in {3, 4}:
                     raise ValueError("Native omission contract requires checkpoint version 3")
                 allowed.add("omittedIndices")
                 # The only reconstructible hash-only provenance is known empty.

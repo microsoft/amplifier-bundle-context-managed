@@ -112,6 +112,7 @@ async def test_unknown_profile_does_not_gain_larger_default():
 @pytest.mark.asyncio
 async def test_provider_output_rejection_does_not_split_or_resubmit_source():
     context, model = await manager(), provider(reject=True)
+    await context.set_messages([{"role": "user", "content": "SOURCE" * 300}] + rows()[1:])
     original = await context.get_messages()
     with pytest.raises(CompactionError):
         await context._prepare(model, None, [])
@@ -205,7 +206,12 @@ async def test_invalid_explicit_allowance_fails_before_provider_dispatch(cap):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["cost", "model", "history", "cancel"])
-async def test_metadata_await_cannot_dispatch_under_changed_contract(change):
+async def test_metadata_await_cannot_dispatch_under_changed_contract(change, monkeypatch):
+    # The legacy foreground fitter has a synchronous metadata API. Exercise
+    # this new asynchronous boundary without asking that unrelated fitter to
+    # consume a coroutine.
+    from amplifier_module_context_managed.boundary import RequestContext
+    monkeypatch.setattr(RequestContext, "_calculate_budget", lambda *args: 10000)
     context, model = await manager(), provider()
     entered, release = asyncio.Event(), asyncio.Event()
     original_info = model.get_info()
@@ -240,6 +246,7 @@ async def test_metadata_await_cannot_dispatch_under_changed_contract(change):
 @pytest.mark.asyncio
 async def test_dispatch_output_refusal_is_not_repaired_by_splitting():
     context, model = await manager(), provider()
+    await context.set_messages([{"role": "user", "content": "SOURCE" * 300}] + rows()[1:])
 
     async def refusal(request, **kwargs):
         model.calls.append(request.model_dump())

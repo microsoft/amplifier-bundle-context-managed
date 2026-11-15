@@ -25,7 +25,7 @@ or writes a private transcript. See [Boundary policy](BOUNDARY_ENGINE.md) and
 | `native_compaction` | `true` | Use the continuation provider's native contract when advertised. Disabling an advertised native contract stops preparation; it does not select portable fallback. |
 | `native_min_new_tokens` | 500 | Avoid tiny native recompactions unless fitting is required. |
 | `native_compaction_max_output_tokens` | 4096 | Separate native operation output allowance. |
-| `summary_max_output_tokens` | 8192 | Portable note output allowance, including reasoning when the provider counts it there. |
+| `summary_max_output_tokens` | profile policy | Explicit positive integer wins. When absent, advertised matching-model profiles with context >=131072 and output >=32768 use 32768; other profiles use 8192, lowered by smaller advertised output. Metadata is advisory; selected-provider ceilings and whole-request admission still apply. Includes reasoning when the provider counts it there. |
 | `summary_target_tokens` | unset | Accepted compatibility setting, inert in Boundary. The bundle retains 1500; it is not remapped to `summary_max_output_tokens`. |
 | `summarization_model` | provider default | Model for portable summaries, not opaque native state. |
 | `summary_reasoning_effort` | `low` | Portable summary reasoning setting. |
