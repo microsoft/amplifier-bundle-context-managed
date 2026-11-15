@@ -247,13 +247,15 @@ class BoundaryContextManager:
                 if self._visible_reminder(row, retain, carry)]
         return project_interrupted(rows, unknown)
 
-    def _boundary(self, messages, retain):
+    def _boundary(self, messages, retain, *, unknown=None):
         turns = [i for i, row in enumerate(messages) if self._human(row)]
         end = turns[-2] if len(turns) >= 3 else 0
         calls, settled, safe = {}, [], set()
         batch_start = None
         interrupted = {}
-        for call in unanswered(messages, self._human):
+        if unknown is None:
+            unknown = unanswered(messages, self._human)
+        for call in unknown:
             interrupted.setdefault(call["continued_at"], []).append(call["call_id"])
         barrier = len(messages)
         for i, row in enumerate(messages):
@@ -330,11 +332,13 @@ class BoundaryContextManager:
                 "metadata": {"source": "context-managed", "ephemeral": True, "persisted": True}}
         return keep + [(None, note)] + list(enumerate(messages[end:], end))
 
-    def _assembled(self, messages, summary, retain=(), carry=None, omitted_indices=None):
+    def _assembled(self, messages, summary, retain=(), carry=None, omitted_indices=None, *, unknown=None):
         carry = self._carry(messages) if carry is None else carry
         omitted = self.summary_omitted_indices if omitted_indices is None else omitted_indices
         rows = self._assembly_rows(messages, summary, retain, carry, omitted)
-        return self._project([row for _, row in rows], retain, carry, unanswered(messages, self._human))
+        if unknown is None:
+            unknown = unanswered(messages, self._human)
+        return self._project([row for _, row in rows], retain, carry, unknown)
 
     @staticmethod
     def _summary_progress_stats(stats, progress):
@@ -588,7 +592,10 @@ class BoundaryContextManager:
             self.summary = None
             self.summary_omitted_indices = []
         summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
-        assembled = self._assembled(messages, self.summary, retain, carry)
+        # Reuse only this detached snapshot before the next suspension. Subsets
+        # and later candidate views still calculate their own unanswered calls.
+        unknown = unanswered(messages, self._human)
+        assembled = self._assembled(messages, self.summary, retain, carry, unknown=unknown)
         native = getattr(provider, "supports_native_compaction", None)
         validate_native = getattr(provider, "validate_compacted_context", None)
         requires_context = getattr(provider, "native_compaction_requires_request_context", False)
@@ -607,8 +614,7 @@ class BoundaryContextManager:
             if not valid_native:
                 self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint transport is unavailable or invalid.", "originalsAvailable": True}
                 raise CompactionError("native_checkpoint_invalid", "The saved native checkpoint cannot be used by this provider. Restore a compatible checkpoint or explicitly recover the history.")
-        end = self._boundary(messages, retain)
-        unknown = unanswered(messages, self._human)
+        end = self._boundary(messages, retain, unknown=unknown)
         covered_unknown = [call for call in unknown if call["source_message"] < end]
         recovery = None
         recovery_source = None

@@ -2,7 +2,7 @@
 import copy
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -248,3 +248,106 @@ async def test_frozen_native_checkpoint_advances_past_lone_interrupted_tail():
     assert await ctx.get_messages() == original
     provider.compact_context.assert_awaited_once()
     provider.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["settled", "interrupted", "ambiguous", "queued"])
+async def test_prepare_scans_same_snapshot_once_after_host_callbacks(monkeypatch, state):
+    from amplifier_module_context_managed import boundary
+
+    ctx = BoundaryContextManager({"max_tokens": 100000, "durable_checkpoints": True})
+    rows = history(count=8, size=1)
+    if state == "settled":
+        rows.insert(2, result("interrupted", "already completed"))
+    elif state == "ambiguous":
+        rows.insert(2, call("interrupted", "different action"))
+    elif state == "queued":
+        rows.insert(2, result("interrupted", '{"status":"queued","job_id":"running"}'))
+    await ctx.set_messages(rows)
+    events = []
+
+    async def factory():
+        events.append("factory")
+        return "Current instructions"
+
+    async def preserve(messages):
+        assert messages == rows
+        assert messages is not ctx.messages
+        events.append("preserve")
+        return [{"artifact": "canonical-originals"}]
+
+    def scan(messages, human):
+        events.append("scan")
+        return unanswered(messages, human)
+
+    ctx.factory, ctx.preserve_evidence = factory, preserve
+    observed = Mock(side_effect=scan)
+    monkeypatch.setattr(boundary, "unanswered", observed)
+    view = await ctx.get_messages_for_request()
+    assert events == ["factory", "preserve", "scan"]
+    assert observed.call_count == 1  # An empty result is reusable too.
+    assert ctx.last_budget["unanswered_historical_calls"] == (state == "interrupted")
+    if state == "interrupted":
+        assert ctx.last_budget["eligible_through_message"] > 3
+        receipt = next(row for row in view if row.get("tool_call_id") == "interrupted")
+        assert json.loads(receipt["content"])["execution_outcome"] == "unconfirmed"
+        assert "Do not repeat" in notice(view)[0]["content"]
+    else:
+        assert not notice(view)
+        if state in {"ambiguous", "queued"}:
+            assert ctx.last_budget["eligible_through_message"] == 0
+    assert await ctx.get_messages() == rows
+    assert ctx.evidence_refs == [{"artifact": "canonical-originals"}]
+
+    # A new request must see late evidence, not the prior absence observation.
+    if state == "interrupted":
+        rows.append(result("interrupted", "actual late result"))
+        await ctx.add_message(rows[-1])
+        events.clear()
+        again = await ctx.get_messages_for_request()
+        assert events == ["factory", "preserve", "scan"]
+        assert observed.call_count == 2
+        assert not notice(again)
+        assert ctx.last_budget["unanswered_historical_calls"] == 0
+        assert next(row for row in again if row.get("tool_call_id") == "interrupted")["content"] == "actual late result"
+        assert await ctx.get_messages() == rows
+
+
+def test_direct_helpers_rescan_subsets_and_changed_history(monkeypatch):
+    from amplifier_module_context_managed import boundary
+
+    ctx = BoundaryContextManager()
+    rows = history(count=8, size=1)
+    observed = Mock(wraps=unanswered)
+    monkeypatch.setattr(boundary, "unanswered", observed)
+    assert notice(ctx._assembled(rows, None))
+    assert ctx._boundary(rows, []) > 3
+    # The prefix has no later ordinary input, so the same call is still current.
+    prefix = rows[:2]
+    assert ctx._assembled(prefix, None) == prefix
+    assert ctx._boundary(prefix, []) == 0
+    # Direct callers need no revision token, including borrowed nested edits.
+    rows[2]["metadata"] = {"amplifier_input": {"version": 1, "kind": "service"}}
+    assert not notice(ctx._assembled(rows, None))
+    assert ctx._boundary(rows, []) == 0
+    assert observed.call_count == 6
+
+
+@pytest.mark.asyncio
+async def test_compaction_rescans_subset_and_post_await_candidate(monkeypatch):
+    from amplifier_module_context_managed import boundary
+
+    ctx = BoundaryContextManager({"max_tokens": 10000, "summarize_trigger": .3})
+    rows = history()
+    await ctx.set_messages(rows)
+    observed = Mock(wraps=unanswered)
+    monkeypatch.setattr(boundary, "unanswered", observed)
+    provider = native()
+    view = await ctx.get_messages_for_request(provider=provider)
+    provider.compact_context.assert_awaited_once()
+    scanned_lengths = [len(item.args[0]) for item in observed.call_args_list]
+    # Native validation and the final candidate each rebuild after awaits.
+    assert scanned_lengths == [len(rows), ctx.summary[0], len(rows), len(rows)]
+    assert len(notice(view)) == 1
+    assert "interrupted" in notice(view)[0]["content"]
+    assert await ctx.get_messages() == rows
