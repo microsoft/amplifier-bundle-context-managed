@@ -1,5 +1,6 @@
 """Native windows stay whole; portable notes split only when their budget requires it."""
 import asyncio
+import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -190,16 +191,27 @@ async def test_native_compaction_is_one_complete_window_with_actual_request_enve
         supports_native_compaction=lambda: True, validate_compacted_context=lambda row: bool((row.get("metadata") or {}).get("opaque")),
         compact_context=AsyncMock(return_value={"kind": "native", "message": native}),
         complete=AsyncMock())
+    owner_options = {"extended_thinking": True, "nested": {"mode": "counted"}}
+    counted_options = []
+
+    async def budget(request, *, request_options, **kwargs):
+        counted_options.append(copy.deepcopy(request_options))
+        return decision(200_000)
+
+    model.request_budget = budget
 
     async def count_view(view):
         request = ChatRequest(messages=[Message(**row) for row in view], model="chosen-model",
                               tools=[tool], tool_choice="auto", reasoning_effort="high",
                               metadata={"owner": "loop"})
         count = 500 if any((row.get("metadata") or {}).get("opaque") for row in view) else 200_000
-        return {"dispatch": request, "budget_decision": decision(count)}
+        return {"dispatch": request, "budget_decision": decision(count),
+                "request_options": copy.deepcopy(owner_options)}
 
     result = await manager.get_measured_request_view(provider=model, retain_contents=[reminder["content"]], count_view=count_view)
     model.compact_context.assert_awaited_once()
+    assert model.compact_context.call_args.kwargs["request_options"] == owner_options
+    assert counted_options == [owner_options]
     model.complete.assert_not_awaited()
     request = model.compact_context.call_args.args[0]
     assert request.model == "chosen-model" and request.tools == [tool]

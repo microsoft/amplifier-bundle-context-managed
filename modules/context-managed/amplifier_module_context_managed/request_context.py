@@ -5,7 +5,7 @@ from amplifier_core import ChatRequest, Message
 from amplifier_core.llm_errors import ContextLengthError
 from amplifier_module_context_simple import SimpleContextManager
 
-from .summary import request_fits, public_messages
+from .summary import request_fits, public_messages, require_media_budget
 
 
 class RequestContext(SimpleContextManager):
@@ -38,7 +38,8 @@ class RequestContext(SimpleContextManager):
         view = await self._view()
         budget = self._calculate_budget(token_budget, provider)
         count = self._estimate_tokens(public_messages(view))
-        fits, decision = await request_fits(provider, ChatRequest(messages=[Message(**row) for row in view]))
+        fits, decision = await request_fits(provider, ChatRequest(messages=[Message(**row) for row in view]),
+                                            estimate_tokens=self._estimate_tokens, fallback_budget=budget)
         if decision:
             count, budget = decision["input_tokens"], min(budget, decision["input_limit_tokens"])
         if not fits or count > budget:
@@ -51,6 +52,8 @@ class RequestContext(SimpleContextManager):
         if not isinstance(attempt, dict) or "dispatch" not in attempt:
             raise TypeError("count_view must return {dispatch, budget_decision}")
         measurement = self._measured_budget_decision(attempt)
+        fallback_rows = await require_media_budget(provider, attempt["dispatch"], attempt.get("budget_decision"),
+                                                   messages=view, request_options=attempt.get("request_options"))
         decision = attempt.get("budget_decision")
         count_calls = 1
         outcome = "unchanged"
@@ -60,13 +63,15 @@ class RequestContext(SimpleContextManager):
             if fitted:
                 attempt, measurement, extra = fitted
                 decision = attempt["budget_decision"]
+                fallback_rows = await require_media_budget(provider, attempt["dispatch"], decision,
+                                                           messages=view, request_options=attempt.get("request_options"))
                 count_calls += extra
                 outcome = "reduced_output"
             if decision["estimated_input_tokens"] > decision["input_limit_tokens"]:
                 self._oversize(decision["estimated_input_tokens"], decision["input_limit_tokens"])
         if decision is None:
             budget = self._calculate_budget(None, provider)
-            count = self._estimate_tokens(public_messages(view))
+            count = self._estimate_tokens(fallback_rows if fallback_rows is not None else public_messages(view))
             if count > budget:
                 self._oversize(count, budget)
         else:
