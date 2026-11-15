@@ -102,17 +102,69 @@ async def test_safety_reserved_provider_count_still_packs_one_fitting_prefix():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("raw,estimated,limit,fits", [
-    (0, 4096, 4096, True), (99, 4195, 4195, True), (99, 4195, 4194, False),
+    (0, 4096, 36864, True), (99, 4195, 36963, True), (99, 4195, 4194, False),
+    (99, 4195, 36962, False),
 ])
 async def test_reserved_count_uses_guarded_estimate_not_raw_count_for_fit(raw, estimated, limit, fits):
     result = decision(raw, limit)
     result["estimated_input_tokens"] = estimated
     model = SimpleNamespace(request_budget=lambda *args, **kwargs: result)
-    request = ChatRequest(messages=[Message(role="user", content="Source")], max_output_tokens=32768)
+    request = ChatRequest(messages=[Message(role="user", content="Source")], max_output_tokens=32768,
+                          metadata={"purpose": "context-compaction"})
     admitted, budget = await request_fits(model, request)
     assert admitted is fits
     assert budget == {"input_tokens": estimated, "input_limit_tokens": limit,
                       "output_reserve": 32768, "measurement_kind": "provider_count"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effective,expected_fit,reserve", [
+    (1024, True, 1024), (32768, False, 32768), (65536, False, 65536),
+])
+async def test_effective_reservation_clamp_and_larger_inconsistent_advertisement(effective, expected_fit, reserve):
+    result = decision(1000, 5000)
+    result["max_output_tokens"] = effective
+    request = ChatRequest(messages=[Message(role="user", content="source")], max_output_tokens=32768,
+                          metadata={"purpose": "context-compaction"})
+    fits, budget = await request_fits(SimpleNamespace(request_budget=lambda *a, **k: result), request)
+    assert fits is expected_fit and budget["output_reserve"] == reserve
+    assert request.max_output_tokens == 32768
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effective", [None, True, 0, -1, "4096", 4096.0])
+async def test_invalid_effective_output_never_proves_summary_fit(effective):
+    result = decision(1)
+    result["max_output_tokens"] = effective
+    request = ChatRequest(messages=[Message(role="user", content="source")], max_output_tokens=32768,
+                          metadata={"purpose": "context-compaction"})
+    with pytest.raises(ValueError, match="output reservation"):
+        await request_fits(SimpleNamespace(request_budget=lambda *a, **k: result), request)
+
+
+@pytest.mark.asyncio
+async def test_already_reserved_small_window_summaries_complete_with_conservative_double_reserve():
+    manager = await context(summary_max_source_chars=1000, summary_max_output_tokens=1024,
+                            summary_max_calls=64)
+    await manager.set_messages(originals(10000))
+    original = await manager.get_messages()
+    requests = []
+
+    async def budget(request, **kwargs):
+        result = decision(sum(len(str(row.content)) for row in request.messages) // 4,
+                          limit=8192 - 1024)  # provider has already reserved output
+        result["max_output_tokens"] = 1024
+        return result
+
+    async def complete(request):
+        value = await budget(request)
+        assert value["estimated_input_tokens"] + 1024 <= value["input_limit_tokens"]
+        requests.append(request)
+        return reply()
+
+    await manager._prepare(SimpleNamespace(request_budget=budget, complete=complete), None, [])
+    assert len(requests) > 1 and manager.summary is not None
+    assert await manager.get_messages() == original
 
 
 
