@@ -113,7 +113,9 @@ async def test_actual_anthropic_assembler_keeps_summary_allowance_and_model_ceil
         config = {} if explicit is None else {"summary_max_output_tokens": explicit}
         resolved, _ = await summary_config(selected, config)
         request = summary_request("instructions", "ORBIT source", "", resolved)
-        assert (await request_fits(selected, request))[0]
+        fits, budget = await request_fits(selected, request)
+        assert fits and budget["measurement_kind"] == "provider_count"
+        assert budget["input_tokens"] == 1000 + 4096  # reserve is not dropped
         response = await selected.complete(request, request_options={"auto_continue": False})
         assert response.finish_reason == "end_turn"
         assert counts and len(wires) == 1

@@ -208,7 +208,10 @@ async def request_fits(provider, request):
     counted = (isinstance(measurement, dict) and measurement.get("kind") == "provider_count"
                and isinstance(measurement.get("source"), str) and bool(measurement["source"])
                and type(measurement.get("input_tokens")) is int
-               and measurement["input_tokens"] == measured)
+               # A provider may add a safety reserve to its raw count. Keep
+               # that guarded estimate for admission; do not mistake the
+               # valid smaller raw measurement for an estimate-only result.
+               and 0 <= measurement["input_tokens"] <= measured)
     return measured <= limit, {
         "input_tokens": measured,
         "input_limit_tokens": limit,

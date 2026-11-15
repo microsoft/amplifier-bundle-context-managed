@@ -7,6 +7,7 @@ import pytest
 from amplifier_module_context_managed.errors import CompactionError
 from amplifier_core import ChatRequest, Message, ToolSpec
 from amplifier_module_context_managed.boundary import BoundaryContextManager
+from amplifier_module_context_managed.summary import request_fits
 
 
 def originals(size=600_000):
@@ -74,6 +75,46 @@ async def test_counted_fitting_prefix_is_one_portable_request_above_old_characte
     assert await manager.get_messages() == source
 
 
+@pytest.mark.asyncio
+async def test_safety_reserved_provider_count_still_packs_one_fitting_prefix():
+    """Anthropic exposes raw provider count plus a guarded estimate, not equality."""
+    manager = await context()
+    source = await manager.get_messages()
+    requests, budgets = [], []
+
+    async def budget(request, **kwargs):
+        raw = sum(len(str(row.content)) for row in request.messages) // 4
+        result = decision(raw)
+        result["estimated_input_tokens"] += 4096
+        budgets.append(result)
+        return result
+
+    async def complete(request):
+        requests.append(request)
+        return reply()
+
+    await manager._prepare(SimpleNamespace(request_budget=budget, complete=complete), None, [])
+    assert len(requests) == len(budgets) == 1
+    assert budgets[0]["estimated_input_tokens"] == budgets[0]["measurement"]["input_tokens"] + 4096
+    assert finished(manager)["last_request_budget"]["measurement_kind"] == "provider_count"
+    assert await manager.get_messages() == source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw,estimated,limit,fits", [
+    (0, 4096, 4096, True), (99, 4195, 4195, True), (99, 4195, 4194, False),
+])
+async def test_reserved_count_uses_guarded_estimate_not_raw_count_for_fit(raw, estimated, limit, fits):
+    result = decision(raw, limit)
+    result["estimated_input_tokens"] = estimated
+    model = SimpleNamespace(request_budget=lambda *args, **kwargs: result)
+    request = ChatRequest(messages=[Message(role="user", content="Source")], max_output_tokens=32768)
+    admitted, budget = await request_fits(model, request)
+    assert admitted is fits
+    assert budget == {"input_tokens": estimated, "input_limit_tokens": limit,
+                      "output_reserve": 32768, "measurement_kind": "provider_count"}
+
+
 
 @pytest.mark.asyncio
 async def test_oversized_portable_prefix_is_split_only_after_complete_request_preflight():
@@ -99,7 +140,8 @@ async def test_oversized_portable_prefix_is_split_only_after_complete_request_pr
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["provider_estimate", "missing", "mismatched", "negative", "missing_source"])
+@pytest.mark.parametrize("kind", ["provider_estimate", "missing", "mismatched", "negative",
+                                  "missing_source", "boolean", "negative_raw", "string_raw"])
 async def test_untrusted_budget_cannot_lift_conservative_portable_limit(kind):
     manager = await context()
     requests = []
@@ -110,11 +152,14 @@ async def test_untrusted_budget_cannot_lift_conservative_portable_limit(kind):
             return {}
         if kind == "mismatched":
             result["measurement"]["kind"] = "provider_count"
-            result["measurement"]["input_tokens"] = 50
+            result["measurement"]["input_tokens"] = 150  # raw cannot exceed guarded estimate
         if kind == "negative":
             result = decision(-1)
         if kind == "missing_source":
             result["measurement"] = {"kind": "provider_count", "input_tokens": 100}
+        if kind in {"boolean", "negative_raw", "string_raw"}:
+            result["measurement"] = {"kind": "provider_count", "source": "fixture.full_request",
+                                    "input_tokens": {"boolean": True, "negative_raw": -1, "string_raw": "50"}[kind]}
         return result
 
     async def complete(request):
