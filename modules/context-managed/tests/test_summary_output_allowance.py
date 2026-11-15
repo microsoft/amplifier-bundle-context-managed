@@ -247,15 +247,18 @@ async def test_metadata_await_cannot_dispatch_under_changed_contract(change, mon
 async def test_dispatch_output_refusal_is_not_repaired_by_splitting():
     context, model = await manager(), provider()
     await context.set_messages([{"role": "user", "content": "SOURCE" * 300}] + rows()[1:])
+    counts_at_dispatch = []
 
     async def refusal(request, **kwargs):
+        counts_at_dispatch.append(len(model.counts))
         model.calls.append(request.model_dump())
         raise ContextLengthError("Output ceiling is smaller than requested")
 
     model.complete = refusal
     with pytest.raises(CompactionError):
         await context._prepare(model, None, [])
-    assert len(model.calls) == 1 and len(model.counts) == 1
+    assert len(model.calls) == 1
+    assert len(model.counts) == counts_at_dispatch[0]  # no fitting/retry after refusal
     assert context.summary is None
 
 
