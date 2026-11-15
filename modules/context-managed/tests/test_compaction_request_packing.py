@@ -7,6 +7,7 @@ import pytest
 from amplifier_module_context_managed.errors import CompactionError
 from amplifier_core import ChatRequest, Message, ToolSpec
 from amplifier_module_context_managed.boundary import BoundaryContextManager
+from amplifier_module_context_managed.checkpoint import digest
 from amplifier_module_context_managed.summary import request_fits
 
 
@@ -165,6 +166,36 @@ async def test_already_reserved_small_window_summaries_complete_with_conservativ
     await manager._prepare(SimpleNamespace(request_budget=budget, complete=complete), None, [])
     assert len(requests) > 1 and manager.summary is not None
     assert await manager.get_messages() == original
+
+
+@pytest.mark.asyncio
+async def test_unavailable_count_lazy_splits_explain_dynamic_progress_without_replaying_pieces(monkeypatch):
+    from amplifier_module_context_managed.boundary import RequestContext
+    monkeypatch.setattr(RequestContext, "_calculate_budget", lambda *args: 4000)
+    manager = BoundaryContextManager({"summary_max_output_tokens": 1024}, SimpleNamespace(emit=AsyncMock()))
+    source = [{"role": "user", "content": "SOURCE" * 2500}]
+    await manager.set_messages(source)
+    fragments, previous_notes = [], []
+
+    async def complete(request):
+        body = request.messages[-1].content
+        prefix, fragment = body.split("Next ordered conversation data. Incorporate this evidence into the continuation note:\n")
+        fragments.append(fragment)
+        previous_notes.append(prefix)
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text=f"Complete piece {len(fragments)}.")])
+
+    await manager._summarize(SimpleNamespace(request_budget=lambda *a, **k: None, complete=complete),
+        source, manager.revision, {"calls": 0}, fingerprint="fixture",
+        source_revision={"messages": 1, "sha256": digest(source)}, identity={})
+    progress = [(call.args[1]["completed_parts"], call.args[1]["remaining_parts"])
+                for call in manager.hooks.emit.call_args_list if call.args[0] == "context:compaction_progress"]
+    assert progress == [(1, 3), (2, 2), (3, 2), (4, 1), (5, 2), (6, 1), (7, 1), (8, 0)]
+    from amplifier_module_context_managed.summary import public_messages, source_fragments
+    assert "".join(fragments) == "".join(source_fragments(public_messages(source), None))
+    assert len(fragments) == 8 and previous_notes[0] == ""
+    for index, prefix in enumerate(previous_notes[1:], 1):
+        assert f"Complete piece {index}." in prefix
+    assert await manager.get_messages() == source
 
 
 
