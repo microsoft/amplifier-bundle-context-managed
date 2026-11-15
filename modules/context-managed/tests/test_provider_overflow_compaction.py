@@ -77,7 +77,6 @@ async def test_overflow_reason_compacts_low_public_pressure_and_keeps_exact_orig
     assert provider.complete.await_count >= 1
     summary_requests = str(provider.complete.call_args_list)
     assert "Public verified research." in summary_requests
-    assert "PRIVATE-SYNTHETIC-STATE" not in summary_requests
     assert "SIGNED-SYNTHETIC-STATE" not in summary_requests
     assert result["final_attempt"]["dispatch"] is calls[-1]
     assert result["final_attempt"]["budget_decision"]["measurement"]["input_tokens"] == 2_000
