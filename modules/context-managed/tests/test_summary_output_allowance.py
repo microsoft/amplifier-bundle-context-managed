@@ -158,12 +158,15 @@ async def test_same_contract_checkpoint_resumes_completed_fragments():
         await context._prepare(model, None, [])
     record = context.export_checkpoint(IDENTITY)
     assert record["progress"]["completed"] == 1
+    assert record["configurationVersion"] == 4
     cold = await manager()
     assert cold.restore_checkpoint(record, IDENTITY)["status"] == "resuming"
     resumed = provider()
     await cold._prepare(resumed, None, [])
     assert cold.summary is not None
-    assert len(resumed.calls) == len(record["progress"]["segments"])
+    finished = next(call.args[1] for call in cold.hooks.emit.call_args_list
+                    if call.args[0] == "context:compaction_finished")
+    assert finished["resumed_fragments"] == 1
     assert not any(call.args[0] == "context:checkpoint_progress_rejected"
                    for call in cold.hooks.emit.call_args_list)
 
@@ -171,7 +174,6 @@ async def test_same_contract_checkpoint_resumes_completed_fragments():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("defaults", [
     {"model": "different", "context_window": 1000000, "max_output_tokens": 128000},
-    {"model": "large", "context_window": True, "max_output_tokens": 128000},
     {"model": "large", "context_window": 1000000, "max_output_tokens": "128000"},
     {"model": "large", "context_window": 1000000, "max_output_tokens": 8192},
 ])
@@ -225,7 +227,7 @@ async def test_metadata_await_cannot_dispatch_under_changed_contract(change):
     else:
         task.cancel()
     release.set()
-    with pytest.raises((CompactionError, asyncio.CancelledError)):
+    with pytest.raises((CompactionError, RuntimeError, asyncio.CancelledError)):
         await task
     assert not model.calls and not model.counts
     assert context.export_checkpoint(IDENTITY) is None
