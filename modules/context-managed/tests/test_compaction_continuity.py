@@ -152,7 +152,7 @@ def test_public_projection_omits_private_state_and_duplicate_calls_without_mutat
 
 
 @pytest.mark.asyncio
-async def test_huge_tool_evidence_splits_without_budget_capability_and_commits_once():
+async def test_huge_tool_evidence_splits_after_input_budget_refusal_and_commits_once():
     original = history()
     payload = (
         "EDGE_START=alpha "
@@ -171,10 +171,9 @@ async def test_huge_tool_evidence_splits_without_budget_capability_and_commits_o
 
     async def complete(request):
         requests.append(request)
-        # An older provider offers no request_budget capability, and rejects
-        # the first oversized fragment. The engine must adapt within this run.
-        if len(request.messages[-1].content) > 2000:
-            raise ContextLengthError("input exceeds fixture allowance")
+        # Only an observed input-fit refusal authorizes splitting. A generic
+        # provider ContextLengthError can instead mean an output ceiling.
+        assert len(request.messages[-1].content) <= 2000
         source = request.messages[-1].content
         facts = [
             fact
@@ -183,7 +182,13 @@ async def test_huge_tool_evidence_splits_without_budget_capability_and_commits_o
         ]
         return response("Objective ORBIT. " + "; ".join(facts))
 
-    model = SimpleNamespace(complete=complete)
+    async def budget(request, **kwargs):
+        total = sum(len(str(row.content)) for row in request.messages)
+        overhead = total - len(request.messages[-1].content)
+        return {"estimated_input_tokens": total, "input_limit_tokens": overhead + 2000,
+                "measurement": {"kind": "provider_count", "input_tokens": total}}
+
+    model = SimpleNamespace(complete=complete, request_budget=budget)
     manager = context(summary_max_source_chars=4000, summary_max_calls=64)
     await manager.set_messages(original)
     await manager.get_messages_for_request(provider=model)

@@ -19,7 +19,8 @@ from .interrupted import project as project_interrupted, unanswered
 from .checkpoint import digest
 from .prefix_digest import PrefixDigest
 from .measurement import RequestMeasurement, estimate_pressure
-from .summary import add_usage, public_messages, request_fits, source_fragments, summary_request
+from .summary import (SummaryInputTooLarge, add_usage, public_messages, request_fits,
+                      source_fragments, summary_config, summary_request)
 
 
 SUMMARY_PROMPT = """Prepare a factual continuation note from the supplied conversation data.
@@ -361,7 +362,27 @@ class BoundaryContextManager:
         # conservative path. Do not restore unconditional default prefragmenting.
         preflight_whole = ("summary_max_source_chars" not in self.config
                            and callable(getattr(summarizer, "request_budget", None)))
+        configuration = self.checkpoint_configuration()
+        provider_identity = (getattr(summarizer, "name", type(summarizer).__name__),
+                             getattr(summarizer, "default_model", None))
+        resolved_config, provider_info = await summary_config(summarizer, copy.deepcopy(self.config))
+        # Metadata may be asynchronous. Never bind stale output options to a
+        # newer cost/configuration contract, even if final installation would
+        # reject it: fragment generation and persistence are paid effects too.
+        current_identity = self.checkpoint_identity() if self.checkpoint_identity else identity
+        if (revision != self.revision or configuration != self.checkpoint_configuration()
+                or current_identity != identity or provider_identity != (
+                    getattr(summarizer, "name", type(summarizer).__name__),
+                    getattr(summarizer, "default_model", None))):
+            raise RuntimeError("Summary contract changed during compaction; stale summary was discarded")
+        generation_contract = {
+            "model": resolved_config.get("summarization_model") or getattr(summarizer, "default_model", None),
+            "max_output_tokens": resolved_config["summary_max_output_tokens"],
+            "reasoning_effort": resolved_config.get("summary_reasoning_effort", "low"),
+        }
         progress = self._summary_progress
+        if progress and progress.get("generation_contract") != generation_contract:
+            self._summary_progress = progress = None
         if not progress or progress["fingerprint"] != fingerprint:
             parts = list(source_fragments(public_messages(source), None if preflight_whole else limit))
             segments = [[i, 0, len(part)] for i, part in enumerate(parts)]
@@ -370,6 +391,7 @@ class BoundaryContextManager:
             if (saved and saved["fingerprint"] == fingerprint
                     and saved["provider"] == [getattr(summarizer, "name", type(summarizer).__name__),
                                               getattr(summarizer, "default_model", None)]
+                    and saved.get("generation_contract") == generation_contract
                     and saved["parts_digest"] == digest(parts)):
                 segments = saved["segments"]
                 valid = all(0 <= i < len(parts) and 0 <= a < z <= len(parts[i]) for i, a, z in segments)
@@ -392,10 +414,10 @@ class BoundaryContextManager:
                 await self._emit("context:checkpoint_progress_rejected", **self.checkpoint_status)
             progress = {"fingerprint": fingerprint, "source_revision": source_revision,
                         "identity": copy.deepcopy(identity),
-                        "configuration": self.checkpoint_configuration(),
-                        "config": copy.deepcopy(self.config),
-                        "provider": (getattr(summarizer, "name", type(summarizer).__name__),
-                                     getattr(summarizer, "default_model", None)),
+                        "configuration": configuration,
+                        "config": resolved_config,
+                        "generation_contract": generation_contract,
+                        "provider": provider_identity,
                         "pending": [parts[i][a:z] for i, a, z in segments],
                         "parts_digest": digest(parts), "segments": copy.deepcopy(segments),
                         "text": saved["text"] if saved else "",
@@ -441,12 +463,10 @@ class BoundaryContextManager:
                     # provider can no longer return an authoritative count.
                     if not fits or (len(fragment) > limit and
                                     (not preflight_whole or not counted)):
-                        raise ContextLengthError("Continuation note and required instructions exceed summary input allowance")
+                        raise SummaryInputTooLarge("Continuation note and required instructions exceed summary input allowance")
                     stats["calls"] += 1
                     progress["calls"] += 1
-                    info = summarizer.get_info() if callable(getattr(summarizer, "get_info", None)) else None
-                    if inspect.isawaitable(info):
-                        info = await info
+                    info = provider_info
                     capabilities = info.get("capabilities", []) if isinstance(info, dict) else getattr(info, "capabilities", [])
                     # This is an output-work bound, NEVER an elapsed deadline.
                     # Providers that auto-continue must expose and honor the
@@ -456,9 +476,9 @@ class BoundaryContextManager:
 
                 try:
                     response = await complete_fragment()
-                except ContextLengthError:
+                except SummaryInputTooLarge:
                     if len(fragment) < 512:
-                        raise
+                        raise ContextLengthError("Continuation note and required instructions exceed summary input allowance")
                     middle = len(fragment) // 2
                     pending[:1] = [fragment[:middle], fragment[middle:]]
                     i, start, end = progress["segments"][0]
