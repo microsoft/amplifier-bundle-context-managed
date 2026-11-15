@@ -18,8 +18,8 @@ def history():
     return [
         {"role": "user", "content": "Build the report. Preserve all source evidence."},
         {"role": "assistant", "content": [
-            {"type": "thinking", "thinking": "PRIVATE-SYNTHETIC-STATE" * 200_000,
-             "signature": "SIGNED-SYNTHETIC-STATE"},
+            {"type": "thinking", "thinking": "",
+             "signature": "SIGNED-SYNTHETIC-STATE" * 200_000},
             {"type": "text", "text": "Public verified research. " * 500},
         ], "tool_calls": [{"id": "old-tool", "name": "research", "arguments": {"topic": "report"}}]},
         {"role": "tool", "tool_call_id": "old-tool", "content": "Original tool receipt. " * 100},
