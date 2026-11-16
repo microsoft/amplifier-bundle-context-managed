@@ -157,10 +157,13 @@ async def test_frozen_396325_completed_note_remains_usable_without_generation(na
 
 
 @pytest.mark.asyncio
-async def test_frozen_396325_partial_rejected_under_new_policy_but_completed_note_preserved():
+async def test_frozen_396325_partial_rejected_under_new_policy_without_skipping_source():
     fixtures = json.loads(Path(__file__).with_name("summary_note_target_legacy.json").read_text())
     fixture = fixtures["partial_only"]
-    manager = BoundaryContextManager(fixture["config"], SimpleNamespace(emit=AsyncMock()))
+    # The frozen record stopped after one call. This inert work-per-pass option
+    # permits the test to finish recomputation without changing note identity.
+    manager = BoundaryContextManager({**fixture["config"], "summary_max_calls": 16},
+                                     SimpleNamespace(emit=AsyncMock()))
     manager.checkpoint_identity = lambda: copy.deepcopy(IDENTITY)
     await manager.set_messages(fixture["messages"])
     assert manager.restore_checkpoint(fixture["checkpoint"], IDENTITY)["status"] == "resuming"
@@ -168,4 +171,21 @@ async def test_frozen_396325_partial_rejected_under_new_policy_but_completed_not
     await manager._prepare(model, None, [])
     assert "LEGACY paid note" not in model.complete.call_args_list[0].args[0].messages[1].content
     assert finished(manager)[-1]["resumed_fragments"] == 0
+    assert await manager.get_messages() == fixture["messages"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_failure_fingerprint_does_not_latch_corrected_prompt_policy():
+    fixture = json.loads(Path(__file__).with_name("summary_note_target_legacy.json").read_text())["partial_only"]
+    manager = BoundaryContextManager({**fixture["config"], "summary_max_calls": 16},
+                                     SimpleNamespace(emit=AsyncMock()))
+    manager.checkpoint_identity = lambda: copy.deepcopy(IDENTITY)
+    await manager.set_messages(fixture["messages"])
+    old_progress = fixture["checkpoint"]["progress"]
+    manager.summary_failure = {"fingerprint": old_progress["fingerprint"],
+        "source_revision": old_progress["source_revision"], "retryable": False}
+    model = SimpleNamespace(name="fixture", default_model="fixture-model",
+                            complete=AsyncMock(return_value=response()))
+    await manager._prepare(model, None, [])
+    assert model.complete.await_count > 1 and manager.summary is not None
     assert await manager.get_messages() == fixture["messages"]
