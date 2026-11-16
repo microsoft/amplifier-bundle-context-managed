@@ -230,10 +230,33 @@ async def request_fits(provider, request):
     counted = (isinstance(measurement, dict) and measurement.get("kind") == "provider_count"
                and isinstance(measurement.get("source"), str) and bool(measurement["source"])
                and type(measurement.get("input_tokens")) is int
-               and measurement["input_tokens"] == measured)
-    return measured <= limit, {
+               # A provider may add a safety reserve to its raw count. Keep
+               # that guarded estimate for admission; do not mistake the
+               # valid smaller raw measurement for an estimate-only result.
+               and 0 <= measurement["input_tokens"] <= measured)
+    metadata = request.metadata or {}
+    portable = (metadata.get("purpose") == "context-compaction"
+                and "native_compaction_request_context" not in metadata)
+    reserve = request.max_output_tokens
+    reserve = reserve if type(reserve) is int and reserve > 0 else 0
+    effective = decision.get("max_output_tokens")
+    if portable and "max_output_tokens" in decision:
+        if type(effective) is not int or effective <= 0:
+            raise ValueError("Provider summary output reservation is invalid")
+        # This decision belongs to this exact request_budget invocation. A
+        # smaller effective cap can be the provider's own clamp. A larger
+        # advertisement is inconsistent with the caller cap: reserve all of it
+        # rather than lowering it to manufacture admission. Never change the
+        # request or increase its caller-owned generation allowance.
+        reserve = effective
+    # Portable summaries conservatively reserve output even when a provider's
+    # input allowance is independent (Anthropic) or already output-subtracted.
+    # The latter can split earlier, never admit a larger request. Native
+    # compaction has its own operation-specific accounting contract.
+    fits = measured <= limit and (not portable or reserve > 0 and measured + reserve <= limit)
+    return fits, {
         "input_tokens": measured,
         "input_limit_tokens": limit,
-        "output_reserve": request.max_output_tokens,
+        "output_reserve": reserve if portable else request.max_output_tokens,
         "measurement_kind": "provider_count" if counted else "provider_estimate",
     }

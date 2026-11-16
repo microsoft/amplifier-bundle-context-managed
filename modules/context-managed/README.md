@@ -21,6 +21,17 @@ metadata is advisory, not selected-model capability proof; the final provider
 still owns actual ceilings and full-request admission. Existing timeout
 settings remain ignored. See [configuration](../../docs/CONFIGURATION.md).
 
+Portable whole-prefix preflight recognizes a raw provider count below its
+safety-padded estimate; admission still compares the padded estimate, not the
+smaller raw count. It also reserves the request's output allowance (or the
+validated effective allowance returned for that exact request). Providers with
+an already output-subtracted input limit can therefore be conservatively
+double-reserved and fragment earlier. A model with insufficient room even for
+instructions, the prior note and that reserve stops safely; reducing input alone
+cannot repair an impossible output allowance. Explicit smaller allowances remain
+available. This does not change native/foreground accounting or permit an
+uncounted reactive retry after provider overflow.
+
 No private transcript is loaded, written, pointer-filed, or archived by this
 manager. `set_messages` accepts the host's complete canonical history; `get_messages`
 returns detached originals with metadata unchanged. Old transcripts and sidecars

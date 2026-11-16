@@ -194,7 +194,10 @@ async def test_replaced_snapshot_stays_current_only_across_compaction_and_restor
         model.complete = AsyncMock(return_value=SimpleNamespace(content=[
             SimpleNamespace(type='text', text='Historical exchanges completed; preserve their recorded evidence.')]))
     ctx = BoundaryContextManager({'max_tokens': 5000, 'summarize_trigger': .35,
-                                  'durable_checkpoints': True, 'native_min_new_tokens': 0})
+                                  'durable_checkpoints': True, 'native_min_new_tokens': 0,
+                                  # Portable output must fit this synthetic 5K
+                                  # model alongside input; native uses its own cap.
+                                  'summary_max_output_tokens': 1024})
     identity = {'provider': model.name, 'model': model.default_model}
     ctx.checkpoint_identity = lambda: identity
     stale = snapshot('Stale selected capability and surface revision.', placement)
