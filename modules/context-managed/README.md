@@ -10,8 +10,11 @@ Boundary class and host-owned history/persistence.
 Remove `verbatim_window_tokens`, `max_summary_tiers`, `summarization_prompt_path`,
 `summarization_retries_before_fallback`, `emergency_target_usage`,
 `large_result_threshold`, `pressure_warning`, and `emergency_fallback`. They fail
-even when false or null. `summary_target_tokens` is still accepted but inert;
-portable notes use `summary_max_output_tokens` (an absent-only advertised-profile
+even when false or null. A configured positive `summary_target_tokens` supplies
+soft guidance to rewrite the whole cumulative note near that visible-token target,
+not append that many tokens per fragment. Required facts take priority; no text is
+truncated and no target adherence or semantic-quality guarantee is made.
+Portable notes use `summary_max_output_tokens` (an absent-only advertised-profile
 policy: 32768 for context >=131072/output >=32768, otherwise 8192 bounded by
 smaller advertised output). Explicit positive allowances are preserved. Provider
 metadata is advisory, not selected-model capability proof; the final provider
@@ -80,8 +83,15 @@ only the derived note, exact source identity, and remaining piece boundaries;
 pending source is regenerated from the canonical transcript. After restart,
 compatible progress resumes without repeating completed pieces. Partial notes
 never enter a model's conversation view before covering the full chosen prefix.
-New partial records use configuration version 4, binding the resolved model,
-output allowance and effort; older readers reject them. Legacy unbound or changed
+Target-guided partial records use configuration version 5, additionally binding
+the rendered prompt digest; older readers reject them. Without a configured target,
+partial records keep version 4 and the exact legacy prompt. Version 4's existing
+model/output/effort contract remains readable but cannot silently resume target-guided
+work. A prompt-policy correction does not invalidate otherwise compatible completed
+portable v2/native v3 notes or discard the valid completed note beside old partial
+work. It does reject incompatible partial work: preserve that paid record, and
+expect recomputation from originals under the new policy rather than free reuse.
+No retry or migration is automatic. Legacy unbound or changed
 generation contracts are recomputed from originals and can incur generation
 cost again. Completed portable v2/native v3 notes retain their prior contract.
 Restore status and any later progress rejection provide a safe reason while
