@@ -232,5 +232,7 @@ async def test_target_prompt_is_counted_and_dispatched_as_one_unchanged_request(
         return response()
 
     await manager._prepare(SimpleNamespace(complete=complete, request_budget=count), None, [])
-    assert len(calls) > 1 and len(counts) == len(calls)
+    # Local source-cap probes may be counted and split without dispatch. Each
+    # paid completion above still requires exact equality with its latest probe.
+    assert len(calls) > 1 and len(counts) >= len(calls)
     assert all(request["max_output_tokens"] == 32768 for request in calls)
