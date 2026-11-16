@@ -167,6 +167,28 @@ def source_fragments(messages, max_chars):
         yield "\n".join(pending)
 
 
+def summary_prompt(prompt, config):
+    """Render a soft target for the whole visible note, not a generation cap.
+
+    Keep the base checkpoint prompt stable: a completed note remains useful.
+    Callers bind this rendered policy separately before resuming partial work.
+    """
+    if "summary_target_tokens" not in config:
+        return prompt
+    target = config["summary_target_tokens"]
+    if type(target) is not int or target <= 0:
+        raise ValueError("summary_target_tokens must be a positive integer")
+    return prompt + (
+        "\n\nRewrite one complete cumulative continuation note that replaces the previous note; "
+        "do not append a supplement or reproduce its wording. Merge repetition and compress "
+        "settled work into concise outcomes with exact evidence references. "
+        f"Soft target for the entire visible continuation note: approximately {target} tokens, "
+        "including retained facts and new evidence, not additional tokens per fragment. "
+        "This is not the generation allowance. Preserve required continuation facts; "
+        "do not truncate text or discard unresolved work to meet the target."
+    )
+
+
 def summary_request(prompt, source, previous, config):
     content = (
         "Previous continuation note (reference data):\n" + previous + "\n\n"
@@ -179,7 +201,7 @@ def summary_request(prompt, source, previous, config):
     )
     return ChatRequest(
         messages=[
-            Message(role="system", content=prompt),
+            Message(role="system", content=summary_prompt(prompt, config)),
             Message(role="user", content=content),
         ],
         model=config.get("summarization_model"),
@@ -208,10 +230,33 @@ async def request_fits(provider, request):
     counted = (isinstance(measurement, dict) and measurement.get("kind") == "provider_count"
                and isinstance(measurement.get("source"), str) and bool(measurement["source"])
                and type(measurement.get("input_tokens")) is int
-               and measurement["input_tokens"] == measured)
-    return measured <= limit, {
+               # A provider may add a safety reserve to its raw count. Keep
+               # that guarded estimate for admission; do not mistake the
+               # valid smaller raw measurement for an estimate-only result.
+               and 0 <= measurement["input_tokens"] <= measured)
+    metadata = request.metadata or {}
+    portable = (metadata.get("purpose") == "context-compaction"
+                and "native_compaction_request_context" not in metadata)
+    reserve = request.max_output_tokens
+    reserve = reserve if type(reserve) is int and reserve > 0 else 0
+    effective = decision.get("max_output_tokens")
+    if portable and "max_output_tokens" in decision:
+        if type(effective) is not int or effective <= 0:
+            raise ValueError("Provider summary output reservation is invalid")
+        # This decision belongs to this exact request_budget invocation. A
+        # smaller effective cap can be the provider's own clamp. A larger
+        # advertisement is inconsistent with the caller cap: reserve all of it
+        # rather than lowering it to manufacture admission. Never change the
+        # request or increase its caller-owned generation allowance.
+        reserve = effective
+    # Portable summaries conservatively reserve output even when a provider's
+    # input allowance is independent (Anthropic) or already output-subtracted.
+    # The latter can split earlier, never admit a larger request. Native
+    # compaction has its own operation-specific accounting contract.
+    fits = measured <= limit and (not portable or reserve > 0 and measured + reserve <= limit)
+    return fits, {
         "input_tokens": measured,
         "input_limit_tokens": limit,
-        "output_reserve": request.max_output_tokens,
+        "output_reserve": reserve if portable else request.max_output_tokens,
         "measurement_kind": "provider_count" if counted else "provider_estimate",
     }

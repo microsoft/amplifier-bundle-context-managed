@@ -20,7 +20,7 @@ from .checkpoint import digest
 from .prefix_digest import PrefixDigest
 from .measurement import RequestMeasurement, estimate_pressure
 from .summary import (SummaryInputTooLarge, add_usage, public_messages, request_fits,
-                      source_fragments, summary_config, summary_request)
+                      source_fragments, summary_config, summary_prompt, summary_request)
 
 
 SUMMARY_PROMPT = """Prepare a factual continuation note from the supplied conversation data.
@@ -380,6 +380,8 @@ class BoundaryContextManager:
             "max_output_tokens": resolved_config["summary_max_output_tokens"],
             "reasoning_effort": resolved_config.get("summary_reasoning_effort", "low"),
         }
+        if "summary_target_tokens" in resolved_config:
+            generation_contract["prompt_sha256"] = digest(summary_prompt(SUMMARY_PROMPT, resolved_config))
         progress = self._summary_progress
         if progress and progress.get("generation_contract") != generation_contract:
             self._summary_progress = progress = None
@@ -410,7 +412,7 @@ class BoundaryContextManager:
                 saved = None
             if not saved and self.checkpoint_status.get("status") == "resuming":
                 self.checkpoint_status = {"status": "progress_rejected", "originalsAvailable": True,
-                    "reason": "Saved partial progress no longer matches the source or summary provider."}
+                    "reason": "Saved partial progress no longer matches the source, summary provider or generation/prompt policy."}
                 await self._emit("context:checkpoint_progress_rejected", **self.checkpoint_status)
             progress = {"fingerprint": fingerprint, "source_revision": source_revision,
                         "identity": copy.deepcopy(identity),
@@ -768,9 +770,14 @@ class BoundaryContextManager:
                 candidate_omissions = sorted((set(self.summary_omitted_indices) - included)
                     | {i for i in excluded if i >= previous_end})
                 native_source = project_interrupted([row for _, row in indexed], covered_unknown)
-            fingerprint = digest({"source": source, "identity": identity,
+            work_contract = {"source": source, "identity": identity,
                 "provider": getattr(summarizer, "name", type(summarizer).__name__),
-                "model": getattr(summarizer, "default_model", None), "configuration": self.checkpoint_configuration()})
+                "model": getattr(summarizer, "default_model", None), "configuration": self.checkpoint_configuration()}
+            if not use_native and "summary_target_tokens" in self.config:
+                # A corrected prompt policy must not remain behind an old failure
+                # latch, nor silently reuse work generated with different guidance.
+                work_contract["prompt_sha256"] = digest(summary_prompt(SUMMARY_PROMPT, self.config))
+            fingerprint = digest(work_contract)
             source_revision = {"messages": end, "sha256": digest(messages[:end])}
             if self._summary_progress and self._summary_progress["fingerprint"] != fingerprint:
                 self._summary_progress = None

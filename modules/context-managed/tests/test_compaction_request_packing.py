@@ -7,6 +7,8 @@ import pytest
 from amplifier_module_context_managed.errors import CompactionError
 from amplifier_core import ChatRequest, Message, ToolSpec
 from amplifier_module_context_managed.boundary import BoundaryContextManager
+from amplifier_module_context_managed.checkpoint import digest
+from amplifier_module_context_managed.summary import request_fits
 
 
 def originals(size=600_000):
@@ -74,6 +76,133 @@ async def test_counted_fitting_prefix_is_one_portable_request_above_old_characte
     assert await manager.get_messages() == source
 
 
+@pytest.mark.asyncio
+async def test_safety_reserved_provider_count_still_packs_one_fitting_prefix():
+    """Target guidance and a padded count share the exact whole-prefix request."""
+    manager = await context(summary_target_tokens=1500, summary_max_output_tokens=32768)
+    source = await manager.get_messages()
+    requests, budgets, counted_requests = [], [], []
+
+    async def budget(request, **kwargs):
+        assert "approximately 1500 tokens" in request.messages[0].content
+        assert request.max_output_tokens == 32768
+        counted_requests.append(request.model_dump())
+        raw = sum(len(str(row.content)) for row in request.messages) // 4
+        result = decision(raw)
+        result["estimated_input_tokens"] += 4096
+        budgets.append(result)
+        return result
+
+    async def complete(request):
+        assert request.model_dump() == counted_requests[-1]
+        requests.append(request)
+        return reply()
+
+    await manager._prepare(SimpleNamespace(request_budget=budget, complete=complete), None, [])
+    assert len(requests) == len(budgets) == 1
+    assert budgets[0]["estimated_input_tokens"] == budgets[0]["measurement"]["input_tokens"] + 4096
+    assert finished(manager)["last_request_budget"]["measurement_kind"] == "provider_count"
+    assert finished(manager)["last_request_budget"]["output_reserve"] == 32768
+    assert await manager.get_messages() == source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw,estimated,limit,fits", [
+    (0, 4096, 36864, True), (99, 4195, 36963, True), (99, 4195, 4194, False),
+    (99, 4195, 36962, False),
+])
+async def test_reserved_count_uses_guarded_estimate_not_raw_count_for_fit(raw, estimated, limit, fits):
+    result = decision(raw, limit)
+    result["estimated_input_tokens"] = estimated
+    model = SimpleNamespace(request_budget=lambda *args, **kwargs: result)
+    request = ChatRequest(messages=[Message(role="user", content="Source")], max_output_tokens=32768,
+                          metadata={"purpose": "context-compaction"})
+    admitted, budget = await request_fits(model, request)
+    assert admitted is fits
+    assert budget == {"input_tokens": estimated, "input_limit_tokens": limit,
+                      "output_reserve": 32768, "measurement_kind": "provider_count"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effective,expected_fit,reserve", [
+    (1024, True, 1024), (32768, False, 32768), (65536, False, 65536),
+])
+async def test_effective_reservation_clamp_and_larger_inconsistent_advertisement(effective, expected_fit, reserve):
+    result = decision(1000, 5000)
+    result["max_output_tokens"] = effective
+    request = ChatRequest(messages=[Message(role="user", content="source")], max_output_tokens=32768,
+                          metadata={"purpose": "context-compaction"})
+    fits, budget = await request_fits(SimpleNamespace(request_budget=lambda *a, **k: result), request)
+    assert fits is expected_fit and budget["output_reserve"] == reserve
+    assert request.max_output_tokens == 32768
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effective", [None, True, 0, -1, "4096", 4096.0])
+async def test_invalid_effective_output_never_proves_summary_fit(effective):
+    result = decision(1)
+    result["max_output_tokens"] = effective
+    request = ChatRequest(messages=[Message(role="user", content="source")], max_output_tokens=32768,
+                          metadata={"purpose": "context-compaction"})
+    with pytest.raises(ValueError, match="output reservation"):
+        await request_fits(SimpleNamespace(request_budget=lambda *a, **k: result), request)
+
+
+@pytest.mark.asyncio
+async def test_already_reserved_small_window_summaries_complete_with_conservative_double_reserve():
+    manager = await context(summary_max_source_chars=1000, summary_max_output_tokens=1024,
+                            summary_max_calls=64)
+    await manager.set_messages(originals(10000))
+    original = await manager.get_messages()
+    requests = []
+
+    async def budget(request, **kwargs):
+        result = decision(sum(len(str(row.content)) for row in request.messages) // 4,
+                          limit=8192 - 1024)  # provider has already reserved output
+        result["max_output_tokens"] = 1024
+        return result
+
+    async def complete(request):
+        value = await budget(request)
+        assert value["estimated_input_tokens"] + 1024 <= value["input_limit_tokens"]
+        requests.append(request)
+        return reply()
+
+    await manager._prepare(SimpleNamespace(request_budget=budget, complete=complete), None, [])
+    assert len(requests) > 1 and manager.summary is not None
+    assert await manager.get_messages() == original
+
+
+@pytest.mark.asyncio
+async def test_unavailable_count_lazy_splits_explain_dynamic_progress_without_replaying_pieces(monkeypatch):
+    from amplifier_module_context_managed.boundary import RequestContext
+    monkeypatch.setattr(RequestContext, "_calculate_budget", lambda *args: 4000)
+    manager = BoundaryContextManager({"summary_max_output_tokens": 1024}, SimpleNamespace(emit=AsyncMock()))
+    source = [{"role": "user", "content": "SOURCE" * 2500}]
+    await manager.set_messages(source)
+    fragments, previous_notes = [], []
+
+    async def complete(request):
+        body = request.messages[-1].content
+        prefix, fragment = body.split("Next ordered conversation data. Incorporate this evidence into the continuation note:\n")
+        fragments.append(fragment)
+        previous_notes.append(prefix)
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text=f"Complete piece {len(fragments)}.")])
+
+    await manager._summarize(SimpleNamespace(request_budget=lambda *a, **k: None, complete=complete),
+        source, manager.revision, {"calls": 0}, fingerprint="fixture",
+        source_revision={"messages": 1, "sha256": digest(source)}, identity={})
+    progress = [(call.args[1]["completed_parts"], call.args[1]["remaining_parts"])
+                for call in manager.hooks.emit.call_args_list if call.args[0] == "context:compaction_progress"]
+    assert progress == [(1, 3), (2, 2), (3, 2), (4, 1), (5, 2), (6, 1), (7, 1), (8, 0)]
+    from amplifier_module_context_managed.summary import public_messages, source_fragments
+    assert "".join(fragments) == "".join(source_fragments(public_messages(source), None))
+    assert len(fragments) == 8 and previous_notes[0] == ""
+    for index, prefix in enumerate(previous_notes[1:], 1):
+        assert f"Complete piece {index}." in prefix
+    assert await manager.get_messages() == source
+
+
 
 @pytest.mark.asyncio
 async def test_oversized_portable_prefix_is_split_only_after_complete_request_preflight():
@@ -99,7 +228,8 @@ async def test_oversized_portable_prefix_is_split_only_after_complete_request_pr
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["provider_estimate", "missing", "mismatched", "negative", "missing_source"])
+@pytest.mark.parametrize("kind", ["provider_estimate", "missing", "mismatched", "negative",
+                                  "missing_source", "boolean", "negative_raw", "string_raw"])
 async def test_untrusted_budget_cannot_lift_conservative_portable_limit(kind):
     manager = await context()
     requests = []
@@ -110,11 +240,14 @@ async def test_untrusted_budget_cannot_lift_conservative_portable_limit(kind):
             return {}
         if kind == "mismatched":
             result["measurement"]["kind"] = "provider_count"
-            result["measurement"]["input_tokens"] = 50
+            result["measurement"]["input_tokens"] = 150  # raw cannot exceed guarded estimate
         if kind == "negative":
             result = decision(-1)
         if kind == "missing_source":
             result["measurement"] = {"kind": "provider_count", "input_tokens": 100}
+        if kind in {"boolean", "negative_raw", "string_raw"}:
+            result["measurement"] = {"kind": "provider_count", "source": "fixture.full_request",
+                                    "input_tokens": {"boolean": True, "negative_raw": -1, "string_raw": "50"}[kind]}
         return result
 
     async def complete(request):

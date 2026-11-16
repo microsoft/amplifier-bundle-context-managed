@@ -59,11 +59,15 @@ async def test_selected_wrapper_uses_same_summary_contract_for_count_and_dispatc
             defaults={"model": "base", "context_window": window, "max_output_tokens": 128000}))
     selected = SelectedProvider(raw, {"model": "selected", "max_output_tokens": foreground,
                                        "effort": "high"})
-    configured = {} if explicit is None else {"summary_max_output_tokens": explicit}
+    configured = {"summary_target_tokens": 1500}
+    if explicit is not None:
+        configured["summary_max_output_tokens"] = explicit
+    original_config = copy.deepcopy(configured)
     resolved, _ = await summary_config(selected, configured)
-    assert configured == ({} if explicit is None else {"summary_max_output_tokens": explicit})
+    assert configured == original_config
     assert resolved["summary_max_output_tokens"] == policy
     request = summary_request("instructions", "source", "previous note", resolved)
+    assert "approximately 1500 tokens" in request.messages[0].content
     if mode == "reject":
         with pytest.raises(ContextLengthError):
             await request_fits(selected, request)
@@ -96,6 +100,8 @@ async def test_actual_anthropic_assembler_keeps_summary_allowance_and_model_ceil
         wires.append(body)
         assert body["model"] == "claude-fable-5-2" and body["max_tokens"] == expected
         assert body["output_config"]["effort"] == "low"
+        assert "approximately 1500 tokens" in json.dumps(body["system"])
+        assert body["system"] == counts[-1]["system"]
         return http.Response(200, json={
             "id": "synthetic-summary", "type": "message", "role": "assistant",
             "model": body["model"], "content": [{"type": "text", "text": "Completed note."}],
@@ -110,14 +116,61 @@ async def test_actual_anthropic_assembler_keeps_summary_allowance_and_model_ceil
     raw._client = sdk
     selected = SelectedProvider(raw, {"model": "claude-fable-5-2", "max_output_tokens": 128000})
     try:
-        config = {} if explicit is None else {"summary_max_output_tokens": explicit}
+        config = {"summary_target_tokens": 1500}
+        if explicit is not None:
+            config["summary_max_output_tokens"] = explicit
         resolved, _ = await summary_config(selected, config)
         request = summary_request("instructions", "ORBIT source", "", resolved)
-        assert (await request_fits(selected, request))[0]
+        fits, budget = await request_fits(selected, request)
+        assert fits and budget["measurement_kind"] == "provider_count"
+        assert budget["input_tokens"] == 1000 + 4096  # reserve is not dropped
+        assert budget["output_reserve"] == expected  # includes the actual provider clamp
         response = await selected.complete(request, request_options={"auto_continue": False})
         assert response.finish_reason == "end_turn"
         assert counts and len(wires) == 1
         assert all(row["model"] == "claude-fable-5-2" for row in counts)
         assert request.max_output_tokens == (32768 if explicit is None else explicit)
+    finally:
+        await sdk.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw,expected_fit", [(950000, True), (980000, False), (1000001, False)])
+async def test_padded_count_summary_admission_preserves_full_output_headroom(raw, expected_fit):
+    """Conservative portable-summary admission, even with input-only provider limits."""
+    module = pytest.importorskip("amplifier_module_provider_anthropic")
+    SelectedProvider = pytest.importorskip("amplifier_web.host.session").SelectedProvider
+    from anthropic import _base_client
+    http = getattr(_base_client, "httpx2", None) or _base_client.httpx
+    sends = []
+
+    async def transport(request):
+        if request.method == "GET":
+            return http.Response(404, json={"type": "error", "error": {
+                "type": "not_found_error", "message": "No fixture metadata"}})
+        if request.url.path.endswith("/count_tokens"):
+            body = json.loads(request.content)
+            assert "approximately 1500 tokens" in json.dumps(body["system"])
+            assert body["thinking"]["type"] == "adaptive"
+            return http.Response(200, json={"input_tokens": raw})
+        sends.append(request)
+        raise AssertionError("Near-window count tests never dispatch completion")
+
+    sdk = module.AsyncAnthropic(api_key="synthetic-not-live", max_retries=0,
+        http_client=http.AsyncClient(transport=http.MockTransport(transport)))
+    provider = module.AnthropicProvider(api_key="synthetic-not-live", config={
+        "default_model": "claude-fable-5-2", "enable_1m_context": True,
+        "use_streaming": False, "max_retries": 0})
+    provider._client = sdk
+    selected = SelectedProvider(provider, {"model": "claude-fable-5-2", "max_output_tokens": 128000})
+    try:
+        request = summary_request("instructions", "Source", "", {
+            "summary_target_tokens": 1500, "summary_max_output_tokens": 32768})
+        fits, budget = await request_fits(selected, request)
+        assert fits is expected_fit
+        assert budget["input_tokens"] == raw + 4096
+        assert budget["output_reserve"] == 32768
+        assert budget["measurement_kind"] == "provider_count"
+        assert not sends
     finally:
         await sdk.close()
