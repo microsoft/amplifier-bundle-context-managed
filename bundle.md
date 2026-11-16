@@ -114,8 +114,10 @@ transcript writer inside the context manager.
 omitting the setting now selects the same engine. Legacy engine selection and
 Legacy-only options fail with removal guidance. See [configuration](docs/CONFIGURATION.md).
 
-The bundled `summary_target_tokens` value is accepted for compatibility, but is
-inert in Boundary. Portable generation uses `summary_max_output_tokens`; native
+The bundled `summary_target_tokens: 1500` is soft prompt guidance for the entire
+rewritten cumulative note, not extra text per fragment or a hard output limit.
+Required continuation facts take priority over that target; no text is clipped.
+Portable generation uses `summary_max_output_tokens`; native
 generation has a separate allowance. An explicit positive integer is preserved,
 including smaller cost limits. Without one, the portable policy uses 32768 when
 the summarizer advertises a matching model, at least 131072 context tokens and

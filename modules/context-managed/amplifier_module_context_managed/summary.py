@@ -167,6 +167,28 @@ def source_fragments(messages, max_chars):
         yield "\n".join(pending)
 
 
+def summary_prompt(prompt, config):
+    """Render a soft target for the whole visible note, not a generation cap.
+
+    Keep the base checkpoint prompt stable: a completed note remains useful.
+    Callers bind this rendered policy separately before resuming partial work.
+    """
+    if "summary_target_tokens" not in config:
+        return prompt
+    target = config["summary_target_tokens"]
+    if type(target) is not int or target <= 0:
+        raise ValueError("summary_target_tokens must be a positive integer")
+    return prompt + (
+        "\n\nRewrite one complete cumulative continuation note that replaces the previous note; "
+        "do not append a supplement or reproduce its wording. Merge repetition and compress "
+        "settled work into concise outcomes with exact evidence references. "
+        f"Soft target for the entire visible continuation note: approximately {target} tokens, "
+        "including retained facts and new evidence, not additional tokens per fragment. "
+        "This is not the generation allowance. Preserve required continuation facts; "
+        "do not truncate text or discard unresolved work to meet the target."
+    )
+
+
 def summary_request(prompt, source, previous, config):
     content = (
         "Previous continuation note (reference data):\n" + previous + "\n\n"
@@ -179,7 +201,7 @@ def summary_request(prompt, source, previous, config):
     )
     return ChatRequest(
         messages=[
-            Message(role="system", content=prompt),
+            Message(role="system", content=summary_prompt(prompt, config)),
             Message(role="user", content=content),
         ],
         model=config.get("summarization_model"),

@@ -163,12 +163,14 @@ only an oversized input, explicit source cap or unavailable count requires order
 fragments. Completed fragment progress can be persisted, but partial notes never
 enter a foreground request.
 
-`summary_max_output_tokens` supplies the portable summary generation allowance,
-default **8192**. `summary_target_tokens` remains accepted but inert, including the
-bundle's retained value 1500; it is not remapped to this generation allowance.
+`summary_max_output_tokens` supplies the portable summary generation allowance
+(advertised-profile policy, or an explicit positive allowance; see configuration).
+`summary_target_tokens`, when configured, asks for one rewritten cumulative note
+near that many visible tokens in total. The bundle uses 1500. This soft guidance
+is not a generation allowance, reasoning-token budget or guarantee of adherence.
 The allowance includes reasoning where the provider accounts for reasoning there.
 An output-limit finish raises `summary_output_limit`, rather than accepting an
-incomplete note. Configure the allowance for the provider/model; 8192 is not a
+incomplete note. Configure the allowance for the provider/model; no default is a
 claim of summary quality or a universal model limit. Native requests retain their
 separate `native_compaction_max_output_tokens` setting (default 4096).
 

@@ -26,7 +26,7 @@ or writes a private transcript. See [Boundary policy](BOUNDARY_ENGINE.md) and
 | `native_min_new_tokens` | 500 | Avoid tiny native recompactions unless fitting is required. |
 | `native_compaction_max_output_tokens` | 4096 | Separate native operation output allowance. |
 | `summary_max_output_tokens` | profile policy | Explicit positive integer wins. When absent, advertised matching-model profiles with context >=131072 and output >=32768 use 32768; other profiles use 8192, lowered by smaller advertised output. Metadata is advisory; selected-provider ceilings and whole-request admission still apply. Includes reasoning when the provider counts it there. |
-| `summary_target_tokens` | unset | Accepted compatibility setting, inert in Boundary. The bundle retains 1500; it is not remapped to `summary_max_output_tokens`. |
+| `summary_target_tokens` | unset | Positive integer soft prompt target for the entire visible cumulative continuation note (bundle: 1500), not an additional allowance per fragment. Does not change `summary_max_output_tokens`, count reasoning tokens, truncate text or guarantee model adherence/quality. Omitted keeps the legacy prompt; malformed configured values fail before dispatch. |
 | `summarization_model` | provider default | Model for portable summaries, not opaque native state. |
 | `summary_reasoning_effort` | `low` | Portable summary reasoning setting. |
 | `summary_max_source_chars` | automatic | Explicit cap for portable source fragments; no authoritative count uses a conservative 512000-character cap, also bounded by provider context. Does not fragment native requests. |
