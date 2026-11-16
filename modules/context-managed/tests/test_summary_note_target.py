@@ -189,3 +189,48 @@ async def test_legacy_failure_fingerprint_does_not_latch_corrected_prompt_policy
     await manager._prepare(model, None, [])
     assert model.complete.await_count > 1 and manager.summary is not None
     assert await manager.get_messages() == fixture["messages"]
+
+
+@pytest.mark.asyncio
+async def test_completed_plus_old_partial_keeps_completed_note_when_corrected_work_fails():
+    fixture = json.loads(Path(__file__).with_name("summary_note_target_legacy.json").read_text())["completed_with_partial"]
+    original_record = copy.deepcopy(fixture["checkpoint"])
+    manager = BoundaryContextManager({**fixture["config"], "summarize_trigger": .01,
+                                      "summary_max_calls": 16}, SimpleNamespace(emit=AsyncMock()))
+    manager.checkpoint_identity = lambda: copy.deepcopy(IDENTITY)
+    await manager.set_messages(fixture["messages"])
+    assert manager.restore_checkpoint(fixture["checkpoint"], IDENTITY)["status"] == "resuming"
+    completed = copy.deepcopy(manager.summary)
+    limited = response("TRUNCATED replacement"); limited.finish_reason = "max_tokens"
+    model = SimpleNamespace(name="fixture", default_model="fixture-model",
+                            complete=AsyncMock(return_value=limited))
+    with pytest.raises(CompactionError, match="output allowance"):
+        await manager._prepare(model, None, [])
+    assert model.complete.await_count == 1
+    assert "LEGACY next paid note" not in model.complete.call_args.args[0].messages[1].content
+    assert manager.summary == completed
+    assert manager.export_checkpoint(IDENTITY)["summary"] == original_record["summary"]
+    assert fixture["checkpoint"] == original_record
+    assert await manager.get_messages() == fixture["messages"]
+
+
+@pytest.mark.asyncio
+async def test_target_prompt_is_counted_and_dispatched_as_one_unchanged_request():
+    manager = await context(summary_target_tokens=1500, summary_max_output_tokens=32768)
+    counts, calls = [], []
+
+    async def count(request, **kwargs):
+        counts.append(request.model_dump())
+        assert "approximately 1500 tokens" in request.messages[0].content
+        return {"estimated_input_tokens": 100, "input_limit_tokens": 1000000,
+                "max_output_tokens": 32768,
+                "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 100}}
+
+    async def complete(request):
+        assert request.model_dump() == counts[-1]
+        calls.append(request.model_dump())
+        return response()
+
+    await manager._prepare(SimpleNamespace(complete=complete, request_budget=count), None, [])
+    assert len(calls) > 1 and len(counts) == len(calls)
+    assert all(request["max_output_tokens"] == 32768 for request in calls)
