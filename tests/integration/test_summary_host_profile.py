@@ -59,11 +59,15 @@ async def test_selected_wrapper_uses_same_summary_contract_for_count_and_dispatc
             defaults={"model": "base", "context_window": window, "max_output_tokens": 128000}))
     selected = SelectedProvider(raw, {"model": "selected", "max_output_tokens": foreground,
                                        "effort": "high"})
-    configured = {} if explicit is None else {"summary_max_output_tokens": explicit}
+    configured = {"summary_target_tokens": 1500}
+    if explicit is not None:
+        configured["summary_max_output_tokens"] = explicit
+    original_config = copy.deepcopy(configured)
     resolved, _ = await summary_config(selected, configured)
-    assert configured == ({} if explicit is None else {"summary_max_output_tokens": explicit})
+    assert configured == original_config
     assert resolved["summary_max_output_tokens"] == policy
     request = summary_request("instructions", "source", "previous note", resolved)
+    assert "approximately 1500 tokens" in request.messages[0].content
     if mode == "reject":
         with pytest.raises(ContextLengthError):
             await request_fits(selected, request)
@@ -96,6 +100,8 @@ async def test_actual_anthropic_assembler_keeps_summary_allowance_and_model_ceil
         wires.append(body)
         assert body["model"] == "claude-fable-5-2" and body["max_tokens"] == expected
         assert body["output_config"]["effort"] == "low"
+        assert "approximately 1500 tokens" in json.dumps(body["system"])
+        assert body["system"] == counts[-1]["system"]
         return http.Response(200, json={
             "id": "synthetic-summary", "type": "message", "role": "assistant",
             "model": body["model"], "content": [{"type": "text", "text": "Completed note."}],
@@ -110,7 +116,9 @@ async def test_actual_anthropic_assembler_keeps_summary_allowance_and_model_ceil
     raw._client = sdk
     selected = SelectedProvider(raw, {"model": "claude-fable-5-2", "max_output_tokens": 128000})
     try:
-        config = {} if explicit is None else {"summary_max_output_tokens": explicit}
+        config = {"summary_target_tokens": 1500}
+        if explicit is not None:
+            config["summary_max_output_tokens"] = explicit
         resolved, _ = await summary_config(selected, config)
         request = summary_request("instructions", "ORBIT source", "", resolved)
         assert (await request_fits(selected, request))[0]
