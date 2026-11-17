@@ -109,8 +109,11 @@ for any particular private checkpoint. Existing v4/v5 import validation stays un
 a rejected import is not continuation permission. Incompatible already-admitted
 paid work is quarantined rather than replaced, including after covered history,
 configuration or identity changes. In-flight stale responses are never committed.
-Export does not rebind quarantined work to changed source/configuration; hosts must
-keep the previously acknowledged checkpoint, not overwrite it with an empty export.
+Export preserves admitted restored partials before the first resumed call. It
+raises `summary_progress_incompatible` for quarantined paid work instead of
+returning an empty or completed-only replacement. Hosts must retain the previously
+acknowledged checkpoint after refusal. Invalid imports are transactional: they do
+not discard previously admitted progress or its compatible completed note.
 
 `summary_max_calls` still bounds each preparation (default 16). Exhaustion raises
 nonretryable `summary_work_paused`, emits `context:compaction_finished` with

@@ -173,7 +173,8 @@ async def test_inflight_replacement_aborts_request_and_quarantines_changed_prefi
     assert manager.summary is None
     assert manager._summary_progress["completed"] == 1
     if change == "prefix":
-        assert manager.export_checkpoint(IDENTITY) is None
+        with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+            manager.export_checkpoint(IDENTITY)
         count = len(calls)
         with pytest.raises(CompactionError, match="summary_progress_incompatible"):
             await manager._prepare(model, None, [])

@@ -344,3 +344,90 @@ async def test_frozen_accepted_v4_v5_progress_resumes_without_replaying_baseline
     if previous:
         assert previous[0] < manager.summary[0]
     assert digest(fixture) == before and await manager.get_messages() == fixture["messages"]
+
+
+def frozen_fixture(base="completed_with_partial"):
+    packet = json.loads(Path(__file__).with_name("summary_work_pause_baseline.json").read_text())
+    return packet["fixtures"][f"v5_{base}"]
+
+
+async def imported_fixture(base="completed_with_partial"):
+    from amplifier_module_context_managed.boundary import BoundaryContextManager
+
+    fixture = frozen_fixture(base)
+    manager = BoundaryContextManager({**fixture["config"], "summary_max_calls": 16},
+                                     SimpleNamespace(emit=AsyncMock()))
+    manager.checkpoint_identity = lambda: copy.deepcopy(IDENTITY)
+    await manager.set_messages(fixture["messages"])
+    assert manager.restore_checkpoint(fixture["checkpoint"], IDENTITY)["status"] == "resuming"
+    return manager, fixture
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", ["partial_only", "completed_with_partial"])
+async def test_import_export_before_first_resume_preserves_whole_paid_record(base):
+    manager, fixture = await imported_fixture(base)
+    assert manager.export_checkpoint(IDENTITY) == fixture["checkpoint"]
+    cold, _ = await imported_fixture(base)
+    assert cold.restore_checkpoint(manager.export_checkpoint(IDENTITY), IDENTITY)["status"] == "resuming"
+    assert cold.export_checkpoint(IDENTITY) == fixture["checkpoint"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("materialized", [False, True])
+@pytest.mark.parametrize("change", ["partial_prefix", "configuration", "identity"])
+async def test_quarantined_paid_partial_cannot_export_completed_only_replacement(materialized, change):
+    manager, fixture = await imported_fixture()
+    if materialized:
+        manager.config["summary_max_calls"] = 1
+        with pytest.raises(CompactionError, match="summary_work_paused"):
+            await manager._prepare(model(), None, [])
+    original = copy.deepcopy(manager._summary_progress or manager._restored_progress)
+    previous = copy.deepcopy(manager.summary)
+    if change == "partial_prefix":
+        rows = await manager.get_messages()
+        rows[4]["content"] += " changed covered partial evidence"
+        await manager.set_messages(rows)
+    elif change == "configuration":
+        manager.config["summary_reasoning_effort"] = "high"
+    else:
+        manager.checkpoint_identity = lambda: {**IDENTITY, "model": "changed"}
+    identity = manager.checkpoint_identity()
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        manager.export_checkpoint(identity)
+    assert manager.summary == previous
+    assert (manager._summary_progress or manager._restored_progress) == original
+    assert fixture["checkpoint"]["progress"]["completed"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("materialized", [False, True])
+@pytest.mark.parametrize("invalid", ["digest", "configuration", "identity", "source"])
+async def test_rejected_import_is_transactional_and_cannot_discard_admitted_paid_progress(materialized, invalid):
+    manager, fixture = await imported_fixture()
+    if materialized:
+        manager.config["summary_max_calls"] = 1
+        with pytest.raises(CompactionError, match="summary_work_paused"):
+            await manager._prepare(model(), None, [])
+    before = copy.deepcopy(manager.export_checkpoint(IDENTITY))
+    previous = copy.deepcopy(manager.summary)
+    bad = copy.deepcopy(before)
+    if invalid == "digest":
+        bad["sha256"] = "0" * 64
+    elif invalid == "configuration":
+        bad["configuration"] = "0" * 64
+    elif invalid == "identity":
+        bad["identity"]["model"] = "another"
+    else:
+        bad["sourceRevision"]["sha256"] = "0" * 64
+    if invalid != "digest":
+        bad["sha256"] = digest({k: v for k, v in bad.items() if k != "sha256"})
+    assert manager.restore_checkpoint(bad, IDENTITY)["status"] == "rejected"
+    assert manager.export_checkpoint(IDENTITY) == before
+    assert manager.summary == previous
+    manager.config["summary_max_calls"] = 16
+    provider = model()
+    await manager._prepare(provider, None, [])
+    assert finished(manager)[-1]["resumed_fragments"] == before["progress"]["completed"]
+    assert before["progress"]["text"] in provider.complete.call_args_list[0].args[0].messages[-1].content
+    assert manager.summary[0] == before["progress"]["source_revision"]["messages"]

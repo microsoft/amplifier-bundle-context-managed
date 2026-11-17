@@ -18,12 +18,13 @@ def export_checkpoint(context, identity):
     if not context.config.get("durable_checkpoints"):
         context._checkpoint_prefix_digest.clear()
         return None
-    progress = context._summary_progress
-    if progress and (progress.get("configuration") != context.checkpoint_configuration()
+    progress = context._summary_progress or context._restored_progress
+    if progress and progress["completed"] and (progress.get("configuration") != context.checkpoint_configuration()
             or progress["identity"] != identity or not context._same_prefix(progress, context.messages)):
         # Incompatible paid work stays quarantined in memory/its old host
-        # checkpoint, not rebound to the current configuration or originals.
-        progress = None
+        # checkpoint. Never return a completed-only replacement that silently
+        # deletes the partial, or stamp it with changed configuration/originals.
+        context._refuse_progress()
     if not context.summary and not (progress and progress["completed"]):
         context._checkpoint_prefix_digest.clear()
         return None
@@ -182,6 +183,10 @@ def restore_checkpoint(context, record, identity):
                            for v in partial["segments"])):
                 raise ValueError("Saved summary progress is incompatible")
         context._restored_progress = copy.deepcopy(partial)
+        if context._restored_progress:
+            # In-memory provenance for export before the first resumed call.
+            # Not a new serialized partial field or a relaxed import contract.
+            context._restored_progress["configuration"] = context.checkpoint_configuration()
         context.summary = (end, copy.deepcopy(text)) if summary is not None else None
         context.summary_omitted_indices = copy.deepcopy(omitted)
         context.summary_identity = copy.deepcopy(identity) if summary is not None else None

@@ -161,10 +161,19 @@ class BoundaryContextManager:
 
     def restore_checkpoint(self, record, identity):
         from .checkpoint import restore_checkpoint
+        # Validation is transactional. A rejected incoming record is not an
+        # explicit discard of already admitted (possibly paid) work.
+        fields = ("_summary_progress", "_restored_progress", "summary_failure", "summary",
+                  "summary_omitted_indices", "summary_identity", "evidence_refs", "recovery")
+        previous = {key: getattr(self, key) for key in fields}
         self._summary_progress = None
         self._restored_progress = None
         self.summary_failure = None
-        return restore_checkpoint(self, record, identity)
+        result = restore_checkpoint(self, record, identity)
+        if result["status"] == "rejected":
+            for key, value in previous.items():
+                setattr(self, key, value)
+        return result
 
     async def recover_request(self, *, provider, count_view, identity, save_progress,
                               install, guard, retain_contents=(), target_bytes=1_500_000,
