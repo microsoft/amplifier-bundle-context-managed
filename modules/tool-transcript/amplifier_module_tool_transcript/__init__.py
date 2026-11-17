@@ -456,7 +456,7 @@ class ReadTranscriptTool:
                         )
                     )
                     content = self._truncate_parts((text for text in text_parts if text), "\n")
-                else:
+                elif content:
                     content = self._truncate_content(content)
                 if content:
                     yield f"\n[assistant] {content}"

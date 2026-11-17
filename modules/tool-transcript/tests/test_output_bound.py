@@ -201,3 +201,18 @@ async def test_private_reasoning_blocks_not_exposed():
     ]).execute({})
     assert "PRIVATE" not in result.output
     assert "[assistant] Visible answer" in result.output
+
+
+@pytest.mark.asyncio
+async def test_null_assistant_content_preserves_call_and_result():
+    result = await host_tool([
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call_null", "name": "grep", "input": {"pattern": "q"}},
+        ]},
+        {"role": "tool", "tool_call_id": "call_null", "content": "answer"},
+    ]).execute({})
+    assert result.output == (
+        '--- Turn 1 ---\n[user] q\n[tool_call: grep({"pattern":"q"})]'
+        '\n[tool result: call_null]\nanswer'
+    )
