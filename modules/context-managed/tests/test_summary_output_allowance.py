@@ -146,11 +146,11 @@ async def test_checkpoint_contract_does_not_reuse_implicit_8k_progress():
     # Changing only the advertised profile changes selected output work. Old
     # paid progress must not silently reappear under that different contract.
     small = provider(128000, 16000, finish="end_turn")
-    await cold._prepare(small, None, [])
-    assert cold.summary is not None
-    assert cold.hooks.emit.call_args_list
-    assert any(call.args[0] == "context:checkpoint_progress_rejected"
-               for call in cold.hooks.emit.call_args_list)
+    before = copy.deepcopy(cold._restored_progress)
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await cold._prepare(small, None, [])
+    assert cold.summary is None and cold._restored_progress == before
+    assert small.calls == [] and small.counts == []
 
 
 @pytest.mark.asyncio
@@ -278,7 +278,7 @@ async def test_larger_output_reservation_can_refuse_a_previously_fitting_request
 
 
 @pytest.mark.asyncio
-async def test_legacy_unbound_partial_progress_is_recomputed_not_reused():
+async def test_legacy_unbound_partial_progress_is_refused_without_automatic_recomputation():
     context, model = await manager(summary_max_calls=1), provider()
     with pytest.raises(CompactionError):
         await context._prepare(model, None, [])
@@ -288,8 +288,9 @@ async def test_legacy_unbound_partial_progress_is_recomputed_not_reused():
     record["sha256"] = digest({k: v for k, v in record.items() if k != "sha256"})
     cold = await manager()
     assert cold.restore_checkpoint(record, IDENTITY)["status"] == "resuming"
-    await cold._prepare(provider(), None, [])
-    finished = next(call.args[1] for call in cold.hooks.emit.call_args_list
-                    if call.args[0] == "context:compaction_finished")
-    assert finished["resumed_fragments"] == 0
-    assert cold.summary is not None
+    replacement = provider()
+    before = copy.deepcopy(cold._restored_progress)
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await cold._prepare(replacement, None, [])
+    assert replacement.calls == [] and replacement.counts == []
+    assert cold.summary is None and cold._restored_progress == before

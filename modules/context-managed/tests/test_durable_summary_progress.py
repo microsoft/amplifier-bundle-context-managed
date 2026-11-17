@@ -78,13 +78,12 @@ async def test_incompatible_regenerated_progress_is_explained_and_never_skips_so
     second = await context()
     assert second.restore_checkpoint(record, IDENTITY)["status"] == "resuming"
     model.complete = AsyncMock(return_value=response())
-    await second._prepare(model, None, [])
-    events = [call.args[1] for call in second.hooks.emit.call_args_list
-              if call.args[0] == "context:checkpoint_progress_rejected"]
-    assert len(events) == 1 and events[0]["originalsAvailable"] is True
-    assert "PAID completed evidence" not in model.complete.call_args_list[0].args[0].messages[-1].content
-    assert finished(second)[-1]["resumed_fragments"] == 0
-    assert second.summary is not None and await second.get_messages() == history()
+    before = copy.deepcopy(second._restored_progress)
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await second._prepare(model, None, [])
+    model.complete.assert_not_awaited()
+    assert second._restored_progress == before
+    assert second.summary is None and await second.get_messages() == history()
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,11 @@ def export_checkpoint(context, identity):
         context._checkpoint_prefix_digest.clear()
         return None
     progress = context._summary_progress
+    if progress and (progress.get("configuration") != context.checkpoint_configuration()
+            or progress["identity"] != identity or not context._same_prefix(progress, context.messages)):
+        # Incompatible paid work stays quarantined in memory/its old host
+        # checkpoint, not rebound to the current configuration or originals.
+        progress = None
     if not context.summary and not (progress and progress["completed"]):
         context._checkpoint_prefix_digest.clear()
         return None
