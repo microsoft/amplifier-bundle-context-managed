@@ -94,6 +94,52 @@ only the derived note, exact source identity, and remaining piece boundaries;
 pending source is regenerated from the canonical transcript. After restart,
 compatible progress resumes without repeating completed pieces. Partial notes
 never enter a model's conversation view before covering the full chosen prefix.
+On every later admitted preparation, including an unchanged eligible boundary,
+an unfinished portable job continues **only** when canonical prefix identity,
+current legal retention/protocol boundary, reconstructed projected-source
+fingerprint, provider/model, generation/prompt contract, parts digest and pending
+segment chain all match. Its fingerprint is compared, never rebound to new source.
+The entire new tail remains outside that job and verbatim in the assembled request;
+final fitting may still refuse it. No second compaction batch runs automatically.
+Changed retention/reminder projection or an unreconstructible old job stops with
+`summary_progress_incompatible` before buying replacement work. Keep the original
+paid checkpoint and explicitly decide whether recomputation is appropriate.
+This conservative reuse needs no record migration and does not promise compatibility
+for any particular private checkpoint. Existing v4/v5 import validation stays unchanged:
+a rejected import is not continuation permission. Incompatible already-admitted
+paid work is quarantined rather than replaced, including after covered history,
+configuration or identity changes. In-flight stale responses are never committed.
+Export preserves admitted restored partials before the first resumed call. It
+raises `summary_progress_incompatible` for quarantined paid work instead of
+returning an empty or completed-only replacement. Hosts must retain the previously
+acknowledged checkpoint after refusal. Invalid imports are transactional: they do
+not discard previously admitted progress or its compatible completed note.
+
+`summary_max_calls` still bounds each preparation (default 16). Exhaustion raises
+nonretryable `summary_work_paused`, emits `context:compaction_finished` with
+`outcome: paused`, and retains acknowledged completed pieces without installing a
+provider-failure latch. It does not mean ready or failed SDK work. No foreground
+request is returned at the pause. Hosts must not automatically retry it or use
+timers, observer events or restart alone to buy the next batch. Another preparation
+requires the host's ordinary explicit continuation/cost admission. Context does not
+authenticate that admission: the bound is per preparation, not a lifetime spending
+limit. Pause status itself is observational; only pieces acknowledged by the
+existing persistence callback are claimed durable. No new durable authorization
+token, pause record or checkpoint schema is introduced.
+
+Semantic progress and finished events additionally report `source_chars_total`,
+`source_chars_completed`, `source_chars_pending`, `pending_segments`,
+`largest_pending_segment_chars`, `partition_final`, `source_character_basis`,
+`calls_this_pass`, `call_allowance`, `summary_calls_total` and
+`summary_work_disposition`. Characters are Python-string offsets over the initial
+serialized summary-source parts (including initial part labels), excluding repeated
+prompts and cumulative-note carry. Splits conserve total = completed + pending.
+Pending segments can subdivide: completed calls / (completed + pending segments)
+is **not** a completion fraction, ETA or future call budget. `partition_final` is
+false while source remains; `source_covered` still precedes reduction/admission and
+checkpoint installation. Only `compaction_finished/outcome: completed` establishes
+completed compaction, not a progress event with zero pending segments.
+
 Target-guided partial records use configuration version 5, additionally binding
 the rendered prompt digest; older readers reject them. Without a configured target,
 partial records keep version 4 and the exact legacy prompt. Version 4's existing
@@ -102,9 +148,9 @@ work. A prompt-policy correction does not invalidate otherwise compatible comple
 portable v2/native v3 notes or discard the valid completed note beside old partial
 work. It does reject incompatible partial work: preserve that paid record, and
 expect recomputation from originals under the new policy rather than free reuse.
-No retry or migration is automatic. Legacy unbound or changed
-generation contracts are recomputed from originals and can incur generation
-cost again. Completed portable v2/native v3 notes retain their prior contract.
+No retry, migration or recomputation is automatic. Explicitly choosing to replace
+legacy unbound or changed generation contracts can incur generation cost again.
+Completed portable v2/native v3 notes retain their prior contract.
 Restore status and any later progress rejection provide a safe reason while
 leaving originals available.
 The continuation note remains labelled untrusted reference history, not fresh

@@ -1,0 +1,1375 @@
+{
+  "fixtures": {
+    "v4_completed_with_partial": {
+      "checkpoint": {
+        "configuration": "9341c7398e78a5f0495578346a9401d383bd08e73e8f871198683f2f362d5ff6",
+        "configurationVersion": 4,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": {
+          "calls": 1,
+          "completed": 1,
+          "fingerprint": "a55f25528d891a3b6cb4fb692c0f87f3766e4cea5f07f92777334e0442a1881a",
+          "generation_contract": {
+            "max_output_tokens": 8192,
+            "model": "fixture-model",
+            "reasoning_effort": "low"
+          },
+          "identity": {
+            "model": "fixture-model",
+            "provider": "fixture"
+          },
+          "parts_digest": "9910966e34247bdfce3c9921c93386f7b286dd6c27ccda986c44107ed1bdc8bc",
+          "provider": [
+            "fixture",
+            "fixture-model"
+          ],
+          "segments": [
+            [
+              1,
+              0,
+              1231
+            ],
+            [
+              2,
+              0,
+              754
+            ]
+          ],
+          "source_revision": {
+            "messages": 7,
+            "sha256": "1f89aab0a9393d301b95d1c8c841278ec0a903de4b083186feb1b926eff56d91"
+          },
+          "text": "ORBIT partial piece accepted; numbered originals retained; later fragments pending."
+        },
+        "recovery": null,
+        "sha256": "ee0e28e6c3e5f108b5b245ce21f62830a9fcb2cf504b3165e43b9163f0377b54",
+        "sourceRevision": {
+          "messages": 3,
+          "sha256": "ec4c160566719108ad7be4aaedcf3da02d75b1bfbab0a61f4466edd16af2a83e"
+        },
+        "summary": {
+          "text": "ORBIT evidence 001-008 verified; originals preserved; report pending.",
+          "throughMessage": 3
+        }
+      },
+      "completed_base": {
+        "checkpoint": {
+          "configuration": "9341c7398e78a5f0495578346a9401d383bd08e73e8f871198683f2f362d5ff6",
+          "configurationVersion": 2,
+          "evidenceRefs": [],
+          "format": "context-managed-boundary-v1",
+          "identity": {
+            "model": "fixture-model",
+            "provider": "fixture"
+          },
+          "progress": null,
+          "recovery": null,
+          "sha256": "675d6fe72c4e67b569ba429b87a02624fe1103d10503fb0b98aa0132f388f142",
+          "sourceRevision": {
+            "messages": 3,
+            "sha256": "ec4c160566719108ad7be4aaedcf3da02d75b1bfbab0a61f4466edd16af2a83e"
+          },
+          "summary": {
+            "text": "ORBIT evidence 001-008 verified; originals preserved; report pending.",
+            "throughMessage": 3
+          }
+        },
+        "config": {
+          "durable_checkpoints": true,
+          "max_tokens": 10000,
+          "summarize_trigger": 0.01,
+          "summary_max_calls": 1,
+          "summary_max_source_chars": 1200,
+          "summary_retry_delay": 0
+        },
+        "messages": [
+          {
+            "content": "Use only the supplied public synthetic evidence; never replay completed work.",
+            "role": "system"
+          },
+          {
+            "content": "Prepare the ORBIT fixture report, retaining numbered evidence and unresolved work.",
+            "role": "user"
+          },
+          {
+            "content": "Evidence 001: public synthetic sample 001 checked; original row and result retained.\nEvidence 002: public synthetic sample 002 checked; original row and result retained.\nEvidence 003: public synthetic sample 003 checked; original row and result retained.\nEvidence 004: public synthetic sample 004 checked; original row and result retained.\nEvidence 005: public synthetic sample 005 checked; original row and result retained.\nEvidence 006: public synthetic sample 006 checked; original row and result retained.\nEvidence 007: public synthetic sample 007 checked; original row and result retained.\nEvidence 008: public synthetic sample 008 checked; original row and result retained.",
+            "role": "assistant"
+          },
+          {
+            "content": "Correction: preserve every original evidence row for the ORBIT fixture.",
+            "role": "user"
+          },
+          {
+            "content": "Evidence 009 is pending verification in the next synthetic batch.",
+            "role": "assistant"
+          },
+          {
+            "content": "Continue with later evidence before drafting the final report.",
+            "role": "user"
+          }
+        ],
+        "successful_paid_requests": [
+          {
+            "actual_paid_effect": false,
+            "kwargs": {},
+            "max_output_tokens": 8192,
+            "message_contents": [
+              {
+                "content_chars": 657,
+                "content_sha256": "9cd388189527d7305e7bb4057a4879e3d77b38fa74c105036938eedf864eaee7",
+                "content_utf8_sha256": "b5a8eef6eaaea509ca5de09729430a1ccb19c2929f3fbd9ac57a6f1e46cb3f67",
+                "role": "system"
+              },
+              {
+                "content_chars": 1024,
+                "content_sha256": "a22645d8d3ba7d7ee9f638d6bfcc1d9a07be2954ff4019e711d26c363f755d7a",
+                "content_utf8_sha256": "e9447ec84eaa0f83c43118dc471785e02b046ffb5d5e2171ddfb688c46540b97",
+                "role": "user"
+              }
+            ],
+            "messages_sha256": "3a50fdf73177be0933b8aa5bae6c9ea3510f88b07a4ecad8876aed1b4ec2d78b",
+            "mocked": true,
+            "model": null,
+            "reasoning_effort": "low",
+            "request_sha256": "bb21aa622b68fc8885f55342ceefaefb4b3abfd821c38032a3ff2ec64bad78cf",
+            "response_finish_reason": "stop",
+            "response_text": "ORBIT evidence 001-008 verified; originals preserved; report pending.",
+            "response_usage": {
+              "input_tokens": 100,
+              "output_tokens": 10
+            }
+          }
+        ]
+      },
+      "config": {
+        "durable_checkpoints": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0
+      },
+      "effective_config": {
+        "durable_checkpoints": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "token_meter": "actual"
+      },
+      "fixture_schema": "baseline-summary-worklimit-fixture-v1",
+      "identity": {
+        "model": "fixture-model",
+        "provider": "fixture"
+      },
+      "messages": [
+        {
+          "content": "Use only the supplied public synthetic evidence; never replay completed work.",
+          "role": "system"
+        },
+        {
+          "content": "Prepare the ORBIT fixture report, retaining numbered evidence and unresolved work.",
+          "role": "user"
+        },
+        {
+          "content": "Evidence 001: public synthetic sample 001 checked; original row and result retained.\nEvidence 002: public synthetic sample 002 checked; original row and result retained.\nEvidence 003: public synthetic sample 003 checked; original row and result retained.\nEvidence 004: public synthetic sample 004 checked; original row and result retained.\nEvidence 005: public synthetic sample 005 checked; original row and result retained.\nEvidence 006: public synthetic sample 006 checked; original row and result retained.\nEvidence 007: public synthetic sample 007 checked; original row and result retained.\nEvidence 008: public synthetic sample 008 checked; original row and result retained.",
+          "role": "assistant"
+        },
+        {
+          "content": "Correction: preserve every original evidence row for the ORBIT fixture.",
+          "role": "user"
+        },
+        {
+          "content": "Evidence 009 is pending verification in the next synthetic batch.",
+          "role": "assistant"
+        },
+        {
+          "content": "Continue with later evidence before drafting the final report.",
+          "role": "user"
+        },
+        {
+          "content": "Evidence 009: public synthetic sample 009 checked; original row and result retained.\nEvidence 010: public synthetic sample 010 checked; original row and result retained.\nEvidence 011: public synthetic sample 011 checked; original row and result retained.\nEvidence 012: public synthetic sample 012 checked; original row and result retained.\nEvidence 013: public synthetic sample 013 checked; original row and result retained.\nEvidence 014: public synthetic sample 014 checked; original row and result retained.\nEvidence 015: public synthetic sample 015 checked; original row and result retained.\nEvidence 016: public synthetic sample 016 checked; original row and result retained.\nEvidence 017: public synthetic sample 017 checked; original row and result retained.\nEvidence 018: public synthetic sample 018 checked; original row and result retained.\nEvidence 019: public synthetic sample 019 checked; original row and result retained.\nEvidence 020: public synthetic sample 020 checked; original row and result retained.\nEvidence 021: public synthetic sample 021 checked; original row and result retained.\nEvidence 022: public synthetic sample 022 checked; original row and result retained.\nEvidence 023: public synthetic sample 023 checked; original row and result retained.\nEvidence 024: public synthetic sample 024 checked; original row and result retained.\nEvidence 025: public synthetic sample 025 checked; original row and result retained.\nEvidence 026: public synthetic sample 026 checked; original row and result retained.\nEvidence 027: public synthetic sample 027 checked; original row and result retained.\nEvidence 028: public synthetic sample 028 checked; original row and result retained.\nEvidence 029: public synthetic sample 029 checked; original row and result retained.\nEvidence 030: public synthetic sample 030 checked; original row and result retained.",
+          "role": "assistant"
+        },
+        {
+          "content": "Retain evidence 001-030 and distinguish completed samples from remaining work.",
+          "role": "user"
+        },
+        {
+          "content": "All synthetic originals remain available; final report still pending.",
+          "role": "assistant"
+        },
+        {
+          "content": "Finish the current synthetic report without replaying any completed operation.",
+          "role": "user"
+        }
+      ],
+      "name": "v4_completed_with_partial",
+      "qualification": {
+        "actual_paid_calls": 0,
+        "all_completions_mocked": true,
+        "canonical_history_unchanged": true,
+        "canonical_messages_bytes": 3471,
+        "canonical_messages_sha256": "bb0f2572317ca01b90e17524b3c9bf62fb82eccfec9e29e58bf4b935b8786c7d",
+        "completed_fragment_count": 1,
+        "completed_note_preserved": true,
+        "expected_baseline_pause": {
+          "code": "summary_failed",
+          "message": "Context compaction stopped [summary_failed]: The compaction operation failed. Check provider availability and compaction diagnostics before retrying. Original history is preserved; no foreground request was sent for this step.",
+          "retryable": true,
+          "type": "CompactionError"
+        },
+        "initial_fragment_count": 3,
+        "last_finished_event": {
+          "calls": 1,
+          "completed_fragments": 1,
+          "completed_fragments_this_pass": 1,
+          "failure": {
+            "attempt": 1,
+            "code": "summary_failed",
+            "retry_suppressed": false,
+            "retryable": true,
+            "type": "LLMError"
+          },
+          "input_tokens_before": 749,
+          "measurement_kind": "public_estimate",
+          "method": "semantic",
+          "native_selection": "unsupported_by_provider",
+          "outcome": "failed",
+          "remaining_fragments": 2,
+          "resumed_fragments": 0,
+          "revision": 5,
+          "summary_calls_total": 1,
+          "usage": {
+            "input_tokens": 100,
+            "output_tokens": 10
+          },
+          "usage_calls": 1,
+          "work_limit_exhausted": true
+        },
+        "network_calls": 0,
+        "persist_acknowledgements": 2,
+        "provider_count_calls": 0,
+        "record_sha256_recomputed": "ee0e28e6c3e5f108b5b245ce21f62830a9fcb2cf504b3165e43b9163f0377b54",
+        "remaining_fragment_count": 2,
+        "restore_status": {
+          "completedParts": 1,
+          "originalsAvailable": true,
+          "status": "resuming",
+          "throughMessage": 3
+        }
+      },
+      "source_commit": "0de9bd2ea366e0ad10a3fd668c1d62c398baaefd",
+      "source_file_hash_joins": {
+        "modules/context-managed/amplifier_module_context_managed/__init__.py": {
+          "extracted_sha256": "4453257774a76a618d738002120e9f62f0239587fc173d9517adc875d0a28112",
+          "git_blob": "2825f55731f4c175598e1ed0bfc8aeed1cf523bb",
+          "git_mode": "100644",
+          "git_sha256": "4453257774a76a618d738002120e9f62f0239587fc173d9517adc875d0a28112"
+        },
+        "modules/context-managed/amplifier_module_context_managed/boundary.py": {
+          "extracted_sha256": "5890d5b94f5456ab042354dfecdeee23346c60df4a793c8981ef0f8e074051f9",
+          "git_blob": "2f77ad8090848c2fe4fad140ba1c3cfb29905237",
+          "git_mode": "100644",
+          "git_sha256": "5890d5b94f5456ab042354dfecdeee23346c60df4a793c8981ef0f8e074051f9"
+        },
+        "modules/context-managed/amplifier_module_context_managed/checkpoint.py": {
+          "extracted_sha256": "1fa770bcaaf71d96b8d5e17b62ef874dc7955127d1147167bded6f01dbb836ee",
+          "git_blob": "5c5b1635ab4830de85b892093f6375d19a847c49",
+          "git_mode": "100644",
+          "git_sha256": "1fa770bcaaf71d96b8d5e17b62ef874dc7955127d1147167bded6f01dbb836ee"
+        },
+        "modules/context-managed/amplifier_module_context_managed/errors.py": {
+          "extracted_sha256": "f42019ec1614a8ead6d7c687a94c57c108cd3a21a9cfe6285b74d3b4b424992c",
+          "git_blob": "e4e45ca271a062022308ffb20df90ccbfd755725",
+          "git_mode": "100644",
+          "git_sha256": "f42019ec1614a8ead6d7c687a94c57c108cd3a21a9cfe6285b74d3b4b424992c"
+        },
+        "modules/context-managed/amplifier_module_context_managed/interrupted.py": {
+          "extracted_sha256": "f164c184710aa978e67569f00d445defdb0c7010e6bbc18824224f2699c573f3",
+          "git_blob": "075fbcc924d7756d3febbd7c3449be8815409e3e",
+          "git_mode": "100644",
+          "git_sha256": "f164c184710aa978e67569f00d445defdb0c7010e6bbc18824224f2699c573f3"
+        },
+        "modules/context-managed/amplifier_module_context_managed/measurement.py": {
+          "extracted_sha256": "bbc68a59645e6d4250bd2f767aaf87a0214abab97740dcee0eabc798bd22dfe5",
+          "git_blob": "e68bd03818f6a58e270dadd4a8056bbf29880390",
+          "git_mode": "100644",
+          "git_sha256": "bbc68a59645e6d4250bd2f767aaf87a0214abab97740dcee0eabc798bd22dfe5"
+        },
+        "modules/context-managed/amplifier_module_context_managed/prefix_digest.py": {
+          "extracted_sha256": "2f8a821609edafe6dff494ed79c0e2390ea5799c95725ad784858879874139e8",
+          "git_blob": "d8b1ed053497eae805ca7abcf158cb02f8556ce7",
+          "git_mode": "100644",
+          "git_sha256": "2f8a821609edafe6dff494ed79c0e2390ea5799c95725ad784858879874139e8"
+        },
+        "modules/context-managed/amplifier_module_context_managed/recovery.py": {
+          "extracted_sha256": "bf5093dfedd1d13c93868595a293f71f7104da280e3d7606b6f9be3e1f2a6eea",
+          "git_blob": "2661107b616487da419cfa7178211a0788273aa8",
+          "git_mode": "100644",
+          "git_sha256": "bf5093dfedd1d13c93868595a293f71f7104da280e3d7606b6f9be3e1f2a6eea"
+        },
+        "modules/context-managed/amplifier_module_context_managed/request_context.py": {
+          "extracted_sha256": "815c47b27589ce76e3f7c005c6deef1f02b2a05ad72d1af060602641828215d3",
+          "git_blob": "4a71d9b156f10c91be9d26aa89bcc30646c19c8c",
+          "git_mode": "100644",
+          "git_sha256": "815c47b27589ce76e3f7c005c6deef1f02b2a05ad72d1af060602641828215d3"
+        },
+        "modules/context-managed/amplifier_module_context_managed/summary.py": {
+          "extracted_sha256": "306fbe75dd6693c0ca055cfc56841297b5855ed024761796ae08162a2bd76d0e",
+          "git_blob": "b818b89bebc530b09679947aec1d27da6e9272db",
+          "git_mode": "100644",
+          "git_sha256": "306fbe75dd6693c0ca055cfc56841297b5855ed024761796ae08162a2bd76d0e"
+        },
+        "modules/context-managed/amplifier_module_context_managed/working_history.py": {
+          "extracted_sha256": "464fc5e2f0b03031b3c540c344a9278f93db16c0c99d2e7450df32de2eb036f5",
+          "git_blob": "b7c49443d0f54a719367a07149690c53bc8159d7",
+          "git_mode": "100644",
+          "git_sha256": "464fc5e2f0b03031b3c540c344a9278f93db16c0c99d2e7450df32de2eb036f5"
+        }
+      },
+      "successful_paid_requests": [
+        {
+          "actual_paid_effect": false,
+          "kwargs": {},
+          "max_output_tokens": 8192,
+          "message_contents": [
+            {
+              "content_chars": 657,
+              "content_sha256": "9cd388189527d7305e7bb4057a4879e3d77b38fa74c105036938eedf864eaee7",
+              "content_utf8_sha256": "b5a8eef6eaaea509ca5de09729430a1ccb19c2929f3fbd9ac57a6f1e46cb3f67",
+              "role": "system"
+            },
+            {
+              "content_chars": 1024,
+              "content_sha256": "a22645d8d3ba7d7ee9f638d6bfcc1d9a07be2954ff4019e711d26c363f755d7a",
+              "content_utf8_sha256": "e9447ec84eaa0f83c43118dc471785e02b046ffb5d5e2171ddfb688c46540b97",
+              "role": "user"
+            }
+          ],
+          "messages_sha256": "3a50fdf73177be0933b8aa5bae6c9ea3510f88b07a4ecad8876aed1b4ec2d78b",
+          "mocked": true,
+          "model": null,
+          "reasoning_effort": "low",
+          "request_sha256": "bb21aa622b68fc8885f55342ceefaefb4b3abfd821c38032a3ff2ec64bad78cf",
+          "response_finish_reason": "stop",
+          "response_text": "ORBIT evidence 001-008 verified; originals preserved; report pending.",
+          "response_usage": {
+            "input_tokens": 100,
+            "output_tokens": 10
+          },
+          "stage": "completed_base"
+        },
+        {
+          "actual_paid_effect": false,
+          "kwargs": {},
+          "max_output_tokens": 8192,
+          "message_contents": [
+            {
+              "content_chars": 657,
+              "content_sha256": "9cd388189527d7305e7bb4057a4879e3d77b38fa74c105036938eedf864eaee7",
+              "content_utf8_sha256": "b5a8eef6eaaea509ca5de09729430a1ccb19c2929f3fbd9ac57a6f1e46cb3f67",
+              "role": "system"
+            },
+            {
+              "content_chars": 825,
+              "content_sha256": "d5a52f7f0822e6687628cdc4d78fc6ce5c085470d49705dfa3df950eb9444a69",
+              "content_utf8_sha256": "428832e1d8509f21de70990f50c82fb971313a9ab651483b04e94ad6cefcf5ca",
+              "role": "user"
+            }
+          ],
+          "messages_sha256": "282e08cd7bf0cf99f5bbb2bf4d1a61b61e38cdcb8e0d75c75a6250822f5e9808",
+          "mocked": true,
+          "model": null,
+          "reasoning_effort": "low",
+          "request_sha256": "1cdeb4706b433acad65bfa78e0b5e6369c46b2719809084214b4abde9c1dc7eb",
+          "response_finish_reason": "stop",
+          "response_text": "ORBIT partial piece accepted; numbered originals retained; later fragments pending.",
+          "response_usage": {
+            "input_tokens": 100,
+            "output_tokens": 10
+          },
+          "stage": "partial"
+        }
+      ]
+    },
+    "v4_partial_only": {
+      "checkpoint": {
+        "configuration": "9341c7398e78a5f0495578346a9401d383bd08e73e8f871198683f2f362d5ff6",
+        "configurationVersion": 4,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": {
+          "calls": 1,
+          "completed": 1,
+          "fingerprint": "88ac5987a2de6e6cdb86c3c1d05a7ab9df84f31a54103fa33c654c6cc8594f13",
+          "generation_contract": {
+            "max_output_tokens": 8192,
+            "model": "fixture-model",
+            "reasoning_effort": "low"
+          },
+          "identity": {
+            "model": "fixture-model",
+            "provider": "fixture"
+          },
+          "parts_digest": "75a11b888cca0c39cf2a4c1616a829c500cf07e2cc663fdd6c80a4d0f530cebb",
+          "provider": [
+            "fixture",
+            "fixture-model"
+          ],
+          "segments": [
+            [
+              1,
+              0,
+              90
+            ],
+            [
+              2,
+              0,
+              1231
+            ],
+            [
+              3,
+              0,
+              754
+            ]
+          ],
+          "source_revision": {
+            "messages": 7,
+            "sha256": "1f89aab0a9393d301b95d1c8c841278ec0a903de4b083186feb1b926eff56d91"
+          },
+          "text": "ORBIT partial piece accepted; numbered originals retained; later fragments pending."
+        },
+        "recovery": null,
+        "sha256": "6cddc4313dc6973a1d289502db9bb65b121faa8aa83ed62e38fe8ef787b2de95",
+        "sourceRevision": {
+          "messages": 7,
+          "sha256": "1f89aab0a9393d301b95d1c8c841278ec0a903de4b083186feb1b926eff56d91"
+        },
+        "summary": null
+      },
+      "completed_base": null,
+      "config": {
+        "durable_checkpoints": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0
+      },
+      "effective_config": {
+        "durable_checkpoints": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "token_meter": "actual"
+      },
+      "fixture_schema": "baseline-summary-worklimit-fixture-v1",
+      "identity": {
+        "model": "fixture-model",
+        "provider": "fixture"
+      },
+      "messages": [
+        {
+          "content": "Use only the supplied public synthetic evidence; never replay completed work.",
+          "role": "system"
+        },
+        {
+          "content": "Prepare the ORBIT fixture report, retaining numbered evidence and unresolved work.",
+          "role": "user"
+        },
+        {
+          "content": "Evidence 001: public synthetic sample 001 checked; original row and result retained.\nEvidence 002: public synthetic sample 002 checked; original row and result retained.\nEvidence 003: public synthetic sample 003 checked; original row and result retained.\nEvidence 004: public synthetic sample 004 checked; original row and result retained.\nEvidence 005: public synthetic sample 005 checked; original row and result retained.\nEvidence 006: public synthetic sample 006 checked; original row and result retained.\nEvidence 007: public synthetic sample 007 checked; original row and result retained.\nEvidence 008: public synthetic sample 008 checked; original row and result retained.",
+          "role": "assistant"
+        },
+        {
+          "content": "Correction: preserve every original evidence row for the ORBIT fixture.",
+          "role": "user"
+        },
+        {
+          "content": "Evidence 009 is pending verification in the next synthetic batch.",
+          "role": "assistant"
+        },
+        {
+          "content": "Continue with later evidence before drafting the final report.",
+          "role": "user"
+        },
+        {
+          "content": "Evidence 009: public synthetic sample 009 checked; original row and result retained.\nEvidence 010: public synthetic sample 010 checked; original row and result retained.\nEvidence 011: public synthetic sample 011 checked; original row and result retained.\nEvidence 012: public synthetic sample 012 checked; original row and result retained.\nEvidence 013: public synthetic sample 013 checked; original row and result retained.\nEvidence 014: public synthetic sample 014 checked; original row and result retained.\nEvidence 015: public synthetic sample 015 checked; original row and result retained.\nEvidence 016: public synthetic sample 016 checked; original row and result retained.\nEvidence 017: public synthetic sample 017 checked; original row and result retained.\nEvidence 018: public synthetic sample 018 checked; original row and result retained.\nEvidence 019: public synthetic sample 019 checked; original row and result retained.\nEvidence 020: public synthetic sample 020 checked; original row and result retained.\nEvidence 021: public synthetic sample 021 checked; original row and result retained.\nEvidence 022: public synthetic sample 022 checked; original row and result retained.\nEvidence 023: public synthetic sample 023 checked; original row and result retained.\nEvidence 024: public synthetic sample 024 checked; original row and result retained.\nEvidence 025: public synthetic sample 025 checked; original row and result retained.\nEvidence 026: public synthetic sample 026 checked; original row and result retained.\nEvidence 027: public synthetic sample 027 checked; original row and result retained.\nEvidence 028: public synthetic sample 028 checked; original row and result retained.\nEvidence 029: public synthetic sample 029 checked; original row and result retained.\nEvidence 030: public synthetic sample 030 checked; original row and result retained.",
+          "role": "assistant"
+        },
+        {
+          "content": "Retain evidence 001-030 and distinguish completed samples from remaining work.",
+          "role": "user"
+        },
+        {
+          "content": "All synthetic originals remain available; final report still pending.",
+          "role": "assistant"
+        },
+        {
+          "content": "Finish the current synthetic report without replaying any completed operation.",
+          "role": "user"
+        }
+      ],
+      "name": "v4_partial_only",
+      "qualification": {
+        "actual_paid_calls": 0,
+        "all_completions_mocked": true,
+        "canonical_history_unchanged": true,
+        "canonical_messages_bytes": 3471,
+        "canonical_messages_sha256": "bb0f2572317ca01b90e17524b3c9bf62fb82eccfec9e29e58bf4b935b8786c7d",
+        "completed_fragment_count": 1,
+        "completed_note_preserved": true,
+        "expected_baseline_pause": {
+          "code": "summary_failed",
+          "message": "Context compaction stopped [summary_failed]: The compaction operation failed. Check provider availability and compaction diagnostics before retrying. Original history is preserved; no foreground request was sent for this step.",
+          "retryable": true,
+          "type": "CompactionError"
+        },
+        "initial_fragment_count": 4,
+        "last_finished_event": {
+          "calls": 1,
+          "completed_fragments": 1,
+          "completed_fragments_this_pass": 1,
+          "failure": {
+            "attempt": 1,
+            "code": "summary_failed",
+            "retry_suppressed": false,
+            "retryable": true,
+            "type": "LLMError"
+          },
+          "input_tokens_before": 869,
+          "measurement_kind": "public_estimate",
+          "method": "semantic",
+          "native_selection": "unsupported_by_provider",
+          "outcome": "failed",
+          "remaining_fragments": 3,
+          "resumed_fragments": 0,
+          "revision": 1,
+          "summary_calls_total": 1,
+          "usage": {
+            "input_tokens": 100,
+            "output_tokens": 10
+          },
+          "usage_calls": 1,
+          "work_limit_exhausted": true
+        },
+        "network_calls": 0,
+        "persist_acknowledgements": 1,
+        "provider_count_calls": 0,
+        "record_sha256_recomputed": "6cddc4313dc6973a1d289502db9bb65b121faa8aa83ed62e38fe8ef787b2de95",
+        "remaining_fragment_count": 3,
+        "restore_status": {
+          "completedParts": 1,
+          "originalsAvailable": true,
+          "status": "resuming",
+          "throughMessage": null
+        }
+      },
+      "source_commit": "0de9bd2ea366e0ad10a3fd668c1d62c398baaefd",
+      "source_file_hash_joins": {
+        "modules/context-managed/amplifier_module_context_managed/__init__.py": {
+          "extracted_sha256": "4453257774a76a618d738002120e9f62f0239587fc173d9517adc875d0a28112",
+          "git_blob": "2825f55731f4c175598e1ed0bfc8aeed1cf523bb",
+          "git_mode": "100644",
+          "git_sha256": "4453257774a76a618d738002120e9f62f0239587fc173d9517adc875d0a28112"
+        },
+        "modules/context-managed/amplifier_module_context_managed/boundary.py": {
+          "extracted_sha256": "5890d5b94f5456ab042354dfecdeee23346c60df4a793c8981ef0f8e074051f9",
+          "git_blob": "2f77ad8090848c2fe4fad140ba1c3cfb29905237",
+          "git_mode": "100644",
+          "git_sha256": "5890d5b94f5456ab042354dfecdeee23346c60df4a793c8981ef0f8e074051f9"
+        },
+        "modules/context-managed/amplifier_module_context_managed/checkpoint.py": {
+          "extracted_sha256": "1fa770bcaaf71d96b8d5e17b62ef874dc7955127d1147167bded6f01dbb836ee",
+          "git_blob": "5c5b1635ab4830de85b892093f6375d19a847c49",
+          "git_mode": "100644",
+          "git_sha256": "1fa770bcaaf71d96b8d5e17b62ef874dc7955127d1147167bded6f01dbb836ee"
+        },
+        "modules/context-managed/amplifier_module_context_managed/errors.py": {
+          "extracted_sha256": "f42019ec1614a8ead6d7c687a94c57c108cd3a21a9cfe6285b74d3b4b424992c",
+          "git_blob": "e4e45ca271a062022308ffb20df90ccbfd755725",
+          "git_mode": "100644",
+          "git_sha256": "f42019ec1614a8ead6d7c687a94c57c108cd3a21a9cfe6285b74d3b4b424992c"
+        },
+        "modules/context-managed/amplifier_module_context_managed/interrupted.py": {
+          "extracted_sha256": "f164c184710aa978e67569f00d445defdb0c7010e6bbc18824224f2699c573f3",
+          "git_blob": "075fbcc924d7756d3febbd7c3449be8815409e3e",
+          "git_mode": "100644",
+          "git_sha256": "f164c184710aa978e67569f00d445defdb0c7010e6bbc18824224f2699c573f3"
+        },
+        "modules/context-managed/amplifier_module_context_managed/measurement.py": {
+          "extracted_sha256": "bbc68a59645e6d4250bd2f767aaf87a0214abab97740dcee0eabc798bd22dfe5",
+          "git_blob": "e68bd03818f6a58e270dadd4a8056bbf29880390",
+          "git_mode": "100644",
+          "git_sha256": "bbc68a59645e6d4250bd2f767aaf87a0214abab97740dcee0eabc798bd22dfe5"
+        },
+        "modules/context-managed/amplifier_module_context_managed/prefix_digest.py": {
+          "extracted_sha256": "2f8a821609edafe6dff494ed79c0e2390ea5799c95725ad784858879874139e8",
+          "git_blob": "d8b1ed053497eae805ca7abcf158cb02f8556ce7",
+          "git_mode": "100644",
+          "git_sha256": "2f8a821609edafe6dff494ed79c0e2390ea5799c95725ad784858879874139e8"
+        },
+        "modules/context-managed/amplifier_module_context_managed/recovery.py": {
+          "extracted_sha256": "bf5093dfedd1d13c93868595a293f71f7104da280e3d7606b6f9be3e1f2a6eea",
+          "git_blob": "2661107b616487da419cfa7178211a0788273aa8",
+          "git_mode": "100644",
+          "git_sha256": "bf5093dfedd1d13c93868595a293f71f7104da280e3d7606b6f9be3e1f2a6eea"
+        },
+        "modules/context-managed/amplifier_module_context_managed/request_context.py": {
+          "extracted_sha256": "815c47b27589ce76e3f7c005c6deef1f02b2a05ad72d1af060602641828215d3",
+          "git_blob": "4a71d9b156f10c91be9d26aa89bcc30646c19c8c",
+          "git_mode": "100644",
+          "git_sha256": "815c47b27589ce76e3f7c005c6deef1f02b2a05ad72d1af060602641828215d3"
+        },
+        "modules/context-managed/amplifier_module_context_managed/summary.py": {
+          "extracted_sha256": "306fbe75dd6693c0ca055cfc56841297b5855ed024761796ae08162a2bd76d0e",
+          "git_blob": "b818b89bebc530b09679947aec1d27da6e9272db",
+          "git_mode": "100644",
+          "git_sha256": "306fbe75dd6693c0ca055cfc56841297b5855ed024761796ae08162a2bd76d0e"
+        },
+        "modules/context-managed/amplifier_module_context_managed/working_history.py": {
+          "extracted_sha256": "464fc5e2f0b03031b3c540c344a9278f93db16c0c99d2e7450df32de2eb036f5",
+          "git_blob": "b7c49443d0f54a719367a07149690c53bc8159d7",
+          "git_mode": "100644",
+          "git_sha256": "464fc5e2f0b03031b3c540c344a9278f93db16c0c99d2e7450df32de2eb036f5"
+        }
+      },
+      "successful_paid_requests": [
+        {
+          "actual_paid_effect": false,
+          "kwargs": {},
+          "max_output_tokens": 8192,
+          "message_contents": [
+            {
+              "content_chars": 657,
+              "content_sha256": "9cd388189527d7305e7bb4057a4879e3d77b38fa74c105036938eedf864eaee7",
+              "content_utf8_sha256": "b5a8eef6eaaea509ca5de09729430a1ccb19c2929f3fbd9ac57a6f1e46cb3f67",
+              "role": "system"
+            },
+            {
+              "content_chars": 1223,
+              "content_sha256": "88877b5ca61e5d506719bd07bb1c406582713dc80cf8e7a11fe2243decc15fe5",
+              "content_utf8_sha256": "aba8af7caa0bed8b233a9c419d05f63c824739b135f6bcd9756d3eadc718e7d5",
+              "role": "user"
+            }
+          ],
+          "messages_sha256": "50d0aa65486dd3ce01245df5a6d3c6376000f673f684f05227b85dc845ceac4e",
+          "mocked": true,
+          "model": null,
+          "reasoning_effort": "low",
+          "request_sha256": "b81bf85e62c8b7bd8ad3ae8b6b05d8199dfc520f6a926a758e37462a60785091",
+          "response_finish_reason": "stop",
+          "response_text": "ORBIT partial piece accepted; numbered originals retained; later fragments pending.",
+          "response_usage": {
+            "input_tokens": 100,
+            "output_tokens": 10
+          },
+          "stage": "partial"
+        }
+      ]
+    },
+    "v5_completed_with_partial": {
+      "checkpoint": {
+        "configuration": "a2b572c4afe26956fb590937278e1ff9a52064fa570ad55eb338a15499de5e38",
+        "configurationVersion": 5,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": {
+          "calls": 1,
+          "completed": 1,
+          "fingerprint": "1df7784748b63094201525ef4d5707a0728e3ad7577da2e8f12f2d387fe53a2c",
+          "generation_contract": {
+            "max_output_tokens": 8192,
+            "model": "fixture-model",
+            "prompt_sha256": "efee20e5bb367ffc2bcb85ef36cc1b2632827ef3524e0b5516dbc792862895a6",
+            "reasoning_effort": "low"
+          },
+          "identity": {
+            "model": "fixture-model",
+            "provider": "fixture"
+          },
+          "parts_digest": "9910966e34247bdfce3c9921c93386f7b286dd6c27ccda986c44107ed1bdc8bc",
+          "provider": [
+            "fixture",
+            "fixture-model"
+          ],
+          "segments": [
+            [
+              1,
+              0,
+              1231
+            ],
+            [
+              2,
+              0,
+              754
+            ]
+          ],
+          "source_revision": {
+            "messages": 7,
+            "sha256": "1f89aab0a9393d301b95d1c8c841278ec0a903de4b083186feb1b926eff56d91"
+          },
+          "text": "ORBIT partial piece accepted; numbered originals retained; later fragments pending."
+        },
+        "recovery": null,
+        "sha256": "3abcd88fdae4e7f8719679ae35531fda2cc89a2be3066599d9c19ef990f216dd",
+        "sourceRevision": {
+          "messages": 3,
+          "sha256": "ec4c160566719108ad7be4aaedcf3da02d75b1bfbab0a61f4466edd16af2a83e"
+        },
+        "summary": {
+          "text": "ORBIT evidence 001-008 verified; originals preserved; report pending.",
+          "throughMessage": 3
+        }
+      },
+      "completed_base": {
+        "checkpoint": {
+          "configuration": "a2b572c4afe26956fb590937278e1ff9a52064fa570ad55eb338a15499de5e38",
+          "configurationVersion": 2,
+          "evidenceRefs": [],
+          "format": "context-managed-boundary-v1",
+          "identity": {
+            "model": "fixture-model",
+            "provider": "fixture"
+          },
+          "progress": null,
+          "recovery": null,
+          "sha256": "ada5236bdce3a13255a71db6377f5d58e132a6dd6013fc268af9ec7d340ad3a0",
+          "sourceRevision": {
+            "messages": 3,
+            "sha256": "ec4c160566719108ad7be4aaedcf3da02d75b1bfbab0a61f4466edd16af2a83e"
+          },
+          "summary": {
+            "text": "ORBIT evidence 001-008 verified; originals preserved; report pending.",
+            "throughMessage": 3
+          }
+        },
+        "config": {
+          "durable_checkpoints": true,
+          "max_tokens": 10000,
+          "summarize_trigger": 0.01,
+          "summary_max_calls": 1,
+          "summary_max_source_chars": 1200,
+          "summary_retry_delay": 0,
+          "summary_target_tokens": 1500
+        },
+        "messages": [
+          {
+            "content": "Use only the supplied public synthetic evidence; never replay completed work.",
+            "role": "system"
+          },
+          {
+            "content": "Prepare the ORBIT fixture report, retaining numbered evidence and unresolved work.",
+            "role": "user"
+          },
+          {
+            "content": "Evidence 001: public synthetic sample 001 checked; original row and result retained.\nEvidence 002: public synthetic sample 002 checked; original row and result retained.\nEvidence 003: public synthetic sample 003 checked; original row and result retained.\nEvidence 004: public synthetic sample 004 checked; original row and result retained.\nEvidence 005: public synthetic sample 005 checked; original row and result retained.\nEvidence 006: public synthetic sample 006 checked; original row and result retained.\nEvidence 007: public synthetic sample 007 checked; original row and result retained.\nEvidence 008: public synthetic sample 008 checked; original row and result retained.",
+            "role": "assistant"
+          },
+          {
+            "content": "Correction: preserve every original evidence row for the ORBIT fixture.",
+            "role": "user"
+          },
+          {
+            "content": "Evidence 009 is pending verification in the next synthetic batch.",
+            "role": "assistant"
+          },
+          {
+            "content": "Continue with later evidence before drafting the final report.",
+            "role": "user"
+          }
+        ],
+        "successful_paid_requests": [
+          {
+            "actual_paid_effect": false,
+            "kwargs": {},
+            "max_output_tokens": 8192,
+            "message_contents": [
+              {
+                "content_chars": 1195,
+                "content_sha256": "efee20e5bb367ffc2bcb85ef36cc1b2632827ef3524e0b5516dbc792862895a6",
+                "content_utf8_sha256": "d594673b55ddbcf34f7051cfc244861c314eedaa7ad8181518847bb3933b43a8",
+                "role": "system"
+              },
+              {
+                "content_chars": 1024,
+                "content_sha256": "a22645d8d3ba7d7ee9f638d6bfcc1d9a07be2954ff4019e711d26c363f755d7a",
+                "content_utf8_sha256": "e9447ec84eaa0f83c43118dc471785e02b046ffb5d5e2171ddfb688c46540b97",
+                "role": "user"
+              }
+            ],
+            "messages_sha256": "0614353d7b4e6e6abe0ab47be0fed7a1e00cf023c704160594c389c1336e49e8",
+            "mocked": true,
+            "model": null,
+            "reasoning_effort": "low",
+            "request_sha256": "4a77ea9e6ede18332f61ff68708918f99de419c70e360d7d31db2fbdbc3cfc98",
+            "response_finish_reason": "stop",
+            "response_text": "ORBIT evidence 001-008 verified; originals preserved; report pending.",
+            "response_usage": {
+              "input_tokens": 100,
+              "output_tokens": 10
+            }
+          }
+        ]
+      },
+      "config": {
+        "durable_checkpoints": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "summary_target_tokens": 1500
+      },
+      "effective_config": {
+        "durable_checkpoints": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "summary_target_tokens": 1500,
+        "token_meter": "actual"
+      },
+      "fixture_schema": "baseline-summary-worklimit-fixture-v1",
+      "identity": {
+        "model": "fixture-model",
+        "provider": "fixture"
+      },
+      "messages": [
+        {
+          "content": "Use only the supplied public synthetic evidence; never replay completed work.",
+          "role": "system"
+        },
+        {
+          "content": "Prepare the ORBIT fixture report, retaining numbered evidence and unresolved work.",
+          "role": "user"
+        },
+        {
+          "content": "Evidence 001: public synthetic sample 001 checked; original row and result retained.\nEvidence 002: public synthetic sample 002 checked; original row and result retained.\nEvidence 003: public synthetic sample 003 checked; original row and result retained.\nEvidence 004: public synthetic sample 004 checked; original row and result retained.\nEvidence 005: public synthetic sample 005 checked; original row and result retained.\nEvidence 006: public synthetic sample 006 checked; original row and result retained.\nEvidence 007: public synthetic sample 007 checked; original row and result retained.\nEvidence 008: public synthetic sample 008 checked; original row and result retained.",
+          "role": "assistant"
+        },
+        {
+          "content": "Correction: preserve every original evidence row for the ORBIT fixture.",
+          "role": "user"
+        },
+        {
+          "content": "Evidence 009 is pending verification in the next synthetic batch.",
+          "role": "assistant"
+        },
+        {
+          "content": "Continue with later evidence before drafting the final report.",
+          "role": "user"
+        },
+        {
+          "content": "Evidence 009: public synthetic sample 009 checked; original row and result retained.\nEvidence 010: public synthetic sample 010 checked; original row and result retained.\nEvidence 011: public synthetic sample 011 checked; original row and result retained.\nEvidence 012: public synthetic sample 012 checked; original row and result retained.\nEvidence 013: public synthetic sample 013 checked; original row and result retained.\nEvidence 014: public synthetic sample 014 checked; original row and result retained.\nEvidence 015: public synthetic sample 015 checked; original row and result retained.\nEvidence 016: public synthetic sample 016 checked; original row and result retained.\nEvidence 017: public synthetic sample 017 checked; original row and result retained.\nEvidence 018: public synthetic sample 018 checked; original row and result retained.\nEvidence 019: public synthetic sample 019 checked; original row and result retained.\nEvidence 020: public synthetic sample 020 checked; original row and result retained.\nEvidence 021: public synthetic sample 021 checked; original row and result retained.\nEvidence 022: public synthetic sample 022 checked; original row and result retained.\nEvidence 023: public synthetic sample 023 checked; original row and result retained.\nEvidence 024: public synthetic sample 024 checked; original row and result retained.\nEvidence 025: public synthetic sample 025 checked; original row and result retained.\nEvidence 026: public synthetic sample 026 checked; original row and result retained.\nEvidence 027: public synthetic sample 027 checked; original row and result retained.\nEvidence 028: public synthetic sample 028 checked; original row and result retained.\nEvidence 029: public synthetic sample 029 checked; original row and result retained.\nEvidence 030: public synthetic sample 030 checked; original row and result retained.",
+          "role": "assistant"
+        },
+        {
+          "content": "Retain evidence 001-030 and distinguish completed samples from remaining work.",
+          "role": "user"
+        },
+        {
+          "content": "All synthetic originals remain available; final report still pending.",
+          "role": "assistant"
+        },
+        {
+          "content": "Finish the current synthetic report without replaying any completed operation.",
+          "role": "user"
+        }
+      ],
+      "name": "v5_completed_with_partial",
+      "qualification": {
+        "actual_paid_calls": 0,
+        "all_completions_mocked": true,
+        "canonical_history_unchanged": true,
+        "canonical_messages_bytes": 3471,
+        "canonical_messages_sha256": "bb0f2572317ca01b90e17524b3c9bf62fb82eccfec9e29e58bf4b935b8786c7d",
+        "completed_fragment_count": 1,
+        "completed_note_preserved": true,
+        "expected_baseline_pause": {
+          "code": "summary_failed",
+          "message": "Context compaction stopped [summary_failed]: The compaction operation failed. Check provider availability and compaction diagnostics before retrying. Original history is preserved; no foreground request was sent for this step.",
+          "retryable": true,
+          "type": "CompactionError"
+        },
+        "initial_fragment_count": 3,
+        "last_finished_event": {
+          "calls": 1,
+          "completed_fragments": 1,
+          "completed_fragments_this_pass": 1,
+          "failure": {
+            "attempt": 1,
+            "code": "summary_failed",
+            "retry_suppressed": false,
+            "retryable": true,
+            "type": "LLMError"
+          },
+          "input_tokens_before": 749,
+          "measurement_kind": "public_estimate",
+          "method": "semantic",
+          "native_selection": "unsupported_by_provider",
+          "outcome": "failed",
+          "remaining_fragments": 2,
+          "resumed_fragments": 0,
+          "revision": 5,
+          "summary_calls_total": 1,
+          "usage": {
+            "input_tokens": 100,
+            "output_tokens": 10
+          },
+          "usage_calls": 1,
+          "work_limit_exhausted": true
+        },
+        "network_calls": 0,
+        "persist_acknowledgements": 2,
+        "provider_count_calls": 0,
+        "record_sha256_recomputed": "3abcd88fdae4e7f8719679ae35531fda2cc89a2be3066599d9c19ef990f216dd",
+        "remaining_fragment_count": 2,
+        "restore_status": {
+          "completedParts": 1,
+          "originalsAvailable": true,
+          "status": "resuming",
+          "throughMessage": 3
+        }
+      },
+      "source_commit": "0de9bd2ea366e0ad10a3fd668c1d62c398baaefd",
+      "source_file_hash_joins": {
+        "modules/context-managed/amplifier_module_context_managed/__init__.py": {
+          "extracted_sha256": "4453257774a76a618d738002120e9f62f0239587fc173d9517adc875d0a28112",
+          "git_blob": "2825f55731f4c175598e1ed0bfc8aeed1cf523bb",
+          "git_mode": "100644",
+          "git_sha256": "4453257774a76a618d738002120e9f62f0239587fc173d9517adc875d0a28112"
+        },
+        "modules/context-managed/amplifier_module_context_managed/boundary.py": {
+          "extracted_sha256": "5890d5b94f5456ab042354dfecdeee23346c60df4a793c8981ef0f8e074051f9",
+          "git_blob": "2f77ad8090848c2fe4fad140ba1c3cfb29905237",
+          "git_mode": "100644",
+          "git_sha256": "5890d5b94f5456ab042354dfecdeee23346c60df4a793c8981ef0f8e074051f9"
+        },
+        "modules/context-managed/amplifier_module_context_managed/checkpoint.py": {
+          "extracted_sha256": "1fa770bcaaf71d96b8d5e17b62ef874dc7955127d1147167bded6f01dbb836ee",
+          "git_blob": "5c5b1635ab4830de85b892093f6375d19a847c49",
+          "git_mode": "100644",
+          "git_sha256": "1fa770bcaaf71d96b8d5e17b62ef874dc7955127d1147167bded6f01dbb836ee"
+        },
+        "modules/context-managed/amplifier_module_context_managed/errors.py": {
+          "extracted_sha256": "f42019ec1614a8ead6d7c687a94c57c108cd3a21a9cfe6285b74d3b4b424992c",
+          "git_blob": "e4e45ca271a062022308ffb20df90ccbfd755725",
+          "git_mode": "100644",
+          "git_sha256": "f42019ec1614a8ead6d7c687a94c57c108cd3a21a9cfe6285b74d3b4b424992c"
+        },
+        "modules/context-managed/amplifier_module_context_managed/interrupted.py": {
+          "extracted_sha256": "f164c184710aa978e67569f00d445defdb0c7010e6bbc18824224f2699c573f3",
+          "git_blob": "075fbcc924d7756d3febbd7c3449be8815409e3e",
+          "git_mode": "100644",
+          "git_sha256": "f164c184710aa978e67569f00d445defdb0c7010e6bbc18824224f2699c573f3"
+        },
+        "modules/context-managed/amplifier_module_context_managed/measurement.py": {
+          "extracted_sha256": "bbc68a59645e6d4250bd2f767aaf87a0214abab97740dcee0eabc798bd22dfe5",
+          "git_blob": "e68bd03818f6a58e270dadd4a8056bbf29880390",
+          "git_mode": "100644",
+          "git_sha256": "bbc68a59645e6d4250bd2f767aaf87a0214abab97740dcee0eabc798bd22dfe5"
+        },
+        "modules/context-managed/amplifier_module_context_managed/prefix_digest.py": {
+          "extracted_sha256": "2f8a821609edafe6dff494ed79c0e2390ea5799c95725ad784858879874139e8",
+          "git_blob": "d8b1ed053497eae805ca7abcf158cb02f8556ce7",
+          "git_mode": "100644",
+          "git_sha256": "2f8a821609edafe6dff494ed79c0e2390ea5799c95725ad784858879874139e8"
+        },
+        "modules/context-managed/amplifier_module_context_managed/recovery.py": {
+          "extracted_sha256": "bf5093dfedd1d13c93868595a293f71f7104da280e3d7606b6f9be3e1f2a6eea",
+          "git_blob": "2661107b616487da419cfa7178211a0788273aa8",
+          "git_mode": "100644",
+          "git_sha256": "bf5093dfedd1d13c93868595a293f71f7104da280e3d7606b6f9be3e1f2a6eea"
+        },
+        "modules/context-managed/amplifier_module_context_managed/request_context.py": {
+          "extracted_sha256": "815c47b27589ce76e3f7c005c6deef1f02b2a05ad72d1af060602641828215d3",
+          "git_blob": "4a71d9b156f10c91be9d26aa89bcc30646c19c8c",
+          "git_mode": "100644",
+          "git_sha256": "815c47b27589ce76e3f7c005c6deef1f02b2a05ad72d1af060602641828215d3"
+        },
+        "modules/context-managed/amplifier_module_context_managed/summary.py": {
+          "extracted_sha256": "306fbe75dd6693c0ca055cfc56841297b5855ed024761796ae08162a2bd76d0e",
+          "git_blob": "b818b89bebc530b09679947aec1d27da6e9272db",
+          "git_mode": "100644",
+          "git_sha256": "306fbe75dd6693c0ca055cfc56841297b5855ed024761796ae08162a2bd76d0e"
+        },
+        "modules/context-managed/amplifier_module_context_managed/working_history.py": {
+          "extracted_sha256": "464fc5e2f0b03031b3c540c344a9278f93db16c0c99d2e7450df32de2eb036f5",
+          "git_blob": "b7c49443d0f54a719367a07149690c53bc8159d7",
+          "git_mode": "100644",
+          "git_sha256": "464fc5e2f0b03031b3c540c344a9278f93db16c0c99d2e7450df32de2eb036f5"
+        }
+      },
+      "successful_paid_requests": [
+        {
+          "actual_paid_effect": false,
+          "kwargs": {},
+          "max_output_tokens": 8192,
+          "message_contents": [
+            {
+              "content_chars": 1195,
+              "content_sha256": "efee20e5bb367ffc2bcb85ef36cc1b2632827ef3524e0b5516dbc792862895a6",
+              "content_utf8_sha256": "d594673b55ddbcf34f7051cfc244861c314eedaa7ad8181518847bb3933b43a8",
+              "role": "system"
+            },
+            {
+              "content_chars": 1024,
+              "content_sha256": "a22645d8d3ba7d7ee9f638d6bfcc1d9a07be2954ff4019e711d26c363f755d7a",
+              "content_utf8_sha256": "e9447ec84eaa0f83c43118dc471785e02b046ffb5d5e2171ddfb688c46540b97",
+              "role": "user"
+            }
+          ],
+          "messages_sha256": "0614353d7b4e6e6abe0ab47be0fed7a1e00cf023c704160594c389c1336e49e8",
+          "mocked": true,
+          "model": null,
+          "reasoning_effort": "low",
+          "request_sha256": "4a77ea9e6ede18332f61ff68708918f99de419c70e360d7d31db2fbdbc3cfc98",
+          "response_finish_reason": "stop",
+          "response_text": "ORBIT evidence 001-008 verified; originals preserved; report pending.",
+          "response_usage": {
+            "input_tokens": 100,
+            "output_tokens": 10
+          },
+          "stage": "completed_base"
+        },
+        {
+          "actual_paid_effect": false,
+          "kwargs": {},
+          "max_output_tokens": 8192,
+          "message_contents": [
+            {
+              "content_chars": 1195,
+              "content_sha256": "efee20e5bb367ffc2bcb85ef36cc1b2632827ef3524e0b5516dbc792862895a6",
+              "content_utf8_sha256": "d594673b55ddbcf34f7051cfc244861c314eedaa7ad8181518847bb3933b43a8",
+              "role": "system"
+            },
+            {
+              "content_chars": 825,
+              "content_sha256": "d5a52f7f0822e6687628cdc4d78fc6ce5c085470d49705dfa3df950eb9444a69",
+              "content_utf8_sha256": "428832e1d8509f21de70990f50c82fb971313a9ab651483b04e94ad6cefcf5ca",
+              "role": "user"
+            }
+          ],
+          "messages_sha256": "17a600cfce53f87ee994ce7fd7189cf3802c22276066567f1d8801cfbb6818eb",
+          "mocked": true,
+          "model": null,
+          "reasoning_effort": "low",
+          "request_sha256": "e3d7303359a6864a05b12231a6c1118b259af68881f0e4458676d8810cf03e0b",
+          "response_finish_reason": "stop",
+          "response_text": "ORBIT partial piece accepted; numbered originals retained; later fragments pending.",
+          "response_usage": {
+            "input_tokens": 100,
+            "output_tokens": 10
+          },
+          "stage": "partial"
+        }
+      ]
+    },
+    "v5_partial_only": {
+      "checkpoint": {
+        "configuration": "a2b572c4afe26956fb590937278e1ff9a52064fa570ad55eb338a15499de5e38",
+        "configurationVersion": 5,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": {
+          "calls": 1,
+          "completed": 1,
+          "fingerprint": "d639203e0bc9b65b037c15e891b556db132b4380c728842bbc4061a1eec260e9",
+          "generation_contract": {
+            "max_output_tokens": 8192,
+            "model": "fixture-model",
+            "prompt_sha256": "efee20e5bb367ffc2bcb85ef36cc1b2632827ef3524e0b5516dbc792862895a6",
+            "reasoning_effort": "low"
+          },
+          "identity": {
+            "model": "fixture-model",
+            "provider": "fixture"
+          },
+          "parts_digest": "75a11b888cca0c39cf2a4c1616a829c500cf07e2cc663fdd6c80a4d0f530cebb",
+          "provider": [
+            "fixture",
+            "fixture-model"
+          ],
+          "segments": [
+            [
+              1,
+              0,
+              90
+            ],
+            [
+              2,
+              0,
+              1231
+            ],
+            [
+              3,
+              0,
+              754
+            ]
+          ],
+          "source_revision": {
+            "messages": 7,
+            "sha256": "1f89aab0a9393d301b95d1c8c841278ec0a903de4b083186feb1b926eff56d91"
+          },
+          "text": "ORBIT partial piece accepted; numbered originals retained; later fragments pending."
+        },
+        "recovery": null,
+        "sha256": "dc8a5fec48433d29eb04bca3a4a80cf1e788202ab092d405a197683398de74e0",
+        "sourceRevision": {
+          "messages": 7,
+          "sha256": "1f89aab0a9393d301b95d1c8c841278ec0a903de4b083186feb1b926eff56d91"
+        },
+        "summary": null
+      },
+      "completed_base": null,
+      "config": {
+        "durable_checkpoints": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "summary_target_tokens": 1500
+      },
+      "effective_config": {
+        "durable_checkpoints": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "summary_target_tokens": 1500,
+        "token_meter": "actual"
+      },
+      "fixture_schema": "baseline-summary-worklimit-fixture-v1",
+      "identity": {
+        "model": "fixture-model",
+        "provider": "fixture"
+      },
+      "messages": [
+        {
+          "content": "Use only the supplied public synthetic evidence; never replay completed work.",
+          "role": "system"
+        },
+        {
+          "content": "Prepare the ORBIT fixture report, retaining numbered evidence and unresolved work.",
+          "role": "user"
+        },
+        {
+          "content": "Evidence 001: public synthetic sample 001 checked; original row and result retained.\nEvidence 002: public synthetic sample 002 checked; original row and result retained.\nEvidence 003: public synthetic sample 003 checked; original row and result retained.\nEvidence 004: public synthetic sample 004 checked; original row and result retained.\nEvidence 005: public synthetic sample 005 checked; original row and result retained.\nEvidence 006: public synthetic sample 006 checked; original row and result retained.\nEvidence 007: public synthetic sample 007 checked; original row and result retained.\nEvidence 008: public synthetic sample 008 checked; original row and result retained.",
+          "role": "assistant"
+        },
+        {
+          "content": "Correction: preserve every original evidence row for the ORBIT fixture.",
+          "role": "user"
+        },
+        {
+          "content": "Evidence 009 is pending verification in the next synthetic batch.",
+          "role": "assistant"
+        },
+        {
+          "content": "Continue with later evidence before drafting the final report.",
+          "role": "user"
+        },
+        {
+          "content": "Evidence 009: public synthetic sample 009 checked; original row and result retained.\nEvidence 010: public synthetic sample 010 checked; original row and result retained.\nEvidence 011: public synthetic sample 011 checked; original row and result retained.\nEvidence 012: public synthetic sample 012 checked; original row and result retained.\nEvidence 013: public synthetic sample 013 checked; original row and result retained.\nEvidence 014: public synthetic sample 014 checked; original row and result retained.\nEvidence 015: public synthetic sample 015 checked; original row and result retained.\nEvidence 016: public synthetic sample 016 checked; original row and result retained.\nEvidence 017: public synthetic sample 017 checked; original row and result retained.\nEvidence 018: public synthetic sample 018 checked; original row and result retained.\nEvidence 019: public synthetic sample 019 checked; original row and result retained.\nEvidence 020: public synthetic sample 020 checked; original row and result retained.\nEvidence 021: public synthetic sample 021 checked; original row and result retained.\nEvidence 022: public synthetic sample 022 checked; original row and result retained.\nEvidence 023: public synthetic sample 023 checked; original row and result retained.\nEvidence 024: public synthetic sample 024 checked; original row and result retained.\nEvidence 025: public synthetic sample 025 checked; original row and result retained.\nEvidence 026: public synthetic sample 026 checked; original row and result retained.\nEvidence 027: public synthetic sample 027 checked; original row and result retained.\nEvidence 028: public synthetic sample 028 checked; original row and result retained.\nEvidence 029: public synthetic sample 029 checked; original row and result retained.\nEvidence 030: public synthetic sample 030 checked; original row and result retained.",
+          "role": "assistant"
+        },
+        {
+          "content": "Retain evidence 001-030 and distinguish completed samples from remaining work.",
+          "role": "user"
+        },
+        {
+          "content": "All synthetic originals remain available; final report still pending.",
+          "role": "assistant"
+        },
+        {
+          "content": "Finish the current synthetic report without replaying any completed operation.",
+          "role": "user"
+        }
+      ],
+      "name": "v5_partial_only",
+      "qualification": {
+        "actual_paid_calls": 0,
+        "all_completions_mocked": true,
+        "canonical_history_unchanged": true,
+        "canonical_messages_bytes": 3471,
+        "canonical_messages_sha256": "bb0f2572317ca01b90e17524b3c9bf62fb82eccfec9e29e58bf4b935b8786c7d",
+        "completed_fragment_count": 1,
+        "completed_note_preserved": true,
+        "expected_baseline_pause": {
+          "code": "summary_failed",
+          "message": "Context compaction stopped [summary_failed]: The compaction operation failed. Check provider availability and compaction diagnostics before retrying. Original history is preserved; no foreground request was sent for this step.",
+          "retryable": true,
+          "type": "CompactionError"
+        },
+        "initial_fragment_count": 4,
+        "last_finished_event": {
+          "calls": 1,
+          "completed_fragments": 1,
+          "completed_fragments_this_pass": 1,
+          "failure": {
+            "attempt": 1,
+            "code": "summary_failed",
+            "retry_suppressed": false,
+            "retryable": true,
+            "type": "LLMError"
+          },
+          "input_tokens_before": 869,
+          "measurement_kind": "public_estimate",
+          "method": "semantic",
+          "native_selection": "unsupported_by_provider",
+          "outcome": "failed",
+          "remaining_fragments": 3,
+          "resumed_fragments": 0,
+          "revision": 1,
+          "summary_calls_total": 1,
+          "usage": {
+            "input_tokens": 100,
+            "output_tokens": 10
+          },
+          "usage_calls": 1,
+          "work_limit_exhausted": true
+        },
+        "network_calls": 0,
+        "persist_acknowledgements": 1,
+        "provider_count_calls": 0,
+        "record_sha256_recomputed": "dc8a5fec48433d29eb04bca3a4a80cf1e788202ab092d405a197683398de74e0",
+        "remaining_fragment_count": 3,
+        "restore_status": {
+          "completedParts": 1,
+          "originalsAvailable": true,
+          "status": "resuming",
+          "throughMessage": null
+        }
+      },
+      "source_commit": "0de9bd2ea366e0ad10a3fd668c1d62c398baaefd",
+      "source_file_hash_joins": {
+        "modules/context-managed/amplifier_module_context_managed/__init__.py": {
+          "extracted_sha256": "4453257774a76a618d738002120e9f62f0239587fc173d9517adc875d0a28112",
+          "git_blob": "2825f55731f4c175598e1ed0bfc8aeed1cf523bb",
+          "git_mode": "100644",
+          "git_sha256": "4453257774a76a618d738002120e9f62f0239587fc173d9517adc875d0a28112"
+        },
+        "modules/context-managed/amplifier_module_context_managed/boundary.py": {
+          "extracted_sha256": "5890d5b94f5456ab042354dfecdeee23346c60df4a793c8981ef0f8e074051f9",
+          "git_blob": "2f77ad8090848c2fe4fad140ba1c3cfb29905237",
+          "git_mode": "100644",
+          "git_sha256": "5890d5b94f5456ab042354dfecdeee23346c60df4a793c8981ef0f8e074051f9"
+        },
+        "modules/context-managed/amplifier_module_context_managed/checkpoint.py": {
+          "extracted_sha256": "1fa770bcaaf71d96b8d5e17b62ef874dc7955127d1147167bded6f01dbb836ee",
+          "git_blob": "5c5b1635ab4830de85b892093f6375d19a847c49",
+          "git_mode": "100644",
+          "git_sha256": "1fa770bcaaf71d96b8d5e17b62ef874dc7955127d1147167bded6f01dbb836ee"
+        },
+        "modules/context-managed/amplifier_module_context_managed/errors.py": {
+          "extracted_sha256": "f42019ec1614a8ead6d7c687a94c57c108cd3a21a9cfe6285b74d3b4b424992c",
+          "git_blob": "e4e45ca271a062022308ffb20df90ccbfd755725",
+          "git_mode": "100644",
+          "git_sha256": "f42019ec1614a8ead6d7c687a94c57c108cd3a21a9cfe6285b74d3b4b424992c"
+        },
+        "modules/context-managed/amplifier_module_context_managed/interrupted.py": {
+          "extracted_sha256": "f164c184710aa978e67569f00d445defdb0c7010e6bbc18824224f2699c573f3",
+          "git_blob": "075fbcc924d7756d3febbd7c3449be8815409e3e",
+          "git_mode": "100644",
+          "git_sha256": "f164c184710aa978e67569f00d445defdb0c7010e6bbc18824224f2699c573f3"
+        },
+        "modules/context-managed/amplifier_module_context_managed/measurement.py": {
+          "extracted_sha256": "bbc68a59645e6d4250bd2f767aaf87a0214abab97740dcee0eabc798bd22dfe5",
+          "git_blob": "e68bd03818f6a58e270dadd4a8056bbf29880390",
+          "git_mode": "100644",
+          "git_sha256": "bbc68a59645e6d4250bd2f767aaf87a0214abab97740dcee0eabc798bd22dfe5"
+        },
+        "modules/context-managed/amplifier_module_context_managed/prefix_digest.py": {
+          "extracted_sha256": "2f8a821609edafe6dff494ed79c0e2390ea5799c95725ad784858879874139e8",
+          "git_blob": "d8b1ed053497eae805ca7abcf158cb02f8556ce7",
+          "git_mode": "100644",
+          "git_sha256": "2f8a821609edafe6dff494ed79c0e2390ea5799c95725ad784858879874139e8"
+        },
+        "modules/context-managed/amplifier_module_context_managed/recovery.py": {
+          "extracted_sha256": "bf5093dfedd1d13c93868595a293f71f7104da280e3d7606b6f9be3e1f2a6eea",
+          "git_blob": "2661107b616487da419cfa7178211a0788273aa8",
+          "git_mode": "100644",
+          "git_sha256": "bf5093dfedd1d13c93868595a293f71f7104da280e3d7606b6f9be3e1f2a6eea"
+        },
+        "modules/context-managed/amplifier_module_context_managed/request_context.py": {
+          "extracted_sha256": "815c47b27589ce76e3f7c005c6deef1f02b2a05ad72d1af060602641828215d3",
+          "git_blob": "4a71d9b156f10c91be9d26aa89bcc30646c19c8c",
+          "git_mode": "100644",
+          "git_sha256": "815c47b27589ce76e3f7c005c6deef1f02b2a05ad72d1af060602641828215d3"
+        },
+        "modules/context-managed/amplifier_module_context_managed/summary.py": {
+          "extracted_sha256": "306fbe75dd6693c0ca055cfc56841297b5855ed024761796ae08162a2bd76d0e",
+          "git_blob": "b818b89bebc530b09679947aec1d27da6e9272db",
+          "git_mode": "100644",
+          "git_sha256": "306fbe75dd6693c0ca055cfc56841297b5855ed024761796ae08162a2bd76d0e"
+        },
+        "modules/context-managed/amplifier_module_context_managed/working_history.py": {
+          "extracted_sha256": "464fc5e2f0b03031b3c540c344a9278f93db16c0c99d2e7450df32de2eb036f5",
+          "git_blob": "b7c49443d0f54a719367a07149690c53bc8159d7",
+          "git_mode": "100644",
+          "git_sha256": "464fc5e2f0b03031b3c540c344a9278f93db16c0c99d2e7450df32de2eb036f5"
+        }
+      },
+      "successful_paid_requests": [
+        {
+          "actual_paid_effect": false,
+          "kwargs": {},
+          "max_output_tokens": 8192,
+          "message_contents": [
+            {
+              "content_chars": 1195,
+              "content_sha256": "efee20e5bb367ffc2bcb85ef36cc1b2632827ef3524e0b5516dbc792862895a6",
+              "content_utf8_sha256": "d594673b55ddbcf34f7051cfc244861c314eedaa7ad8181518847bb3933b43a8",
+              "role": "system"
+            },
+            {
+              "content_chars": 1223,
+              "content_sha256": "88877b5ca61e5d506719bd07bb1c406582713dc80cf8e7a11fe2243decc15fe5",
+              "content_utf8_sha256": "aba8af7caa0bed8b233a9c419d05f63c824739b135f6bcd9756d3eadc718e7d5",
+              "role": "user"
+            }
+          ],
+          "messages_sha256": "c0bdb51b343ed6fc6737bec50712d7af821a7d4decebcd5ad846b5c38af61909",
+          "mocked": true,
+          "model": null,
+          "reasoning_effort": "low",
+          "request_sha256": "b766136921739ce0e63005d7374c18306e1bac97c6e920b0181208223a327c33",
+          "response_finish_reason": "stop",
+          "response_text": "ORBIT partial piece accepted; numbered originals retained; later fragments pending.",
+          "response_usage": {
+            "input_tokens": 100,
+            "output_tokens": 10
+          },
+          "stage": "partial"
+        }
+      ]
+    }
+  },
+  "generator_sha256": "2bf3a5c2cc191bca09a6f1f4f5e1191f588e0dab2f54342c7cb043d3046f5918",
+  "source_commit": "0de9bd2ea366e0ad10a3fd668c1d62c398baaefd"
+}

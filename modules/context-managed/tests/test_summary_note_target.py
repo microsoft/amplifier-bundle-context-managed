@@ -108,10 +108,11 @@ async def test_v5_contract_is_strict_and_changed_prompt_cannot_resume(change):
         return
     assert status["status"] == "resuming"
     model.complete = AsyncMock(return_value=response())
-    await second._prepare(model, None, [])
-    assert finished(second)[-1]["resumed_fragments"] == 0
-    assert any("prompt" in call.args[1].get("reason", "").lower() for call in second.hooks.emit.call_args_list
-               if call.args[0] == "context:checkpoint_progress_rejected")
+    before = copy.deepcopy(second._restored_progress)
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await second._prepare(model, None, [])
+    model.complete.assert_not_awaited()
+    assert second._restored_progress == before
 
 
 @pytest.mark.asyncio
@@ -160,17 +161,19 @@ async def test_frozen_396325_completed_note_remains_usable_without_generation(na
 async def test_frozen_396325_partial_rejected_under_new_policy_without_skipping_source():
     fixtures = json.loads(Path(__file__).with_name("summary_note_target_legacy.json").read_text())
     fixture = fixtures["partial_only"]
-    # The frozen record stopped after one call. This inert work-per-pass option
-    # permits the test to finish recomputation without changing note identity.
+    # Increasing an inert per-pass allowance does not authorize discarding and
+    # buying replacement work under a changed prompt contract.
     manager = BoundaryContextManager({**fixture["config"], "summary_max_calls": 16},
                                      SimpleNamespace(emit=AsyncMock()))
     manager.checkpoint_identity = lambda: copy.deepcopy(IDENTITY)
     await manager.set_messages(fixture["messages"])
     assert manager.restore_checkpoint(fixture["checkpoint"], IDENTITY)["status"] == "resuming"
     model = SimpleNamespace(name="fixture", default_model="fixture-model", complete=AsyncMock(return_value=response()))
-    await manager._prepare(model, None, [])
-    assert "LEGACY paid note" not in model.complete.call_args_list[0].args[0].messages[1].content
-    assert finished(manager)[-1]["resumed_fragments"] == 0
+    before = copy.deepcopy(manager._restored_progress)
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await manager._prepare(model, None, [])
+    model.complete.assert_not_awaited()
+    assert manager._restored_progress == before
     assert await manager.get_messages() == fixture["messages"]
 
 
@@ -192,7 +195,7 @@ async def test_legacy_failure_fingerprint_does_not_latch_corrected_prompt_policy
 
 
 @pytest.mark.asyncio
-async def test_completed_plus_old_partial_keeps_completed_note_when_corrected_work_fails():
+async def test_completed_plus_old_partial_keeps_completed_note_without_buying_replacement():
     fixture = json.loads(Path(__file__).with_name("summary_note_target_legacy.json").read_text())["completed_with_partial"]
     original_record = copy.deepcopy(fixture["checkpoint"])
     manager = BoundaryContextManager({**fixture["config"], "summarize_trigger": .01,
@@ -204,10 +207,9 @@ async def test_completed_plus_old_partial_keeps_completed_note_when_corrected_wo
     limited = response("TRUNCATED replacement"); limited.finish_reason = "max_tokens"
     model = SimpleNamespace(name="fixture", default_model="fixture-model",
                             complete=AsyncMock(return_value=limited))
-    with pytest.raises(CompactionError, match="output allowance"):
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
         await manager._prepare(model, None, [])
-    assert model.complete.await_count == 1
-    assert "LEGACY next paid note" not in model.complete.call_args.args[0].messages[1].content
+    model.complete.assert_not_awaited()
     assert manager.summary == completed
     assert manager.export_checkpoint(IDENTITY)["summary"] == original_record["summary"]
     assert fixture["checkpoint"] == original_record
