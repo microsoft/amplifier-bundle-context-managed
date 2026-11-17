@@ -149,7 +149,7 @@ async def test_successful_progress_resets_stalled_attempts_without_resetting_tot
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["prefix", "tail"])
-async def test_inflight_replacement_aborts_request_and_retains_only_unchanged_prefix_work(change):
+async def test_inflight_replacement_aborts_request_and_quarantines_changed_prefix_work(change):
     manager = await context()
     entered, release = asyncio.Event(), asyncio.Event()
     calls = []
@@ -171,10 +171,18 @@ async def test_inflight_replacement_aborts_request_and_retains_only_unchanged_pr
     with pytest.raises(RuntimeError, match="History changed"):
         await task
     assert manager.summary is None
-    assert manager._summary_progress is None if change == "prefix" else manager._summary_progress["completed"] == 1
-    await manager._prepare(model, None, [])
-    assert manager.summary is not None
-    assert finished(manager)[-1]["resumed_fragments"] == (1 if change == "tail" else 0)
+    assert manager._summary_progress["completed"] == 1
+    if change == "prefix":
+        with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+            manager.export_checkpoint(IDENTITY)
+        count = len(calls)
+        with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+            await manager._prepare(model, None, [])
+        assert len(calls) == count
+    else:
+        await manager._prepare(model, None, [])
+        assert manager.summary is not None
+        assert finished(manager)[-1]["resumed_fragments"] == 1
     assert await manager.get_messages() == replacement
 
 
@@ -207,7 +215,7 @@ async def test_cancellation_during_next_preflight_preserves_only_completed_priva
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["config", "identity", "required_content"])
-async def test_draft_invalidates_on_changed_summary_contract(change):
+async def test_paid_draft_refuses_replacement_on_changed_summary_contract(change):
     manager = await context()
     model = SimpleNamespace(complete=AsyncMock(side_effect=[response(), LLMError("temporary", retryable=True)]))
     with pytest.raises(CompactionError):
@@ -221,14 +229,11 @@ async def test_draft_invalidates_on_changed_summary_contract(change):
     else:
         retain = [history()[2]["content"]]
     model.complete = AsyncMock(return_value=response())
-    if change == "required_content":
-        # The new protected boundary leaves too little source for this fixture
-        # summary to reduce. Reject it without reusing the incompatible draft.
-        with pytest.raises(CompactionError, match="summary_failed"):
-            await manager._prepare(model, None, retain)
-    else:
+    paid = copy.deepcopy(manager._summary_progress)
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
         await manager._prepare(model, None, retain)
-    assert finished(manager)[-1]["resumed_fragments"] == 0
+    assert model.complete.await_count == 0
+    assert manager._summary_progress == paid
 
 
 @pytest.mark.asyncio
@@ -278,7 +283,7 @@ async def test_native_failure_is_not_repeated_when_resuming_portable_draft():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["config", "identity", "provider"])
-async def test_inflight_summary_contract_change_discards_draft_without_committing(change):
+async def test_inflight_contract_change_does_not_commit_or_rebind_paid_draft(change):
     manager = await context()
     entered, release = asyncio.Event(), asyncio.Event()
     calls = 0
@@ -303,5 +308,8 @@ async def test_inflight_summary_contract_change_discards_draft_without_committin
     release.set()
     with pytest.raises(RuntimeError, match="contract changed"):
         await task
-    assert manager._summary_progress is None and manager.summary is None
-    assert manager.export_checkpoint(IDENTITY) is None
+    assert manager._summary_progress["completed"] == 1 and manager.summary is None
+    count = calls
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await manager._prepare(model, None, [])
+    assert calls == count

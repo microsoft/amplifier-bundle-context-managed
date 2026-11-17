@@ -131,10 +131,11 @@ class BoundaryContextManager:
         # A suffix replacement invalidates an in-flight result through the
         # revision guard, while already completed fragments still cover exactly
         # the same prefix. No result completed after replacement can be staged.
-        if not self._same_prefix(self._summary_progress, replacement):
+        if self._summary_progress and not self._summary_progress["completed"]:
             self._summary_progress = None
-        if not self._same_prefix(self._restored_progress, replacement):
-            self._restored_progress = None
+        # Keep paid work provisional even when its prefix changed. Preparation
+        # must refuse it, not silently spend on a replacement. It cannot be
+        # exported against changed originals or installed as a completed note.
         if not keep_summary:
             self.summary = None
             self.summary_omitted_indices = []
@@ -160,10 +161,19 @@ class BoundaryContextManager:
 
     def restore_checkpoint(self, record, identity):
         from .checkpoint import restore_checkpoint
+        # Validation is transactional. A rejected incoming record is not an
+        # explicit discard of already admitted (possibly paid) work.
+        fields = ("_summary_progress", "_restored_progress", "summary_failure", "summary",
+                  "summary_omitted_indices", "summary_identity", "evidence_refs", "recovery")
+        previous = {key: getattr(self, key) for key in fields}
         self._summary_progress = None
         self._restored_progress = None
         self.summary_failure = None
-        return restore_checkpoint(self, record, identity)
+        result = restore_checkpoint(self, record, identity)
+        if result["status"] == "rejected":
+            for key, value in previous.items():
+                setattr(self, key, value)
+        return result
 
     async def recover_request(self, *, provider, count_view, identity, save_progress,
                               install, guard, retain_contents=(), target_bytes=1_500_000,
@@ -182,6 +192,8 @@ class BoundaryContextManager:
 
     async def clear(self):
         await self.set_messages([])
+        self._summary_progress = None
+        self._restored_progress = None
 
     async def set_system_prompt_factory(self, factory):
         self.factory = factory
@@ -248,7 +260,7 @@ class BoundaryContextManager:
                 if self._visible_reminder(row, retain, carry)]
         return project_interrupted(rows, unknown)
 
-    def _boundary(self, messages, retain):
+    def _boundary(self, messages, retain, *, ceiling=None):
         turns = [i for i, row in enumerate(messages) if self._human(row)]
         end = turns[-2] if len(turns) >= 3 else 0
         calls, settled, safe = {}, [], set()
@@ -299,6 +311,8 @@ class BoundaryContextManager:
         if calls:
             barrier = min(barrier, min(calls.values()))
         end = min(end, barrier)
+        if ceiling is not None:
+            end = min(end, ceiling)
         candidates = set(turns) | {start for start, _ in settled}
         return max((i for i in candidates if i <= end and i in safe), default=0)
 
@@ -339,11 +353,68 @@ class BoundaryContextManager:
 
     @staticmethod
     def _summary_progress_stats(stats, progress):
+        pending = sum(z - a for _, a, z in progress["segments"])
         stats.update(summary_calls_total=progress["calls"],
                      completed_fragments=progress["completed"],
-                     remaining_fragments=len(progress["pending"]))
+                     remaining_fragments=len(progress["pending"]),
+                     source_chars_total=progress["source_chars_total"],
+                     source_chars_completed=progress["source_chars_total"] - pending,
+                     source_chars_pending=pending,
+                     pending_segments=len(progress["segments"]),
+                     largest_pending_segment_chars=max((z - a for _, a, z in progress["segments"]), default=0),
+                     partition_final=not progress["segments"],
+                     source_character_basis="serialized_summary_source_parts")
 
-    async def _summarize(self, summarizer, source, revision, stats, *, fingerprint, source_revision, identity):
+    def _summary_fingerprint(self, source, identity, summarizer, *, native=False):
+        contract = {"source": source, "identity": identity,
+            "provider": getattr(summarizer, "name", type(summarizer).__name__),
+            "model": getattr(summarizer, "default_model", None),
+            "configuration": self.checkpoint_configuration()}
+        if not native and "summary_target_tokens" in self.config:
+            contract["prompt_sha256"] = digest(summary_prompt(SUMMARY_PROMPT, self.config))
+        return digest(contract)
+
+    @staticmethod
+    def _generation_contract(summarizer, config):
+        contract = {
+            "model": config.get("summarization_model") or getattr(summarizer, "default_model", None),
+            "max_output_tokens": config["summary_max_output_tokens"],
+            "reasoning_effort": config.get("summary_reasoning_effort", "low"),
+        }
+        if "summary_target_tokens" in config:
+            contract["prompt_sha256"] = digest(summary_prompt(SUMMARY_PROMPT, config))
+        return contract
+
+    @staticmethod
+    def _valid_segments(saved, parts):
+        segments = saved.get("segments")
+        if not isinstance(segments, list):
+            return False
+        if any(not isinstance(v, list) or len(v) != 3 or any(type(n) is not int for n in v)
+               for v in segments):
+            return False
+        if not all(0 <= i < len(parts) and 0 <= a < z <= len(parts[i]) for i, a, z in segments):
+            return False
+        for (i, _, end), (j, start, _) in zip(segments, segments[1:]):
+            if not ((j == i and start == end) or
+                    (j == i + 1 and end == len(parts[i]) and start == 0)):
+                return False
+        return not segments or (segments[-1][0] == len(parts) - 1
+                                and segments[-1][2] == len(parts[-1]))
+
+    @staticmethod
+    def _refuse_progress():
+        raise CompactionError("summary_progress_incompatible",
+            "Saved partial work cannot be continued under the current source boundary "
+            "or generation policy. Preserve its checkpoint and explicitly decide "
+            "whether to recompute; no replacement summary was started.")
+
+    def _discard_unpaid_progress(self):
+        if self._summary_progress and not self._summary_progress["completed"]:
+            self._summary_progress = None
+
+    async def _summarize(self, summarizer, source, revision, stats, *, fingerprint, source_revision, identity,
+                         resolved_options=None):
         """Prefer one measured request; commit only after the entire prefix."""
         from amplifier_core.llm_errors import ContextLengthError
 
@@ -365,7 +436,8 @@ class BoundaryContextManager:
         configuration = self.checkpoint_configuration()
         provider_identity = (getattr(summarizer, "name", type(summarizer).__name__),
                              getattr(summarizer, "default_model", None))
-        resolved_config, provider_info = await summary_config(summarizer, copy.deepcopy(self.config))
+        resolved_config, provider_info = (resolved_options if resolved_options is not None else
+            await summary_config(summarizer, copy.deepcopy(self.config)))
         # Metadata may be asynchronous. Never bind stale output options to a
         # newer cost/configuration contract, even if final installation would
         # reject it: fragment generation and persistence are paid effects too.
@@ -375,45 +447,21 @@ class BoundaryContextManager:
                     getattr(summarizer, "name", type(summarizer).__name__),
                     getattr(summarizer, "default_model", None))):
             raise RuntimeError("Summary contract changed during compaction; stale summary was discarded")
-        generation_contract = {
-            "model": resolved_config.get("summarization_model") or getattr(summarizer, "default_model", None),
-            "max_output_tokens": resolved_config["summary_max_output_tokens"],
-            "reasoning_effort": resolved_config.get("summary_reasoning_effort", "low"),
-        }
-        if "summary_target_tokens" in resolved_config:
-            generation_contract["prompt_sha256"] = digest(summary_prompt(SUMMARY_PROMPT, resolved_config))
-        progress = self._summary_progress
-        if progress and progress.get("generation_contract") != generation_contract:
-            self._summary_progress = progress = None
-        if not progress or progress["fingerprint"] != fingerprint:
-            parts = list(source_fragments(public_messages(source), None if preflight_whole else limit))
-            segments = [[i, 0, len(part)] for i, part in enumerate(parts)]
-            saved = self._restored_progress
-            self._restored_progress = None
-            if (saved and saved["fingerprint"] == fingerprint
-                    and saved["provider"] == [getattr(summarizer, "name", type(summarizer).__name__),
-                                              getattr(summarizer, "default_model", None)]
+        generation_contract = self._generation_contract(summarizer, resolved_config)
+        saved = self._summary_progress or self._restored_progress
+        parts = list(source_fragments(public_messages(source), None if preflight_whole else limit))
+        if saved and saved["completed"]:
+            if not (saved["fingerprint"] == fingerprint
+                    and list(saved["provider"]) == list(provider_identity)
                     and saved.get("generation_contract") == generation_contract
-                    and saved["parts_digest"] == digest(parts)):
-                segments = saved["segments"]
-                valid = all(0 <= i < len(parts) and 0 <= a < z <= len(parts[i]) for i, a, z in segments)
-                for previous, current in zip(segments, segments[1:]):
-                    i, start, end = previous
-                    j, next_start, next_end = current
-                    valid = valid and ((j == i and next_start == end) or
-                        (j == i + 1 and end == len(parts[i]) and next_start == 0))
-                if segments:
-                    i, start, end = segments[-1]
-                    valid = valid and i == len(parts) - 1 and end == len(parts[i])
-                if not valid:
-                    saved = None
-                    segments = [[i, 0, len(part)] for i, part in enumerate(parts)]
-            else:
-                saved = None
-            if not saved and self.checkpoint_status.get("status") == "resuming":
-                self.checkpoint_status = {"status": "progress_rejected", "originalsAvailable": True,
-                    "reason": "Saved partial progress no longer matches the source, summary provider or generation/prompt policy."}
-                await self._emit("context:checkpoint_progress_rejected", **self.checkpoint_status)
+                    and saved["parts_digest"] == digest(parts)
+                    and self._valid_segments(saved, parts)):
+                self._refuse_progress()
+        else:
+            saved = None
+        progress = self._summary_progress
+        if not progress or not saved:
+            segments = saved["segments"] if saved else [[i, 0, len(part)] for i, part in enumerate(parts)]
             progress = {"fingerprint": fingerprint, "source_revision": source_revision,
                         "identity": copy.deepcopy(identity),
                         "configuration": configuration,
@@ -421,11 +469,13 @@ class BoundaryContextManager:
                         "generation_contract": generation_contract,
                         "provider": provider_identity,
                         "pending": [parts[i][a:z] for i, a, z in segments],
+                        "source_chars_total": sum(map(len, parts)),
                         "parts_digest": digest(parts), "segments": copy.deepcopy(segments),
                         "text": saved["text"] if saved else "",
                         "calls": saved["calls"] if saved else 0,
                         "completed": saved["completed"] if saved else 0}
             self._summary_progress = progress
+            self._restored_progress = None
         pending = progress["pending"]
         stats["resumed_fragments"] = progress["completed"]
         stats["completed_fragments_this_pass"] = 0
@@ -439,18 +489,23 @@ class BoundaryContextManager:
                                 getattr(summarizer, "default_model", None))
             if (progress["configuration"] != self.checkpoint_configuration()
                     or progress["identity"] != current_identity or progress["provider"] != current_provider):
-                self._summary_progress = None
+                self._discard_unpaid_progress()
                 raise RuntimeError("Summary contract changed during compaction; stale summary was discarded")
 
         calls_at_start = stats["calls"]
+        stats.update(calls_this_pass=0, call_allowance=max_calls,
+                     summary_work_disposition="running")
 
         async def run():
             while pending:
                 check_source()
                 if stats["calls"] - calls_at_start >= max_calls:
                     stats["work_limit_exhausted"] = True
-                    from amplifier_core.llm_errors import LLMError
-                    raise LLMError("Summary call allowance reached; completed pieces are saved for continuation", retryable=True)
+                    stats["summary_work_disposition"] = "paused"
+                    raise CompactionError("summary_work_paused",
+                        "The summary call allowance for this preparation is used. Completed "
+                        "pieces remain available; further work needs a separately admitted "
+                        "preparation under the caller's budget. Do not automatically retry.")
                 fragment = pending[0]
                 request = summary_request(SUMMARY_PROMPT, fragment, progress["text"], progress["config"])
 
@@ -467,6 +522,7 @@ class BoundaryContextManager:
                                     (not preflight_whole or not counted)):
                         raise SummaryInputTooLarge("Continuation note and required instructions exceed summary input allowance")
                     stats["calls"] += 1
+                    stats["calls_this_pass"] = stats["calls"] - calls_at_start
                     progress["calls"] += 1
                     info = provider_info
                     capabilities = info.get("capabilities", []) if isinstance(info, dict) else getattr(info, "capabilities", [])
@@ -522,7 +578,13 @@ class BoundaryContextManager:
                             raise
                         raise CompactionError("checkpoint_persist_failed", "The host did not save completed summary progress. Restore checkpoint storage and retry.") from exc
                 await self._emit("context:compaction_progress", completed_parts=progress["completed"],
-                                 remaining_parts=len(pending), method="semantic")
+                    remaining_parts=len(pending), method="semantic",
+                    **{key: stats[key] for key in (
+                        "source_chars_total", "source_chars_completed", "source_chars_pending",
+                        "pending_segments", "largest_pending_segment_chars", "partition_final",
+                        "source_character_basis", "calls_this_pass", "call_allowance", "summary_calls_total")},
+                    summary_work_disposition="running" if pending else "source_covered")
+            stats["summary_work_disposition"] = "source_covered"
             return progress["text"]
 
         try:
@@ -590,12 +652,14 @@ class BoundaryContextManager:
 
         def check_request_contract():
             if request_contract_changed():
-                self._summary_progress = None
+                self._discard_unpaid_progress()
                 raise RuntimeError("Request contract changed during compaction; stale summary was discarded")
 
         if self._summary_progress and (not self._same_prefix(self._summary_progress, messages)
                 or self._summary_progress["identity"] != identity
                 or self._summary_progress["configuration"] != self.checkpoint_configuration()):
+            if self._summary_progress["completed"]:
+                self._refuse_progress()
             self._summary_progress = None
         if self.summary and self.summary_identity != identity:
             self.summary = None
@@ -672,8 +736,6 @@ class BoundaryContextManager:
                         self.summary_omitted_indices) + selected_rows
                     recovery_source = project_interrupted(base + selected, covered_unknown)
                     assembled = project_interrupted(recovery_source + copy.deepcopy(suffix), unknown)
-        if self._summary_progress and self._summary_progress["source_revision"]["messages"] != end:
-            self._summary_progress = None
         can_measure = measurement is not None and (use_native or (provider is not None
             and end > (self.summary[0] if self.summary else 0)))
         input_limit = None
@@ -723,6 +785,8 @@ class BoundaryContextManager:
                 raise CompactionError(native_reason, "Native compaction is advertised but its required configuration, request envelope or token measurement is unavailable. Repair native support; portable summaries are not an automatic fallback.")
             # A portable draft must never bypass newly available native support.
             if native_supported:
+                if ((self._summary_progress or self._restored_progress) or {}).get("completed"):
+                    self._refuse_progress()
                 self._summary_progress = None
                 self._restored_progress = None
             summarizer = provider if native_supported else self.summary_provider() if self.summary_provider else provider
@@ -736,8 +800,60 @@ class BoundaryContextManager:
 
             def check_summary_contract():
                 if summary_contract_changed():
-                    self._summary_progress = None
+                    self._discard_unpaid_progress()
                     raise RuntimeError("Summary contract changed during compaction; stale summary was discarded")
+
+            resolved_options = None
+            if not native_supported:
+                try:
+                    resolved_options = await summary_config(summarizer, copy.deepcopy(self.config))
+                except CompactionError:
+                    raise
+                except Exception as exc:
+                    # Resolution moved before paid-progress validation. Keep
+                    # provider metadata/configuration failures on the existing
+                    # safe exception boundary, never echo arbitrary bodies.
+                    raise CompactionError("summary_failed",
+                        "The summary generation policy could not be resolved. "
+                        "Correct the configuration or provider metadata before continuing.",
+                        retryable=getattr(exc, "retryable", False) is True) from exc
+                if revision != self.revision:
+                    raise RuntimeError("History changed during request preparation")
+                check_summary_contract()
+                saved = self._summary_progress or self._restored_progress
+                saved_end = (saved or {}).get("source_revision", {}).get("messages")
+                if saved and saved.get("completed"):
+                    # A later input can advance the eligible boundary while a
+                    # paid job still has pending source. Finish that exact job,
+                    # never rebind its note/queue to a larger source fingerprint.
+                    compatible = (not recovery and not isinstance(self.summary and self.summary[1], dict)
+                        and type(saved_end) is int and 0 < saved_end <= end
+                        and saved_end > (self.summary[0] if self.summary else 0)
+                        and self._same_prefix(saved, messages)
+                        and saved["identity"] == identity
+                        and self._boundary(messages, retain, ceiling=saved_end) == saved_end)
+                    if compatible:
+                        old_unknown = [call for call in unknown if call["source_message"] < saved_end]
+                        old_source = project_interrupted(
+                            self._assembled(messages[:saved_end], self.summary, retain, carry), old_unknown)
+                        source_limit = int(self.config.get("summary_max_source_chars", 512000))
+                        source_limit = min(source_limit, max(256,
+                            RequestContext()._calculate_budget(None, summarizer) // 2))
+                        whole = ("summary_max_source_chars" not in self.config
+                                 and callable(getattr(summarizer, "request_budget", None)))
+                        parts = list(source_fragments(public_messages(old_source), None if whole else source_limit))
+                        compatible = (
+                            saved["fingerprint"] == self._summary_fingerprint(old_source, identity, summarizer)
+                            and list(saved["provider"]) == list(summary_provider_identity)
+                            and saved.get("generation_contract") == self._generation_contract(summarizer, resolved_options[0])
+                            and saved["parts_digest"] == digest(parts)
+                            and self._valid_segments(saved, parts))
+                    if not compatible:
+                        self._refuse_progress()
+                    end = saved_end
+                    covered_unknown = old_unknown
+                    self.last_budget["summary_source_through_message"] = end
+                    self.last_budget["deferred_tail_messages"] = len(messages) - end
 
             # Current-turn tool results change the revision but not the covered
             # prefix. A failed unchanged prefix must not create a retry storm.
@@ -770,16 +886,11 @@ class BoundaryContextManager:
                 candidate_omissions = sorted((set(self.summary_omitted_indices) - included)
                     | {i for i in excluded if i >= previous_end})
                 native_source = project_interrupted([row for _, row in indexed], covered_unknown)
-            work_contract = {"source": source, "identity": identity,
-                "provider": getattr(summarizer, "name", type(summarizer).__name__),
-                "model": getattr(summarizer, "default_model", None), "configuration": self.checkpoint_configuration()}
-            if not use_native and "summary_target_tokens" in self.config:
-                # A corrected prompt policy must not remain behind an old failure
-                # latch, nor silently reuse work generated with different guidance.
-                work_contract["prompt_sha256"] = digest(summary_prompt(SUMMARY_PROMPT, self.config))
-            fingerprint = digest(work_contract)
+            fingerprint = self._summary_fingerprint(source, identity, summarizer, native=use_native)
             source_revision = {"messages": end, "sha256": digest(messages[:end])}
             if self._summary_progress and self._summary_progress["fingerprint"] != fingerprint:
+                if self._summary_progress["completed"]:
+                    self._refuse_progress()
                 self._summary_progress = None
             failure = self.summary_failure
             if failure and failure["fingerprint"] == fingerprint:
@@ -870,7 +981,8 @@ class BoundaryContextManager:
                     # evidence from originals, not an opaque-state placeholder.
                     semantic_source = messages[:end] if self.summary and isinstance(self.summary[1], dict) else source
                     return await self._summarize(summarizer, semantic_source, revision, stats,
-                        fingerprint=fingerprint, source_revision=source_revision, identity=identity)
+                        fingerprint=fingerprint, source_revision=source_revision, identity=identity,
+                        resolved_options=resolved_options)
 
                 text = await prepare_note()
                 if revision != self.revision:
@@ -917,12 +1029,21 @@ class BoundaryContextManager:
             except Exception as exc:
                 if summary_contract_changed():
                     outcome = "superseded"
-                    self._summary_progress = None
+                    self._discard_unpaid_progress()
                     raise
                 if revision != self.revision:
                     outcome = "superseded"
-                    if not self._same_prefix(self._summary_progress, self.messages):
-                        self._summary_progress = None
+                    self._discard_unpaid_progress()
+                    raise
+                if isinstance(exc, CompactionError) and exc.code in {
+                        "summary_work_paused", "summary_progress_incompatible"}:
+                    # These local boundaries must not become provider failures
+                    # or install a latch that prevents compatible later work.
+                    outcome = "paused" if exc.code == "summary_work_paused" else "refused"
+                    self.summary_failure = None
+                    self.checkpoint_status = {"status": outcome, "code": exc.code,
+                        "reason": "per_pass_call_allowance" if outcome == "paused" else "incompatible_progress",
+                        "originalsAvailable": True, "completedParts": stats.get("completed_fragments", 0)}
                     raise
                 # A counting outage says nothing about the validity of this
                 # history or checkpoint. Preserve the typed diagnostic and do
