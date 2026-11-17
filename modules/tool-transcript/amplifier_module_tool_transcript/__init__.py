@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 from amplifier_core import ToolResult
@@ -24,7 +25,10 @@ logger = logging.getLogger(__name__)
 
 TOOL_DESCRIPTION = (
     "Retrieve earlier session details by turn range or search query. Active host "
-    "history is formatted and long text or tool arguments may be truncated. "
+    "history is formatted and may be incomplete: long text or tool arguments may "
+    "be truncated, and the output string is limited to 100,000 JSON-encoded ASCII "
+    "bytes (including escaping, quotes and omission notice; excluding the host "
+    "receipt wrapper). Search selects whole turns, but matching text may be omitted. "
     "When archive IDs are configured, explicit archive requests instead return "
     "bounded complete raw records or original tool-result byte pages."
 )
@@ -49,13 +53,23 @@ async def mount(coordinator: Any, config: dict[str, Any] | None = None) -> None:
 
 
 class ReadTranscriptTool:
-    """Tool for reading verbatim transcript entries on demand.
+    """Tool for reading bounded, formatted transcript views on demand.
 
-    Provides the LLM with direct access to full-fidelity past messages that
-    may have been compressed by the context manager's summarization engine.
+    Canonical originals are never modified. Formatted active-history views may
+    omit content; only explicit archive reads provide complete raw records.
     """
 
     _MAX_CONTENT_LENGTH: int = 2000
+    # ASCII JSON encoding also bounds decoded characters and UTF-8 bytes.
+    # This is the output string budget, not an arbitrary host receipt envelope.
+    _MAX_OUTPUT_JSON_BYTES: int = 100_000
+    _OUTPUT_NOTICE = (
+        "\n\n[Output truncated: incomplete formatted transcript; the last displayed "
+        "turn may be partial and later content is omitted. Search selects turns; "
+        "matching text may be omitted. Narrower turn ranges may retrieve later "
+        "turns, but cannot recover omitted content within an oversized turn. "
+        "Canonical history is unchanged.]"
+    )
 
     def __init__(
         self, coordinator: Any, rate_limit_per_turn: int = 3,
@@ -266,36 +280,55 @@ class ReadTranscriptTool:
             filtered_turns = range_turns
             filtered_indices = range_indices
 
-        # Format turns with correct turn numbers using zip of filtered_turns and filtered_indices
-        sections: list[str] = []
-        for idx, turn_msgs in zip(filtered_indices, filtered_turns):
-            section = self._format_turns([turn_msgs], start_turn=idx)
-            sections.append(section)
+        # Consume formatting incrementally; never construct all selected turns
+        # (or even one giant tool-result turn) before applying the output budget.
+        def parts() -> Iterator[str]:
+            for position, (idx, messages) in enumerate(zip(filtered_indices, filtered_turns)):
+                if position:
+                    yield "\n\n"
+                yield from self._iter_turn_parts(messages, idx)
 
-        output = "\n\n".join(sections)
+        return ToolResult(success=True, output=self._bounded_output(parts()))
 
-        # If the formatted output is very large, return a leading subset of turns
-        # with a note so the caller can use a narrower range.
-        _MAX_OUTPUT_CHARS = 100_000
-        if len(output) > _MAX_OUTPUT_CHARS:
-            truncated: list[str] = []
-            total = 0
-            last_idx = filtered_indices[0]
-            for section, idx in zip(sections, filtered_indices):
-                entry_len = len(section) + 2  # +2 for the "\n\n" separator
-                if total + entry_len > _MAX_OUTPUT_CHARS and truncated:
-                    break
-                truncated.append(section)
-                total += entry_len
-                last_idx = idx
-            note = (
-                f"\n\n[Showing turns {filtered_indices[0]}–{last_idx} of requested "
-                f"{filtered_indices[0]}–{filtered_indices[-1]}. "
-                f"Use a narrower range to retrieve the remaining turns.]"
-            )
-            output = "\n\n".join(truncated) + note
+    @staticmethod
+    def _json_length(text: str) -> int:
+        """Encoded string-content bytes, excluding the two surrounding quotes."""
+        return len(json.dumps(text, ensure_ascii=True)) - 2
 
-        return ToolResult(success=True, output=output)
+    def _json_prefix(self, text: str, budget: int) -> str:
+        """Largest character-aligned prefix fitting an ASCII JSON byte budget.
+
+        Slice before encoding, so a giant source string is never fully encoded.
+        Every character costs at least one byte in this representation.
+        """
+        candidate = text[:budget]
+        if self._json_length(candidate) <= budget:
+            return candidate
+        low, high = 0, len(candidate)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if self._json_length(candidate[:middle]) <= budget:
+                low = middle
+            else:
+                high = middle - 1
+        return candidate[:low]
+
+    def _bounded_output(self, parts: Iterable[str]) -> str:
+        budget = self._MAX_OUTPUT_JSON_BYTES - 2  # JSON string quotes
+        remaining = budget
+        kept: list[str] = []
+        for part in parts:
+            prefix = self._json_prefix(part, remaining)
+            kept.append(prefix)
+            remaining -= self._json_length(prefix)
+            if len(prefix) != len(part):
+                # Reclaim room for the full notice from an already bounded view.
+                output = "".join(kept)
+                return (
+                    self._json_prefix(output, budget - self._json_length(self._OUTPUT_NOTICE))
+                    + self._OUTPUT_NOTICE
+                )
+        return "".join(kept)
 
     def _parse_transcript(self, transcript_path: str) -> list[list[dict]]:
         """Parse a transcript file into turns.
@@ -378,142 +411,125 @@ class ReadTranscriptTool:
         self._calls_this_turn = 0
 
     def _format_turns(self, turns: list[list[dict]], start_turn: int) -> str:
-        """Format a list of turns into human-readable text.
-
-        Each turn is introduced with a ``--- Turn N ---`` header.  Messages
-        are formatted as follows:
-
-        * **user / other roles** — ``[role] <text>`` with content truncated to
-          ``_MAX_CONTENT_LENGTH``.
-        * **assistant** — ``[assistant] <text>`` (truncated) plus one line per
-          tool call: ``[tool_call: name({compact_input})]``.  Tool calls are
-          gathered from both the ``tool_calls`` field (supporting OpenAI
-          ``function.name`` and direct ``name``/``tool`` formats) and any
-          ``tool_call`` / ``tool_use`` content blocks.
-        * **tool results** — ``[tool result: {id}]`` followed immediately by
-          the full content on the next line.  Tool result content is not
-          truncated here because it is already bounded upstream; the overall
-          output-size guard in ``execute()`` handles extreme cases.
-
-        Args:
-            turns: A list of turns, each being a list of message dicts.
-            start_turn: The turn number to assign to the first turn in the list.
-
-        Returns:
-            A formatted string with one section per turn, or a message
-            indicating no content when ``turns`` is empty.
-        """
+        """Bounded view with turn/role labels; tool-result IDs remain visible."""
         if not turns:
             return "No transcript content found for the requested range."
 
-        sections: list[str] = []
+        def parts() -> Iterator[str]:
+            for turn_offset, messages in enumerate(turns):
+                if turn_offset:
+                    yield "\n\n"
+                yield from self._iter_turn_parts(messages, start_turn + turn_offset)
 
-        for turn_offset, turn_messages in enumerate(turns):
-            turn_num = start_turn + turn_offset
-            lines: list[str] = [f"--- Turn {turn_num} ---"]
+        return self._bounded_output(parts())
 
-            for msg in turn_messages:
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")
+    def _iter_turn_parts(self, turn_messages: list[dict], turn_num: int) -> Iterator[str]:
+        """Yield labels and content separately, without copying giant results."""
+        yield f"--- Turn {turn_num} ---"
+        for msg in turn_messages:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
 
-                if role == "tool":
-                    # Tool result: show id + full content (already bounded upstream)
-                    tc_id = msg.get("tool_call_id", "")
-                    # Content is normally a string; handle list as a fallback
-                    if isinstance(content, list):
-                        content = " ".join(
-                            b.get("text", "") if isinstance(b, dict) else str(b)
-                            for b in content
+            if role == "tool":
+                tc_id = msg.get("tool_call_id", "")
+                yield f"\n[tool result: {tc_id}]"
+                # Do not join arbitrarily large lists of result blocks.
+                if isinstance(content, list):
+                    for index, block in enumerate(content):
+                        yield "\n" if index == 0 else " "
+                        yield block.get("text", "") if isinstance(block, dict) else str(block)
+                elif content:
+                    yield "\n"
+                    yield content
+
+            elif role == "assistant":
+                shown_tc_ids: set[str] = set()
+                blocks = content if isinstance(content, list) else []
+                if isinstance(content, list):
+                    # Keep text before calls as before, but join only its bounded
+                    # prefix, never the complete potentially enormous text.
+                    text_parts = (
+                        block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
+                        for block in blocks
+                        if not isinstance(block, dict) or block.get("type") not in (
+                            "tool_call", "tool_use", "thinking", "reasoning", "redacted_thinking"
                         )
-                    lines.append(f"[tool result: {tc_id}]")
-                    if content:
-                        lines.append(content)
+                    )
+                    content = self._truncate_parts((text for text in text_parts if text), "\n")
+                elif content:
+                    content = self._truncate_content(content)
+                if content:
+                    yield f"\n[assistant] {content}"
 
-                elif role == "assistant":
-                    # Extract text and tool_call blocks from list content
-                    shown_tc_ids: set[str] = set()
-                    tc_block_lines: list[str] = []
+                # Render each content-block call only when the budget reaches it.
+                for block in blocks:
+                    if not isinstance(block, dict) or block.get("type") not in ("tool_call", "tool_use"):
+                        continue
+                    name = block.get("name", "unknown_tool")
+                    tc_id = block.get("id", "")
+                    if tc_id:
+                        shown_tc_ids.add(tc_id)
+                    inp_str = json.dumps(block.get("input", {}), separators=(",", ":"))
+                    if len(inp_str) > 500:
+                        inp_str = inp_str[:500] + "..."
+                    yield f"\n[tool_call: {name}({inp_str})]"
 
-                    if isinstance(content, list):
-                        text_parts: list[str] = []
-                        for block in content:
-                            if isinstance(block, dict):
-                                btype = block.get("type", "")
-                                if btype == "text":
-                                    text_val = block.get("text", "")
-                                    if text_val:
-                                        text_parts.append(text_val)
-                                elif btype in ("tool_call", "tool_use"):
-                                    name = block.get("name", "unknown_tool")
-                                    inp = block.get("input", {})
-                                    tc_id = block.get("id", "")
-                                    if tc_id:
-                                        shown_tc_ids.add(tc_id)
-                                    inp_str = json.dumps(inp, separators=(",", ":"))
-                                    if len(inp_str) > 500:
-                                        inp_str = inp_str[:500] + "..."
-                                    tc_block_lines.append(
-                                        f"[tool_call: {name}({inp_str})]"
-                                    )
-                                elif "text" in block:
-                                    text_val = block.get("text", "")
-                                    if text_val:
-                                        text_parts.append(text_val)
-                            elif hasattr(block, "text"):
-                                text_parts.append(block.text)
-                        content = "\n".join(text_parts)
-
-                    if content:
-                        truncated = self._truncate_content(content)
-                        lines.append(f"[assistant] {truncated}")
-
-                    # Emit tool_call blocks found in content
-                    lines.extend(tc_block_lines)
-
-                    # Also emit tool_calls field entries not already shown
-                    tool_calls = msg.get("tool_calls") or []
-                    for tc in tool_calls:
-                        if not isinstance(tc, dict):
-                            continue
-                        tc_id = tc.get("id", "")
-                        if tc_id and tc_id in shown_tc_ids:
-                            continue
-                        if "function" in tc:
-                            name = tc["function"].get("name", "unknown_tool")
-                            raw_args = tc["function"].get("arguments", "{}")
-                            if isinstance(raw_args, str):
-                                try:
-                                    inp_str = json.dumps(
-                                        json.loads(raw_args), separators=(",", ":")
-                                    )
-                                except (json.JSONDecodeError, ValueError):
-                                    inp_str = raw_args
-                            else:
-                                inp_str = json.dumps(raw_args, separators=(",", ":"))
+                # Also emit tool_calls field entries not already shown.
+                for tc in msg.get("tool_calls") or []:
+                    if not isinstance(tc, dict):
+                        continue
+                    tc_id = tc.get("id", "")
+                    if tc_id and tc_id in shown_tc_ids:
+                        continue
+                    if "function" in tc:
+                        name = tc["function"].get("name", "unknown_tool")
+                        raw_args = tc["function"].get("arguments", "{}")
+                        if isinstance(raw_args, str):
+                            try:
+                                inp_str = json.dumps(
+                                    json.loads(raw_args), separators=(",", ":")
+                                )
+                            except (json.JSONDecodeError, ValueError):
+                                inp_str = raw_args
                         else:
-                            name = tc.get("name") or tc.get("tool", "unknown_tool")
-                            inp = tc.get("input") or tc.get("arguments") or {}
-                            if isinstance(inp, str):
-                                inp_str = inp
-                            else:
-                                inp_str = json.dumps(inp, separators=(",", ":"))
-                        if len(inp_str) > 500:
-                            inp_str = inp_str[:500] + "..."
-                        lines.append(f"[tool_call: {name}({inp_str})]")
+                            inp_str = json.dumps(raw_args, separators=(",", ":"))
+                    else:
+                        name = tc.get("name") or tc.get("tool", "unknown_tool")
+                        inp = tc.get("input") or tc.get("arguments") or {}
+                        if isinstance(inp, str):
+                            inp_str = inp
+                        else:
+                            inp_str = json.dumps(inp, separators=(",", ":"))
+                    if len(inp_str) > 500:
+                        inp_str = inp_str[:500] + "..."
+                    yield f"\n[tool_call: {name}({inp_str})]"
 
+            else:
+                if isinstance(content, list):
+                    content = self._truncate_parts((
+                        b.get("text", "") if isinstance(b, dict) else str(b)
+                        for b in content
+                    ), " ")
                 else:
-                    # user and any other roles
-                    if isinstance(content, list):
-                        content = " ".join(
-                            b.get("text", "") if isinstance(b, dict) else str(b)
-                            for b in content
-                        )
-                    truncated = self._truncate_content(content)
-                    lines.append(f"[{role}] {truncated}")
+                    content = self._truncate_content(content)
+                yield f"\n[{role}] {content}"
 
-            sections.append("\n".join(lines))
-
-        return "\n\n".join(sections)
+    def _truncate_parts(self, parts: Iterable[str], separator: str) -> str:
+        """Preserve the existing text-prefix/total-count view without a full join."""
+        kept: list[str] = []
+        total = 0
+        for index, part in enumerate(parts):
+            if index:
+                if total < self._MAX_CONTENT_LENGTH:
+                    kept.append(separator[:self._MAX_CONTENT_LENGTH - total])
+                total += len(separator)
+            if total < self._MAX_CONTENT_LENGTH:
+                kept.append(part[:self._MAX_CONTENT_LENGTH - total])
+            total += len(part)
+        output = "".join(kept)
+        if total > self._MAX_CONTENT_LENGTH:
+            output += f"... [truncated \u2014 {total:,} chars total]"
+        return output
 
     def _truncate_content(self, content: str) -> str:
         """Truncate content that exceeds _MAX_CONTENT_LENGTH.

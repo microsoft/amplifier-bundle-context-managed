@@ -213,13 +213,10 @@ class TestExecuteOutputSizeLimit:
 
         assert result.success is True
         assert isinstance(result.output, str)
-        # Output should contain a truncation note
-        assert (
-            "narrower range" in result.output.lower()
-            or "showing turns" in result.output.lower()
-        )
-        # Not all 5 turns should be present
-        assert "Turn 5" not in result.output or "Turn 1" in result.output
+        assert len(json.dumps(result.output, ensure_ascii=True)) <= 100_000
+        assert "incomplete" in result.output.lower()
+        assert "Turn 1" in result.output
+        assert "Turn 5" not in result.output
 
     @pytest.mark.asyncio
     async def test_small_output_not_truncated(self, mock_coordinator):
