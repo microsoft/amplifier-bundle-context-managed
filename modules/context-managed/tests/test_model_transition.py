@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from amplifier_core import ChatRequest, Message
+from amplifier_core.llm_errors import ContextLengthError
 
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 
@@ -87,6 +88,36 @@ async def test_failed_target_preparation_keeps_source_checkpoint(native, cancell
             ctx.evidence_refs, ctx.recovery) == source_state
     assert ctx.export_checkpoint(SOURCE) == source_record
     assert await ctx.get_messages() == original
+    model.compact_context.assert_not_awaited()
+    model.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "opaque"])
+async def test_smaller_target_final_fit_refusal_keeps_source_checkpoint(native):
+    ctx, model = context(native=native), provider(native=native)
+    source_record = ctx.export_checkpoint(SOURCE)
+    views = []
+
+    async def count_view(view):
+        assert "source-private-state" not in str(view)
+        views.append(copy.deepcopy(view))
+        return {
+            "dispatch": ChatRequest(
+                messages=[Message(**row) for row in view], model=TARGET["model"]),
+            "budget_decision": {
+                "estimated_input_tokens": 25000, "input_limit_tokens": 20000,
+                "measurement": {"kind": "provider_count", "source": "fixture",
+                                "input_tokens": 25000},
+            },
+        }
+
+    with pytest.raises(ContextLengthError):
+        await ctx.get_measured_request_view(
+            provider=model, retain_contents=[], count_view=count_view)
+    assert views
+    assert ctx.export_checkpoint(SOURCE) == source_record
+    assert ctx.messages == rows()
     model.compact_context.assert_not_awaited()
     model.complete.assert_not_awaited()
 
