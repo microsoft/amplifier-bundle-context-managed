@@ -197,7 +197,10 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             # Preserve that dispatch identity; only an absent model may use the
             # explicitly guarded provider default, never override an explicit one.
             effective_model = request.model if request.model is not None else provider_key[1]
-            if effective_model != target["model"]:
+            if (effective_model != target["model"]
+                    or request.model is None and (
+                        envelope.get("effective_identity") != target
+                        or getter is None or getter() != target)):
                 raise CompactionError("recovery_request_changed", "Target request model does not match selection.")
             if template is None:
                 template, hard_limit = request.model_copy(deep=True), limit

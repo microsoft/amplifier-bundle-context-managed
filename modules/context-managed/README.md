@@ -363,7 +363,10 @@ Both results report exact `sourceRevision`, `targetIdentity`, `requestSha256`,
 `before`, `after`, and `limit`; installed results also report checkpoint `sha256`.
 The loop's `dispatch` object is not rewritten: an absent request model is accepted
 only when the guarded selected provider's default matches the exact target model.
-An explicit different request model is rejected.
+The host count callback must also return `effective_identity` with the exact
+selected provider-instance/model after measuring through that same selected
+adapter. The current identity getter must confirm it. A bare provider default,
+missing/stale account binding or explicit different request model is rejected.
 
 Confirmed target progress may be supplied through `progress` only under the same
 host journal binding. For a final installed candidate, additionally pass

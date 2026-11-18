@@ -291,6 +291,7 @@ def transition_fixture(native, *, archive=False):
                             fail=None, limit=6000, counts=[], request_options=[],
                             target=copy.deepcopy(TARGET),
                             request_model=TARGET["model"],
+                            effective_identity=copy.deepcopy(TARGET),
                             initial=copy.deepcopy({key: getattr(ctx, key) for key in (
                                 "summary", "summary_identity", "summary_omitted_indices",
                                 "_summary_progress", "_restored_progress", "recovery", "evidence_refs")}))
@@ -320,6 +321,7 @@ def transition_fixture(native, *, archive=False):
             metadata={"channel": "exact-account-selection"})
         state.counts.append(request.model_copy(deep=True))
         return {"dispatch": request, "budget_decision": await budget(request),
+                "effective_identity": copy.deepcopy(state.effective_identity),
                 "fixture": "unchanged"}
 
     async def admit(report):
@@ -611,6 +613,20 @@ async def test_selected_provider_effective_model_without_mutating_original_dispa
         assert result["final_attempt"]["dispatch"].model is None
         assert result["final_attempt"]["fixture"] == "unchanged"
         assert state.ctx.summary_identity == TARGET
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("binding", [None, {"provider": "different-account", "model": TARGET["model"]},
+                                      {**TARGET, "model": "stale-model"}])
+async def test_absent_request_model_without_exact_host_binding_is_rejected(native, binding):
+    state = transition_fixture(native)
+    state.request_model = None
+    state.effective_identity = binding
+    with pytest.raises(CompactionError, match="recovery_request_changed"):
+        await state.ctx.recover_request(**state.kwargs)
+    assert state.admitted == state.saved == state.installed == []
+    state.unchanged()
 
 
 @pytest.mark.asyncio
