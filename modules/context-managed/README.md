@@ -71,6 +71,22 @@ compaction in that instance. This is not a durable operation journal or a
 restart-safe settlement claim; hosts still own uncertain-operation recovery.
 Default strict behavior is unchanged when this option is absent.
 
+The operation carrier is captured once per preparation and counted unchanged.
+For Loop Live's uniquely identified job/call rows, removal of returned jobs may
+advance the observed active set without invalidating that conservative carrier.
+New or changed surviving rows, ambiguous identities, and observed reappearance
+still stop preparation. Disappearance is not proof of successful effects; this
+is an observation guard, not a durable operation-generation fence.
+
+A typed transient failure of optional full-history pressure counting may skip
+that full view and enter bounded canonical selection. Every selected candidate
+then requires an authoritative provider count; a final count error, missing count
+or estimate-only answer stops preparation. This does not retry a failed final
+count or authorize a model/tool call. An unchanged optional native input already
+refused as oversized is not preflighted again for the same input, provider,
+identity, configuration, policy allowance and exact native request. That private
+negative memo never admits a foreground request or replaces final counting.
+
 Ordinary fitting is not a model-transition transaction. After mandatory host
 preservation and initial identity binding, a foreign checkpoint, paid progress
 unit or retained provisional transition defers optional compaction before the

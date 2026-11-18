@@ -79,6 +79,7 @@ class BoundaryContextManager:
         self._ordinary_transition = None
         self._foreground_paid_input = None
         self._foreground_unconfirmed = False
+        self._foreground_native_refusal = None
         self._is_cancelled = None
 
     @staticmethod
@@ -661,8 +662,44 @@ class BoundaryContextManager:
         count = measured.get("input_tokens")
         return count if measured.get("kind") == "provider_count" and type(count) is int and count >= 0 else None
 
+    def _operations_guard(self, snapshot):
+        """Keep a conservative carrier while the host removes returned jobs.
+
+        Only Loop Live's uniquely identified operation rows admit monotonic
+        removal. Unknown schemas retain exact equality. Never refresh the
+        counted carrier or infer successful effects from a missing observation.
+        """
+        previous = copy.deepcopy(snapshot)
+
+        def indexed(rows):
+            if not isinstance(rows, list):
+                return None
+            fields = {"job_id", "call_id", "status", "tool"}
+            if any(not isinstance(row, dict) or set(row) != fields
+                   or any(not isinstance(row[key], str) or not row[key] for key in fields)
+                   for row in rows):
+                return None
+            if any(len({row[key] for row in rows}) != len(rows) for key in ("job_id", "call_id")):
+                return None
+            return {row["job_id"]: row for row in rows}
+
+        def unchanged():
+            nonlocal previous
+            current = copy.deepcopy(self.active_operations()) if self.active_operations else None
+            if current == previous:
+                return True
+            before, after = indexed(previous), indexed(current)
+            if before is None or after is None or any(before.get(key) != row for key, row in after.items()):
+                return False
+            # Compare against the last observation, not just the original, so
+            # an observed removed job cannot reappear (ABA) in this preparation.
+            previous = current
+            return True
+
+        return unchanged
+
     async def _prepare(self, provider, token_budget, retain, measurement=None, *, reason=None,
-                       ordinary=False, snapshot=None, on_preserved=None):
+                       ordinary=False, snapshot=None, on_preserved=None, operations_guard=None):
         messages, revision = copy.deepcopy(self.messages), self.revision
         self._check_stop()
         input_key = next(((i, digest(row)) for i, row in reversed(list(enumerate(messages)))
@@ -760,7 +797,7 @@ class BoundaryContextManager:
             return (configuration != self.checkpoint_configuration()
                     or identity != current_identity or provider_identity != current_provider
                     or summary_state != (self.summary, self.summary_omitted_indices, self.summary_identity)
-                    or ordinary and self.active_operations and self.active_operations() != operations)
+                    or ordinary and operations_guard is not None and not operations_guard())
 
         def check_request_contract():
             self._check_stop()
@@ -855,7 +892,22 @@ class BoundaryContextManager:
         input_limit = None
         measurement_kind = "public_estimate"
         if can_measure:
-            pressure_tokens, input_limit, measurement_kind = await measurement.measure(fitter, pressure_view(assembled))
+            try:
+                pressure_tokens, input_limit, measurement_kind = await measurement.measure(fitter, pressure_view(assembled))
+            except Exception as error:
+                check_request_contract()
+                diagnostic = getattr(error, "count_failure", None)
+                if (not ordinary or (type(error).__module__, type(error).__name__) != (
+                        "amplifier_module_provider_openai._token_count", "TokenCountError")
+                        or not isinstance(diagnostic, dict) or diagnostic.get("retryable") is not True
+                        or diagnostic.get("category") not in {"timeout", "connection", "rate_limit", "service"}):
+                    raise
+                # Pressure is optional, foreground admission is not. Select a
+                # bounded canonical view without retrying this failed full view.
+                # Its exact final dispatch must still have an authoritative count.
+                measurement.pressure_error = error
+                raise CompactionError("ordinary_pressure_unavailable",
+                    "Optional full-history pressure counting failed; bounded foreground fitting is required.") from error
             measured_tokens = pressure_tokens if measurement_kind == "provider_count" else None
         else:
             measured_tokens = await self._native_view_tokens(provider, pressure_view(assembled)) if use_native else None
@@ -1062,6 +1114,12 @@ class BoundaryContextManager:
                             # portable summaries on unsupported providers, never native compact.
                             # A healthy native response may take many minutes.
                             # Elapsed time must not cancel it or start a fallback.
+                            refusal_key = (input_key, id(provider), identity, configuration,
+                                fitter._calculate_budget(token_budget, provider),
+                                digest(request.model_dump(mode="json")))
+                            if ordinary and self._foreground_native_refusal == refusal_key:
+                                raise CompactionError("ordinary_compaction_deferred",
+                                    "Unchanged optional native input previously exceeded its allowance; no retry was made.")
                             fits, compact_budget = await request_fits(provider, request)
                             check_summary_contract()
                             if not fits:
@@ -1071,6 +1129,8 @@ class BoundaryContextManager:
                                 # compaction methods or discard input to make it fit.
                                 stats["native_selection"] = "input_exceeds_native_allowance"
                                 stats["native_request_budget"] = compact_budget
+                                if ordinary:
+                                    self._foreground_native_refusal = copy.deepcopy(refusal_key)
                                 raise CompactionError("native_input_oversized", "Native input exceeds the provider allowance. Restore the last compatible checkpoint or explicitly recover this oversized history; it was not sent to native compaction.")
                             stats["calls"] += 1
                             result = await self._paid_compaction(lambda: provider.compact_context(request), input_key)
@@ -1246,6 +1306,7 @@ class BoundaryContextManager:
         async with self.lock:
             revision, config, factory = self.revision, copy.deepcopy(self.config), self.factory
             operations = copy.deepcopy(self.active_operations()) if self.active_operations else None
+            operations_guard = self._operations_guard(operations)
             identity = lambda: (self.checkpoint_identity() if self.checkpoint_identity else None,
                                 getattr(provider, "name", None), getattr(provider, "default_model", None))
             selected = copy.deepcopy(identity())
@@ -1257,7 +1318,7 @@ class BoundaryContextManager:
                         or identity() != selected
                         or checkpoint is not None and checkpoint != (
                             self.summary, self.summary_omitted_indices, self.summary_identity)
-                        or (self.active_operations() if self.active_operations else None) != operations):
+                        or not operations_guard()):
                     raise RuntimeError("Request contract changed during ordinary fitting")
 
             def bind_preserved_identity():
@@ -1278,7 +1339,8 @@ class BoundaryContextManager:
                 try:
                     fitter, protected = await self._prepare(
                         provider, token_budget, retain, measurement, reason=reason, ordinary=True,
-                        snapshot=(prompt, operations), on_preserved=bind_preserved_identity)
+                        snapshot=(prompt, operations), on_preserved=bind_preserved_identity,
+                        operations_guard=operations_guard)
                     checkpoint = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
                     result = await fit(fitter, protected)
                 except (CompactionError, ContextLengthError) as error:
@@ -1292,7 +1354,8 @@ class BoundaryContextManager:
                     checkpoint = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
                     result = await self._fit_continuation(
                         fit, retain, guard, operations, token_budget, provider, error, prompt,
-                        omit_full=reason == "provider_overflow")
+                        omit_full=(reason == "provider_overflow"
+                            or isinstance(error, CompactionError) and error.code == "ordinary_pressure_unavailable"))
                 guard()
                 return result
             except ContextLengthError as error:
@@ -1446,8 +1509,14 @@ class BoundaryContextManager:
                 return await count_view(view)
             measurement = RequestMeasurement(count)
             async def fit(fitter, retain):
+                async def final_count(view):
+                    attempt = await measurement.count(view)
+                    if (getattr(measurement, "pressure_error", None) is not None
+                            and fitter._measured_budget_decision(attempt) is None):
+                        raise measurement.pressure_error
+                    return attempt
                 return await fitter.get_measured_request_view(
-                    provider=provider, retain_contents=retain, count_view=measurement.count,
+                    provider=provider, retain_contents=retain, count_view=final_count,
                     fit_output=fit_output, conservative=True)
             result = await self._fit_ordinary(provider, None, retain_contents, fit, measurement, reason)
             result["count_calls"] = count_calls
