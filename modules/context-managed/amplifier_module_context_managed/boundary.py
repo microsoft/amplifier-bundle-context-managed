@@ -73,6 +73,8 @@ class BoundaryContextManager:
         self.persist_checkpoint = None
         self.recovery = None
         self.run_pending_recovery = None
+        self.transition_policy = None
+        self._ordinary_transition = None
 
     @staticmethod
     def _same_prefix(record, messages):
@@ -179,6 +181,15 @@ class BoundaryContextManager:
         """Passive provenance check, not selection or paid-work admission."""
         from .checkpoint import classify_transition
         return classify_transition(self, record, identity)
+
+    def prepared_originals(self, identity):
+        """Pure empty-derived-state attestation, not transition admission."""
+        return bool(self.checkpoint_identity and self.checkpoint_identity() == identity
+                    and isinstance(identity, dict)
+                    and all(isinstance(identity.get(k), str) and identity[k]
+                            for k in ("provider", "model"))
+                    and self.summary is None and self._summary_progress is None
+                    and self._restored_progress is None and self._ordinary_transition is None)
 
     async def recover_request(self, *, provider, count_view, identity, save_progress,
                               install, guard, retain_contents=(), target_bytes=1_500_000,
@@ -667,36 +678,11 @@ class BoundaryContextManager:
             return False
 
         async def originals_fitter(identity):
-            # Preserve compatibility for hosts without the explicit transition
-            # entry: fitting originals require no regeneration admission. Keep
-            # the old complete unit inactive, not cleared/rebound or persisted
-            # as a target checkpoint. Paid partials still refuse above.
-            expected = (digest(messages), self.checkpoint_configuration(),
-                        copy.deepcopy((self.summary, self.summary_identity,
-                                       self.summary_omitted_indices)),
-                        getattr(provider, "default_model", None))
-            callbacks = (self.factory, self.active_operations, self.checkpoint_identity)
-            def guard():
-                current = (digest(self.messages), self.checkpoint_configuration(),
-                           (self.summary, self.summary_identity, self.summary_omitted_indices),
-                           getattr(provider, "default_model", None))
-                if (revision != self.revision or selected_identity() != identity
-                        or expected != current
-                        or callbacks != (self.factory, self.active_operations, self.checkpoint_identity)):
-                    raise RuntimeError("Request contract changed during originals-only model transition")
-            clone = BoundaryContextManager(copy.deepcopy(self.config), self.hooks)
-            clone.messages = copy.deepcopy(messages)
-            if self.factory:
-                async def captured_prompt():
-                    return system_prompt
-                clone.factory = captured_prompt
-            clone.active_operations = lambda: copy.deepcopy(operations)
-            # provider=None deliberately disables generation and archive
-            # selection. The returned fitter still validates the real provider.
-            fitted, protected = await clone._prepare(None, token_budget, retain)
-            fitted._transition_guard = guard
-            guard()
-            return fitted, protected
+            from .ordinary_transition import prepare
+            return await prepare(self, provider=provider, token_budget=token_budget,
+                retain=retain, measurement=measurement, reason=reason, messages=messages,
+                revision=revision, identity=identity, system_prompt=system_prompt,
+                operations=operations)
         prior_identity = selected_identity()
         if check_transition(prior_identity):
             return await originals_fitter(prior_identity)
@@ -1196,6 +1182,8 @@ class BoundaryContextManager:
                 raise RuntimeError("Checkpoint changed during request preparation")
             if getattr(fitter, "_transition_guard", None):
                 fitter._transition_guard()
+            if getattr(fitter, "_transition_commit", None):
+                fitter._transition_commit()
             return result
 
     async def get_measured_request_view(self, *, provider, retain_contents, count_view, fit_output=None, reason=None):
@@ -1238,6 +1226,8 @@ class BoundaryContextManager:
                 if revision != self.revision:
                     raise RuntimeError("History changed during request preparation")
                 raise RuntimeError("Checkpoint changed during request preparation")
+            if getattr(fitter, "_transition_commit", None):
+                fitter._transition_commit()
             return result
 
 
@@ -1247,6 +1237,8 @@ async def mount_boundary(coordinator, config):
         getter = coordinator.get_capability("context.active_operations")
         return getter() if callable(getter) else None
     context.active_operations = operations
+    context.transition_policy = lambda: (coordinator.get_capability(
+        "context.transition_policy") or (lambda: None))()
     if config.get("durable_checkpoints"):
         context.checkpoint_identity = lambda: (coordinator.get_capability("context.checkpoint_identity") or (lambda: None))()
         async def preserve(messages):
@@ -1260,6 +1252,7 @@ async def mount_boundary(coordinator, config):
         coordinator.register_capability("context.checkpoint.restore", context.restore_checkpoint)
         coordinator.register_capability("context.checkpoint.status", lambda: copy.deepcopy(context.checkpoint_status))
         coordinator.register_capability("context.checkpoint.transition", context.classify_checkpoint_transition)
+        coordinator.register_capability("context.checkpoint.prepared_originals", context.prepared_originals)
         coordinator.register_capability("context.recovery.recover", context.recover_request)
         async def run_pending(**kwargs):
             callback = coordinator.get_capability("context.recovery.run_pending")

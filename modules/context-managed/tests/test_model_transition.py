@@ -115,7 +115,7 @@ async def test_smaller_target_final_fit_refusal_keeps_source_checkpoint(native):
             },
         }
 
-    with pytest.raises(ContextLengthError):
+    with pytest.raises(CompactionError, match="transition_persistence_required"):
         await ctx.get_measured_request_view(
             provider=model, retain_contents=[], count_view=count_view)
     assert views
