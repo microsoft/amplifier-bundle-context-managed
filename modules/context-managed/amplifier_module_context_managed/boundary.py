@@ -673,12 +673,14 @@ class BoundaryContextManager:
                         copy.deepcopy((self.summary, self.summary_identity,
                                        self.summary_omitted_indices)),
                         getattr(provider, "default_model", None))
+            callbacks = (self.factory, self.active_operations, self.checkpoint_identity)
             def guard():
                 current = (digest(self.messages), self.checkpoint_configuration(),
                            (self.summary, self.summary_identity, self.summary_omitted_indices),
                            getattr(provider, "default_model", None))
                 if (revision != self.revision or selected_identity() != identity
-                        or expected != current):
+                        or expected != current
+                        or callbacks != (self.factory, self.active_operations, self.checkpoint_identity)):
                     raise RuntimeError("Request contract changed during originals-only model transition")
             clone = BoundaryContextManager(copy.deepcopy(self.config), self.hooks)
             clone.messages = copy.deepcopy(messages)

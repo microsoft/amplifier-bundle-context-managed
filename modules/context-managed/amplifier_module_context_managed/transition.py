@@ -193,6 +193,7 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         before, initial = await measure(view(staged))
         limit = min(policy_limit, hard_limit)
         count_calls = 1
+        source_request_snapshot = copy.deepcopy(initial)
 
         def result_for(final_view, envelope, after, status, sha=None):
             verification = {"status": status, "sourceRevision": copy.deepcopy(binding),
@@ -217,13 +218,12 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
 
         if progress is None and initial["budget_decision"]["estimated_input_tokens"] <= limit:
             final_view = view(staged)
-            snapshot = copy.deepcopy(initial)
             check()
             result = result_for(final_view, initial, before, "prepared-originals")
             staged.checkpoint_status = {"status": "prepared-originals", "originalsAvailable": True}
-            if initial != snapshot:
+            if initial != source_request_snapshot:
                 raise CompactionError("recovery_request_changed", "Measured originals changed before activation.")
-            activate(staged, initial, snapshot)
+            activate(staged, initial, source_request_snapshot)
             return result
 
         # Check the irreducible current envelope before buying any replacement:
@@ -251,7 +251,16 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 # Finish precisely the accepted source first; the appended tail
                 # stays outside this job, even if more history is now eligible.
                 end = saved_end
-            staged.evidence_refs = copy.deepcopy(refs)
+            if native and staged.summary:
+                # Reuse cannot silently consume newly required retained rows
+                # that the recorded target window did not leave outside.
+                through = staged.summary[0]
+                if any((id(row) in {id(item) for item in carry}
+                        or staged._retained_reminder(row, retain))
+                       and i not in staged.summary_omitted_indices
+                       for i, row in enumerate(staged.messages[:through])):
+                    raise CompactionError("recovery_retention_changed",
+                                          "Target progress cannot verify current retained rows.")
         required = {id(row) for row in carry}
         objective = next((i for i, row in enumerate(staged.messages)
                           if staged._human(row)), None) if not native else None
@@ -314,8 +323,11 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         complete_progress = (staged.summary is not None and staged.summary[0] == end
                              and not staged._restored_progress)
         if complete_progress:
-            candidate = staged.export_checkpoint(target)
+            # Exact bytes/digest matter for lost-ACK readback. Freshly preserved
+            # references do not authorize rewriting an already installed record.
+            candidate = copy.deepcopy(progress)
         elif native:
+            staged.evidence_refs = copy.deepcopy(refs)
             if not config.get("native_compaction", True):
                 raise CompactionError("native_checkpoint_invalid", "Advertised native compaction is disabled.")
             excluded = {i for i, row in enumerate(staged.messages)
@@ -330,6 +342,7 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 progress=staged.export_checkpoint(target) if staged.summary else None,
                 through_message=end, exclude_indices=excluded, guard=check)
         else:
+            staged.evidence_refs = copy.deepcopy(refs)
             utility = summarizer() if summarizer else provider
             utility_key = (getattr(utility, "name", type(utility).__name__),
                            getattr(utility, "default_model", None))

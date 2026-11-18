@@ -479,6 +479,8 @@ async def test_installed_candidate_readback_reconciles_without_new_paid_calls(na
     state.unchanged()
     state.fail = None
     state.kwargs.update(progress=candidate, max_calls=0)
+    state.ctx.preserve_evidence.return_value = [
+        {"kind": "fixture", "id": "new-preservation-receipt-not-a-new-install"}]
     state.admitted.clear()
     state.saved.clear()
     result = await state.ctx.recover_request(**state.kwargs)
