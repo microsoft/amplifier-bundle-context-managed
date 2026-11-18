@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from amplifier_core import ChatRequest, Message, ToolSpec
+from amplifier_core.llm_errors import LLMError
 
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 from amplifier_module_context_managed.errors import CompactionError
@@ -312,7 +313,6 @@ def test_prepared_originals_attestation_is_pure_and_rejects_derived_or_provision
                          ("summary_identity", SOURCE),
                          ("summary_omitted_indices", [0]),
                          ("recovery", {"source": "foreign"}),
-                         ("summary_failure", {"attempts": 1}),
                          ("_summary_progress", {"completed": 1}),
                          ("_restored_progress", {"completed": 1}),
                          ("_ordinary_transition", {"uncertain": True})):
@@ -320,6 +320,39 @@ def test_prepared_originals_attestation_is_pure_and_rejects_derived_or_provision
         assert ctx.prepared_originals(TARGET) is False
         setattr(ctx, field, [] if field == "summary_omitted_indices" else None)
     assert (ctx.messages, ctx.checkpoint_status, ctx.summary_identity) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+async def test_prepared_originals_preserves_ordinary_failure_latch_and_cooldown(native):
+    state = await ordinary_case(native)
+    ctx = state.ctx
+    # This is ordinary target preparation after a settled originals-only view,
+    # not another model transition or a provisional paid job.
+    ctx.summary = ctx.summary_identity = None
+    ctx.summary_omitted_indices = []
+    ctx.checkpoint_identity = lambda: copy.deepcopy(TARGET)
+    failing = state.model.compact_context if native else state.model.complete
+    failing.side_effect = LLMError("Synthetic ordinary compaction failure", retryable=True)
+    with pytest.raises(CompactionError):
+        await state.run()
+    assert ctx.summary_failure is not None
+    assert ctx.summary is ctx._summary_progress is ctx._restored_progress is None
+    assert ctx._ordinary_transition is None
+    assert ctx.summary_identity is None and ctx.summary_omitted_indices == []
+    assert ctx.recovery is None
+    fields = ("messages", "summary", "summary_identity", "summary_omitted_indices",
+              "recovery", "_summary_progress", "_restored_progress", "summary_failure",
+              "checkpoint_status", "evidence_refs", "_ordinary_transition")
+    before = copy.deepcopy({key: getattr(ctx, key) for key in fields})
+    assert ctx.prepared_originals(TARGET) is True
+    assert {key: getattr(ctx, key) for key in fields} == before
+    with pytest.raises(CompactionError, match="previous_failure"):
+        await state.run()
+    failing.assert_awaited_once()
+    assert ctx.summary_failure == before["summary_failure"]
+    assert ctx.prepared_originals(TARGET) is True
+    assert ctx.messages == state.original
 
 
 @pytest.mark.asyncio

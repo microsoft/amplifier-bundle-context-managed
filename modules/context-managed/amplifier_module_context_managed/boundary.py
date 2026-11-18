@@ -184,6 +184,8 @@ class BoundaryContextManager:
 
     def prepared_originals(self, identity):
         """Pure empty-derived-state attestation, not transition admission."""
+        # An ordinary failure/cooldown latch is not a derived request view.
+        # Leave it untouched so settled originals can retain normal retry policy.
         return bool(self.checkpoint_identity and self.checkpoint_identity() == identity
                     and isinstance(identity, dict)
                     and all(isinstance(identity.get(k), str) and identity[k]
@@ -191,7 +193,7 @@ class BoundaryContextManager:
                     and self.summary is None and self._summary_progress is None
                     and self._restored_progress is None and self._ordinary_transition is None
                     and self.summary_identity is None and not self.summary_omitted_indices
-                    and self.recovery is None and self.summary_failure is None)
+                    and self.recovery is None)
 
     async def recover_request(self, *, provider, count_view, identity, save_progress,
                               install, guard, retain_contents=(), target_bytes=1_500_000,

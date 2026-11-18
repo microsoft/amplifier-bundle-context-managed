@@ -343,6 +343,8 @@ portable progress and provisional ordinary-transition state must all be empty.
 It neither clears foreign state nor validates a settled host receipt or grants
 fresh model work. Compatible target-derived state uses ordinary strict validation,
 not this empty-state shortcut.
+An ordinary compaction failure/cooldown latch is not derived request state: it
+does not invalidate this attestation and is neither cleared nor rewritten by it.
 
 `context.checkpoint.transition(record, identity)` is passive. It checks record
 integrity, summary shape, current canonical prefix and generation configuration
