@@ -639,27 +639,70 @@ class BoundaryContextManager:
             return view
         # An opted-in host commits originals before deriving a compacted view.
         # References point to its existing evidence/transcript store.
-        identity = copy.deepcopy(self.checkpoint_identity()) if self.checkpoint_identity else {
-            "provider": getattr(provider, "name", type(provider).__name__),
-            "model": getattr(provider, "default_model", None)}
+        def selected_identity():
+            return copy.deepcopy(self.checkpoint_identity()) if self.checkpoint_identity else {
+                "provider": getattr(provider, "name", type(provider).__name__),
+                "model": getattr(provider, "default_model", None)}
         # A selection change is not permission to destructively invalidate the
         # entire accepted source unit or buy replacement work. Hosts consume an
         # admitted transition before entering this ordinary path.
-        source_identities = [self.summary_identity] if self.summary else []
-        source_identities += [part["identity"] for part in
-                              (self._summary_progress, self._restored_progress)
-                              if part and part.get("completed")]
-        if any(source != identity for source in source_identities):
-            # Preserve accepted paid-progress refusal semantics outside the
-            # explicit host transition entry (which parks this whole unit).
-            if any(part and part.get("completed") and part["identity"] != identity
-                   for part in (self._summary_progress, self._restored_progress)):
-                self._refuse_progress()
-            raise CompactionError("model_transition_required",
-                "The selected model differs from saved context. The host must "
-                "prepare a bounded transition from preserved originals before continuing.")
+        def check_transition(identity):
+            if identity is None:
+                # Cold host preservation can legitimately establish identity
+                # while lazily restoring its checkpoint. Recheck afterwards.
+                return False
+            source_identities = [self.summary_identity] if self.summary else []
+            source_identities += [part["identity"] for part in
+                                  (self._summary_progress, self._restored_progress)
+                                  if part and part.get("completed")]
+            if any(source != identity for source in source_identities):
+                # Preserve accepted paid-progress refusal semantics outside the
+                # explicit host transition entry (which parks this whole unit).
+                if any(part and part.get("completed") and part["identity"] != identity
+                       for part in (self._summary_progress, self._restored_progress)):
+                    self._refuse_progress()
+                return True
+            return False
+
+        async def originals_fitter(identity):
+            # Preserve compatibility for hosts without the explicit transition
+            # entry: fitting originals require no regeneration admission. Keep
+            # the old complete unit inactive, not cleared/rebound or persisted
+            # as a target checkpoint. Paid partials still refuse above.
+            expected = (digest(messages), self.checkpoint_configuration(),
+                        copy.deepcopy((self.summary, self.summary_identity,
+                                       self.summary_omitted_indices)),
+                        getattr(provider, "default_model", None))
+            def guard():
+                current = (digest(self.messages), self.checkpoint_configuration(),
+                           (self.summary, self.summary_identity, self.summary_omitted_indices),
+                           getattr(provider, "default_model", None))
+                if (revision != self.revision or selected_identity() != identity
+                        or expected != current):
+                    raise RuntimeError("Request contract changed during originals-only model transition")
+            clone = BoundaryContextManager(copy.deepcopy(self.config), self.hooks)
+            clone.messages = copy.deepcopy(messages)
+            if self.factory:
+                async def captured_prompt():
+                    return system_prompt
+                clone.factory = captured_prompt
+            clone.active_operations = lambda: copy.deepcopy(operations)
+            # provider=None deliberately disables generation and archive
+            # selection. The returned fitter still validates the real provider.
+            fitted, protected = await clone._prepare(None, token_budget, retain)
+            fitted._transition_guard = guard
+            guard()
+            return fitted, protected
+        prior_identity = selected_identity()
+        if check_transition(prior_identity):
+            return await originals_fitter(prior_identity)
         if self.config.get("durable_checkpoints") and self.preserve_evidence:
             self.evidence_refs = await self.preserve_evidence(copy.deepcopy(messages))
+        identity = selected_identity()
+        if prior_identity is not None and prior_identity != identity:
+            raise RuntimeError("Request contract changed during evidence preservation")
+        if check_transition(identity):
+            return await originals_fitter(identity)
         configuration = self.checkpoint_configuration()
         provider_identity = (getattr(provider, "name", type(provider).__name__),
                              getattr(provider, "default_model", None))
@@ -1147,6 +1190,8 @@ class BoundaryContextManager:
                 raise RuntimeError("History changed during request preparation")
             if summary_state != (self.summary, self.summary_omitted_indices, self.summary_identity):
                 raise RuntimeError("Checkpoint changed during request preparation")
+            if getattr(fitter, "_transition_guard", None):
+                fitter._transition_guard()
             return result
 
     async def get_measured_request_view(self, *, provider, retain_contents, count_view, fit_output=None, reason=None):
@@ -1180,6 +1225,8 @@ class BoundaryContextManager:
                 await self._budget_failure(error)
                 raise
             result["count_calls"] += measurement.preflight_calls - measurement.reused_calls
+            if getattr(fitter, "_transition_guard", None):
+                fitter._transition_guard()
             if (revision != self.revision
                     or summary_state != (self.summary, self.summary_omitted_indices, self.summary_identity)):
                 if result.get("transaction"):

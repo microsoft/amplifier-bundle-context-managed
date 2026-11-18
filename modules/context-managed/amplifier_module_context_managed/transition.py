@@ -48,6 +48,7 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         target = copy.deepcopy(identity)
         record = copy.deepcopy(source_checkpoint)
         origin = copy.deepcopy(transition_source)
+        progress_input, progress = progress, copy.deepcopy(progress)
         originals = {key: copy.deepcopy(getattr(context, key)) for key in FIELDS}
         factory, operations = context.factory, context.active_operations
         preserve, getter, summarizer = (context.preserve_evidence,
@@ -61,6 +62,7 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             if (context.revision != revision or digest(context.messages) != source_digest
                     or context.config != config or context.checkpoint_configuration() != configuration
                     or identity != target or source_checkpoint != record or transition_source != origin
+                    or progress_input != progress
                     or context.factory is not factory or context.active_operations is not operations
                     or context.preserve_evidence is not preserve or context.checkpoint_identity is not getter
                     or context.summary_provider is not summarizer
@@ -86,6 +88,14 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                                       "Source checkpoint does not verify a different-model transition.")
             binding = {"messages": len(source), "sha256": source_digest}
             source_sha = record["sha256"]
+            if any(originals[key] for key in ("summary", "_summary_progress", "_restored_progress")):
+                active_source = BoundaryContextManager(config)
+                active_source.messages = copy.deepcopy(source)
+                for key in FIELDS:
+                    setattr(active_source, key, copy.deepcopy(originals[key]))
+                if active_source.export_checkpoint(record["identity"]) != record:
+                    raise CompactionError("transition_source_invalid",
+                                          "The supplied source record does not match the active source unit.")
         else:
             if (not isinstance(target, dict) or not all(
                     isinstance(target.get(k), str) and target[k].strip() for k in ("provider", "model"))
@@ -197,17 +207,23 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                     "policy_budget": limit, "trigger": limit, "target": limit,
                     "count_calls": count_calls, "transaction": None, "recovery": verification}
 
-        def activate(candidate):
+        def activate(candidate, envelope, snapshot):
+            activation = {key: copy.deepcopy(getattr(candidate, key)) for key in FIELDS}
             check()
-            for key in FIELDS:
-                setattr(context, key, copy.deepcopy(getattr(candidate, key)))
+            if envelope != snapshot:
+                raise CompactionError("recovery_request_changed", "Measured request changed before activation.")
+            for key, value in activation.items():
+                setattr(context, key, value)
 
         if progress is None and initial["budget_decision"]["estimated_input_tokens"] <= limit:
             final_view = view(staged)
+            snapshot = copy.deepcopy(initial)
             check()
             result = result_for(final_view, initial, before, "prepared-originals")
             staged.checkpoint_status = {"status": "prepared-originals", "originalsAvailable": True}
-            activate(staged)
+            if initial != snapshot:
+                raise CompactionError("recovery_request_changed", "Measured originals changed before activation.")
+            activate(staged, initial, snapshot)
             return result
 
         # Check the irreducible current envelope before buying any replacement:
@@ -310,7 +326,8 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             compact_template = template.model_copy(deep=True, update={
                 "max_output_tokens": config.get("native_compaction_max_output_tokens", 4096)})
             candidate = await recover_native(staged, bounded, compact_template, target,
-                save_progress=save, target_bytes=target_bytes, progress=progress,
+                save_progress=save, target_bytes=target_bytes,
+                progress=staged.export_checkpoint(target) if staged.summary else None,
                 through_message=end, exclude_indices=excluded, guard=check)
         else:
             utility = summarizer() if summarizer else provider
@@ -369,5 +386,5 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             raise CompactionError("recovery_request_changed", "Measured request changed during installation.")
         verified.checkpoint_status = {"status": "ready", "throughMessage": verified.summary[0],
                                       "originalsAvailable": True}
-        activate(verified)
+        activate(verified, final_envelope, snapshot)
         return verification

@@ -300,8 +300,10 @@ not create or re-arm an intent, submit input, resume a task, or replay a tool.
 ### Deliberate foreground model transitions
 
 Selecting another model alone does not run a model or migrate a checkpoint.
-Ordinary preparation refuses an incompatible active summary with
-`model_transition_required`, keeping its complete source unit intact. Incompatible
+Ordinary preparation can count and return fitting canonical originals, keeping
+the incompatible completed source unit inactive and intact without generating
+or persisting a replacement. An oversized originals-only request still refuses;
+it never starts an automatic migration campaign. Incompatible
 paid portable progress retains the existing `summary_progress_incompatible`
 refusal. A host may admit a bounded transition on a genuine foreground input
 through the same `context.recovery.recover` entry, before ordinary preparation.

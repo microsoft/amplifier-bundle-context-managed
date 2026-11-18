@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from amplifier_core import ChatRequest, Message, ToolSpec
+from amplifier_core.llm_errors import ContextLengthError
 
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 from amplifier_module_context_managed.checkpoint import digest
@@ -82,12 +83,10 @@ async def test_failed_target_preparation_keeps_source_checkpoint(native, cancell
             raise asyncio.CancelledError()
         raise RuntimeError("Synthetic target count failed")
 
-    # Without an admitted host transaction, refuse before target callbacks.
-    # Exception/cancellation recovery itself is exercised by explicit entry tests.
-    with pytest.raises(CompactionError, match="model_transition_required"):
+    with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
         await ctx.get_measured_request_view(
             provider=model, retain_contents=[], count_view=count_view)
-    assert len(calls) == 0
+    assert len(calls) == 1
     assert (ctx.summary, ctx.summary_identity, ctx.summary_omitted_indices,
             ctx.evidence_refs, ctx.recovery) == source_state
     assert ctx.export_checkpoint(SOURCE) == source_record
@@ -116,10 +115,10 @@ async def test_smaller_target_final_fit_refusal_keeps_source_checkpoint(native):
             },
         }
 
-    with pytest.raises(CompactionError, match="model_transition_required"):
+    with pytest.raises(ContextLengthError):
         await ctx.get_measured_request_view(
             provider=model, retain_contents=[], count_view=count_view)
-    assert not views
+    assert views
     assert ctx.export_checkpoint(SOURCE) == source_record
     assert ctx.messages == rows()
     model.compact_context.assert_not_awaited()
@@ -290,6 +289,7 @@ def transition_fixture(native, *, archive=False):
     model = provider(native=native)
     state = SimpleNamespace(ctx=ctx, model=model, old=old, saved=[], admitted=[], installed=[],
                             fail=None, limit=6000, counts=[], request_options=[],
+                            target=copy.deepcopy(TARGET),
                             initial=copy.deepcopy({key: getattr(ctx, key) for key in (
                                 "summary", "summary_identity", "summary_omitted_indices",
                                 "_summary_progress", "_restored_progress", "recovery", "evidence_refs")}))
@@ -313,7 +313,7 @@ def transition_fixture(native, *, archive=False):
             raise RuntimeError("synthetic count outage")
         request = ChatRequest(
             messages=[Message(**row) for row in view],
-            model=TARGET["model"], reasoning_effort="high", max_output_tokens=73,
+            model=state.target["model"], reasoning_effort="high", max_output_tokens=73,
             tools=[ToolSpec(name="fixture", description="Read evidence; do not replay writes",
                             parameters={"type": "object"})],
             metadata={"channel": "exact-account-selection"})
@@ -331,11 +331,11 @@ def transition_fixture(native, *, archive=False):
     async def compact(request):
         unchanged()
         assert state.admitted[-1]["requestSha256"] == digest(request.model_dump(mode="json"))
-        assert request.model == TARGET["model"]
+        assert request.model == state.target["model"]
         assert request.reasoning_effort == "high"
         if state.fail == "compact":
             raise asyncio.CancelledError()
-        result = native_message(TARGET["model"])
+        result = native_message(state.target["model"])
         result["metadata"]["fixture:opaque"]["payload"] = "target-private-state"
         return {"kind": "native", "message": result}
 
@@ -364,6 +364,8 @@ def transition_fixture(native, *, archive=False):
         return {"sha256": record["sha256"]}
 
     model.request_budget = AsyncMock(side_effect=budget)
+    model.validate_compacted_context = lambda row: (
+        row.get("metadata", {}).get("fixture:opaque", {}).get("model") == state.target["model"])
     model.compact_context = AsyncMock(side_effect=compact)
     model.complete = AsyncMock(side_effect=complete)
     state.count_view, state.admit, state.save, state.install = count_view, admit, save, install
@@ -539,6 +541,16 @@ async def test_source_paid_partial_is_parked_not_rebound_or_discarded(native):
     classify = state.ctx.classify_checkpoint_transition(paid_record, target_identity)
     assert classify["status"] == "transition_required"
     assert state.ctx.export_checkpoint(source_identity) == paid_record
+    state.initial = copy.deepcopy({key: getattr(state.ctx, key) for key in state.initial})
+    state.target = target_identity
+    state.model.default_model = target_identity["model"]
+    state.ctx.checkpoint_identity = lambda: copy.deepcopy(target_identity)
+    state.kwargs.update(identity=target_identity, source_checkpoint=copy.deepcopy(paid_record))
+    result = await state.ctx.recover_request(**state.kwargs)
+    assert result["outcome"] == "transitioned"
+    assert state.ctx.summary_identity == target_identity
+    assert paid_record["progress"]["completed"] == 1
+    assert paid_record["identity"] == source_identity
 
 
 @pytest.mark.asyncio
@@ -626,3 +638,55 @@ async def test_portable_paid_prefix_resumes_after_eligible_boundary_advances():
     assert result["outcome"] == "transitioned"
     assert state.ctx.summary[0] == saved_end
     assert "new evidence still pending" in str(result["base_view"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+async def test_cold_preservation_may_initialize_identity_and_restore_checkpoint(native):
+    ctx = context(native=native)
+    old = ctx.export_checkpoint(SOURCE)
+    cold = BoundaryContextManager(copy.deepcopy(ctx.config))
+    cold.messages = copy.deepcopy(ctx.messages)
+    selected = [None]
+    cold.checkpoint_identity = lambda: selected[0]
+    async def preserve(messages):
+        selected[0] = copy.deepcopy(SOURCE)
+        assert cold.restore_checkpoint(old, SOURCE)["status"] == "restored"
+        return copy.deepcopy(ctx.evidence_refs)
+    cold.preserve_evidence = preserve
+    model = provider(native=native, identity=SOURCE)
+    model.request_budget = AsyncMock(return_value={
+        "estimated_input_tokens": 1000, "input_limit_tokens": 20000,
+        "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 1000}})
+    await cold.get_messages_for_request(provider=model)
+    assert cold.summary == ctx.summary
+    assert cold.summary_identity == SOURCE
+    model.complete.assert_not_awaited()
+    model.compact_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("measured", [False, True])
+async def test_ordinary_no_transition_host_returns_fitting_originals_without_paid_work(native, measured):
+    ctx, model = context(native=native), provider(native=native)
+    old = ctx.export_checkpoint(SOURCE)
+    model.request_budget = AsyncMock(return_value={
+        "estimated_input_tokens": 1000, "input_limit_tokens": 20000,
+        "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 1000}})
+    async def count_view(view):
+        assert "source-private-state" not in str(view)
+        return {"dispatch": ChatRequest(messages=[Message(**row) for row in view],
+                                        model=TARGET["model"]),
+                "budget_decision": await model.request_budget(None)}
+    if measured:
+        result = await ctx.get_measured_request_view(
+            provider=model, retain_contents=[], count_view=count_view)
+        view = result["base_view"]
+    else:
+        view = await ctx.get_messages_for_request(provider=model)
+    assert "Verified historical details" in str(view)
+    assert "source-private-state" not in str(view)
+    assert ctx.export_checkpoint(SOURCE) == old
+    model.compact_context.assert_not_awaited()
+    model.complete.assert_not_awaited()
