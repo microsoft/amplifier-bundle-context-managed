@@ -284,6 +284,23 @@ async def test_invalid_participation_policy_refuses_before_generation():
     state.model.complete.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [False, True])
+async def test_mounted_pending_wrapper_is_not_itself_host_participation(managed):
+    state = await ordinary_case(False)
+    state.ctx.run_pending_recovery = AsyncMock(return_value=None)
+    state.ctx.transition_policy = lambda: "host-managed" if managed else None
+    if managed:
+        with pytest.raises(CompactionError, match="model_transition_required"):
+            await state.run()
+        state.model.complete.assert_not_awaited()
+    else:
+        await state.run()
+        state.model.complete.assert_awaited_once()
+        assert state.ctx.summary_identity == TARGET
+    state.ctx.run_pending_recovery.assert_awaited_once()
+
+
 def test_prepared_originals_attestation_is_pure_and_rejects_derived_or_provisional_state():
     ctx = BoundaryContextManager({"durable_checkpoints": True})
     ctx.checkpoint_identity = lambda: copy.deepcopy(TARGET)
