@@ -39,6 +39,38 @@ remain separately accessible through host-approved `read_transcript` archive IDs
 this is read-only access, not automatic canonical import. See the
 [archive usage and limits](../../docs/CONFIGURATION.md#legacy-archive-usage).
 
+### Ordinary request fitting (host opt in)
+
+`foreground_continuation: true` makes measured ordinary requests (and explicit
+`hard_fit` requests) independent of optional compaction success. It reuses the
+existing whole-exchange selector and exact request fitter; it does not install a
+recovery checkpoint or change canonical originals. Settled exchanges after the
+latest input may be omitted, including large call arguments, results, nested
+delegation observations and ephemeral recovery-reference rows. A result-only
+structured user row is not ordinary input. Mixed result/text rows remain current
+input and retain their complete protocol group.
+
+The original objective, latest two actual input rows, instructions, hooks,
+explicit retention, current reminder snapshot, live/queued/uncertain call groups
+and current operation observations remain required. Historical unanswered calls
+retain their existing explicit unknown/no-replay observation. If required context
+still exceeds the model allowance, preparation fails visibly without clipping it.
+
+Every omission-bearing request includes a developer warning with metadata
+`source: context-managed-continuation` and `ephemeral: true` **before** counting.
+The warning says omitted evidence is not summarized and must not be invented or
+used as a reason to replay actions. The returned dispatch includes that warning;
+preparation itself does not publish a host notice. The host may show its notice
+only when the request is actually dispatched.
+
+Stop/cancellation, stale request contracts, evidence-preservation and checkpoint
+storage failures still stop preparation. Optional paid compaction is limited to
+one invocation per actual input in this context instance; tool/service appends do
+not reset it. An unconfirmed invocation suppresses all further automatic paid
+compaction in that instance. This is not a durable operation journal or a
+restart-safe settlement claim; hosts still own uncertain-operation recovery.
+Default strict behavior is unchanged when this option is absent.
+
 ### Durable boundary checkpoints (opt in)
 
 With `engine: boundary` and `durable_checkpoints: true`, the host must register

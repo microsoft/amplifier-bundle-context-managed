@@ -58,7 +58,8 @@ def result_ids(row):
     result = {row.get("tool_call_id")} if row.get("role") == "tool" else set()
     content = row.get("content")
     if isinstance(content, list):
-        result.update(b.get("tool_use_id") for b in content if isinstance(b, dict) and b.get("type") == "tool_result")
+        result.update(b.get("tool_call_id") or b.get("tool_use_id")
+                      for b in content if isinstance(b, dict) and b.get("type") == "tool_result")
     return result - {None}
 
 

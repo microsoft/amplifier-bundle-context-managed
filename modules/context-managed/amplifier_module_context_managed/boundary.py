@@ -12,10 +12,12 @@ import time
 import inspect
 
 from amplifier_core import ChatRequest, Message
+from amplifier_core.llm_errors import ContextLengthError
 from .request_context import RequestContext
 from .errors import CompactionError
 
-from .interrupted import project as project_interrupted, unanswered
+from .interrupted import calls as tool_calls, project as project_interrupted, result_ids, unanswered
+from .working_history import select_window, settled_results
 from .checkpoint import digest
 from .prefix_digest import PrefixDigest
 from .measurement import RequestMeasurement, estimate_pressure
@@ -73,6 +75,9 @@ class BoundaryContextManager:
         self.persist_checkpoint = None
         self.recovery = None
         self.run_pending_recovery = None
+        self._foreground_paid_input = None
+        self._foreground_unconfirmed = False
+        self._is_cancelled = None
 
     @staticmethod
     def _same_prefix(record, messages):
@@ -221,7 +226,11 @@ class BoundaryContextManager:
         metadata = message.get("metadata") or {}
         origin = metadata.get("amplifier_input") or {}
         service = isinstance(origin, dict) and origin.get("version") == 1 and origin.get("kind") == "service"
-        return message.get("role") == "user" and not metadata.get("ephemeral") and not service
+        content = message.get("content")
+        result_only = (isinstance(content, list) and bool(content)
+                       and all(isinstance(block, dict) and block.get("type") == "tool_result"
+                               for block in content))
+        return message.get("role") == "user" and not metadata.get("ephemeral") and not service and not result_only
 
     @staticmethod
     def _retained_reminder(message, retain):
@@ -287,15 +296,7 @@ class BoundaryContextManager:
                     batch_start = i
                 if call.get("id"):
                     calls[call["id"]] = i
-            results = [block.get("tool_use_id") for block in blocks if block.get("type") == "tool_result"]
-            if row.get("role") == "tool":
-                try:
-                    receipt = json.loads(row.get("content", ""))
-                except (ValueError, TypeError):
-                    receipt = None
-                if not (isinstance(receipt, dict) and receipt.get("status") in {"queued", "pending"} and receipt.get("job_id")):
-                    results.append(row.get("tool_call_id"))
-            for call_id in results:
+            for call_id in settled_results(row):
                 calls.pop(call_id, None)
             if batch_start is not None and not calls:
                 settled.append((batch_start, i + 1))
@@ -413,8 +414,26 @@ class BoundaryContextManager:
         if self._summary_progress and not self._summary_progress["completed"]:
             self._summary_progress = None
 
+    def _check_stop(self):
+        if self._is_cancelled and self._is_cancelled():
+            raise asyncio.CancelledError()
+
+    async def _paid_compaction(self, invoke, input_key):
+        if input_key is None:
+            return await invoke()
+        self._check_stop()
+        if self._foreground_unconfirmed or self._foreground_paid_input == input_key:
+            raise CompactionError("ordinary_compaction_deferred",
+                "Optional compaction already used this input; retained work was not retried.")
+        self._foreground_paid_input = input_key
+        self._foreground_unconfirmed = True
+        response = await invoke()
+        self._foreground_unconfirmed = False
+        self._check_stop()
+        return response
+
     async def _summarize(self, summarizer, source, revision, stats, *, fingerprint, source_revision, identity,
-                         resolved_options=None):
+                         resolved_options=None, input_key=None, guard=None):
         """Prefer one measured request; commit only after the entire prefix."""
         from amplifier_core.llm_errors import ContextLengthError
 
@@ -482,6 +501,9 @@ class BoundaryContextManager:
         self._summary_progress_stats(stats, progress)
 
         def check_source():
+            self._check_stop()
+            if guard is not None:
+                guard()
             if revision != self.revision:
                 raise RuntimeError("History changed during compaction; stale summary was discarded")
             current_identity = self.checkpoint_identity() if self.checkpoint_identity else identity
@@ -530,7 +552,7 @@ class BoundaryContextManager:
                     # Providers that auto-continue must expose and honor the
                     # per-call control. Ordinary chat keeps its configured policy.
                     options = {"request_options": {"auto_continue": False}} if "completion:auto_continue:v1" in capabilities else {}
-                    return await summarizer.complete(request, **options)
+                    return await self._paid_compaction(lambda: summarizer.complete(request, **options), input_key)
 
                 try:
                     response = await complete_fragment()
@@ -612,13 +634,18 @@ class BoundaryContextManager:
         count = measured.get("input_tokens")
         return count if measured.get("kind") == "provider_count" and type(count) is int and count >= 0 else None
 
-    async def _prepare(self, provider, token_budget, retain, measurement=None, *, reason=None):
+    async def _prepare(self, provider, token_budget, retain, measurement=None, *, reason=None,
+                       ordinary=False, snapshot=None):
         messages, revision = copy.deepcopy(self.messages), self.revision
+        self._check_stop()
+        input_key = next(((i, digest(row)) for i, row in reversed(list(enumerate(messages)))
+                          if self._human(row)), (None, None)) if ordinary else None
         carry = self._carry(messages)
         # Materialize dynamic instructions and operation observations once for
         # both pressure measurement and the request fitter's final snapshot.
-        system_prompt = await self.factory() if self.factory else None
-        operations = self.active_operations() if self.active_operations else None
+        system_prompt = snapshot[0] if snapshot is not None else await self.factory() if self.factory else None
+        operations = (snapshot[1] if snapshot is not None else
+                      copy.deepcopy(self.active_operations()) if self.active_operations else None)
         manifest = ("Pending operations (observations, not authorization):\n" + json.dumps(operations)) if operations else None
 
         def pressure_view(rows):
@@ -633,7 +660,12 @@ class BoundaryContextManager:
         # An opted-in host commits originals before deriving a compacted view.
         # References point to its existing evidence/transcript store.
         if self.config.get("durable_checkpoints") and self.preserve_evidence:
-            self.evidence_refs = await self.preserve_evidence(copy.deepcopy(messages))
+            try:
+                self.evidence_refs = await self.preserve_evidence(copy.deepcopy(messages))
+            except Exception as error:
+                if ordinary:
+                    raise RuntimeError("Host evidence preservation failed; no foreground fitting was attempted") from error
+                raise
         identity = copy.deepcopy(self.checkpoint_identity()) if self.checkpoint_identity else {
             "provider": getattr(provider, "name", type(provider).__name__),
             "model": getattr(provider, "default_model", None)}
@@ -648,9 +680,13 @@ class BoundaryContextManager:
                 "provider": current_provider[0], "model": current_provider[1]}
             return (configuration != self.checkpoint_configuration()
                     or identity != current_identity or provider_identity != current_provider
-                    or summary_state != (self.summary, self.summary_omitted_indices, self.summary_identity))
+                    or summary_state != (self.summary, self.summary_omitted_indices, self.summary_identity)
+                    or ordinary and self.active_operations and self.active_operations() != operations)
 
         def check_request_contract():
+            self._check_stop()
+            if revision != self.revision:
+                raise RuntimeError("History changed during request preparation")
             if request_contract_changed():
                 self._discard_unpaid_progress()
                 raise RuntimeError("Request contract changed during compaction; stale summary was discarded")
@@ -662,6 +698,9 @@ class BoundaryContextManager:
                 self._refuse_progress()
             self._summary_progress = None
         if self.summary and self.summary_identity != identity:
+            if ordinary:
+                raise CompactionError("checkpoint_identity_incompatible",
+                    "The saved checkpoint remains intact; ordinary fitting uses canonical originals.")
             self.summary = None
             self.summary_omitted_indices = []
             self.checkpoint_status = {"status": "stale", "reason": "Provider/model identity changed.", "originalsAvailable": True}
@@ -671,6 +710,9 @@ class BoundaryContextManager:
                                 for row in messages[:self.summary[0]]):
             # A newly required reminder can name content inside an older note.
             # Reassemble from originals instead of pretending it survived.
+            if ordinary:
+                raise CompactionError("checkpoint_retention_incompatible",
+                    "Required originals are outside the saved checkpoint; ordinary fitting uses originals.")
             self.summary = None
             self.summary_omitted_indices = []
         summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
@@ -703,7 +745,7 @@ class BoundaryContextManager:
         # the explicit archive-backed working view BEFORE any remote count.
         # Ordinary native failures still fail; this is not an error fallback.
         if (self.config.get("archive_recovery") and self.config.get("durable_checkpoints")
-                and self.preserve_evidence and use_native
+                and not ordinary and self.preserve_evidence and use_native
                 and (not self.summary or isinstance(self.summary[1], dict))
                 and end > (self.summary[0] if self.summary else 0)):
             selection_budget = fitter._calculate_budget(token_budget, provider)
@@ -772,6 +814,8 @@ class BoundaryContextManager:
         should_summarize = (provider is not None and end > (self.summary[0] if self.summary else 0)
                             and (reason == "provider_overflow" or recovery is not None
                                  or assembled_tokens >= budget * threshold))
+        if ordinary and (self._foreground_unconfirmed or self._foreground_paid_input == input_key):
+            should_summarize = False
         if (should_summarize and reason != "provider_overflow" and use_native
                 and self.summary and isinstance(self.summary[1], dict)):
             # Large recent turns may trigger the full-window threshold even
@@ -799,6 +843,7 @@ class BoundaryContextManager:
                     getattr(current, "name", type(current).__name__), getattr(current, "default_model", None)))
 
             def check_summary_contract():
+                check_request_contract()
                 if summary_contract_changed():
                     self._discard_unpaid_progress()
                     raise RuntimeError("Summary contract changed during compaction; stale summary was discarded")
@@ -936,6 +981,7 @@ class BoundaryContextManager:
                             # A healthy native response may take many minutes.
                             # Elapsed time must not cancel it or start a fallback.
                             fits, compact_budget = await request_fits(provider, request)
+                            check_summary_contract()
                             if not fits:
                                 # Native compaction accepts one complete eligible
                                 # window, never fragments. Oversized legacy history
@@ -945,7 +991,7 @@ class BoundaryContextManager:
                                 stats["native_request_budget"] = compact_budget
                                 raise CompactionError("native_input_oversized", "Native input exceeds the provider allowance. Restore the last compatible checkpoint or explicitly recover this oversized history; it was not sent to native compaction.")
                             stats["calls"] += 1
-                            result = await provider.compact_context(request)
+                            result = await self._paid_compaction(lambda: provider.compact_context(request), input_key)
                             if revision != self.revision:
                                 raise RuntimeError("History changed during compaction; stale summary was discarded")
                             check_summary_contract()
@@ -982,7 +1028,7 @@ class BoundaryContextManager:
                     semantic_source = messages[:end] if self.summary and isinstance(self.summary[1], dict) else source
                     return await self._summarize(summarizer, semantic_source, revision, stats,
                         fingerprint=fingerprint, source_revision=source_revision, identity=identity,
-                        resolved_options=resolved_options)
+                        resolved_options=resolved_options, input_key=input_key, guard=check_summary_contract)
 
                 text = await prepare_note()
                 if revision != self.revision:
@@ -992,12 +1038,18 @@ class BoundaryContextManager:
                 portable_baseline = messages if self.summary and isinstance(self.summary[1], dict) else assembled
                 if stats.get("method") != "native" and estimate_pressure(fitter, candidate) >= estimate_pressure(fitter, portable_baseline):
                     raise ValueError("Compaction did not reduce the request")
-                if stats.get("method") != "native" and measurement is not None and measurement_kind == "provider_count":
-                    candidate_tokens, _, candidate_kind = await measurement.measure(fitter, pressure_view(candidate))
+                if stats.get("method") != "native" and measurement is not None and (
+                        ordinary or measurement_kind == "provider_count"):
+                    candidate_tokens, candidate_limit, candidate_kind = await measurement.measure(fitter, pressure_view(candidate))
                     if candidate_kind == "provider_count":
                         stats["input_tokens_after"] = candidate_tokens
                         if candidate_tokens >= assembled_tokens:
                             raise ValueError("Compaction did not produce a measured reduction")
+                    candidate_decision = measurement.cached[1].get("budget_decision")
+                    if ordinary and candidate_decision and (
+                            candidate_decision["estimated_input_tokens"] > candidate_limit):
+                        raise CompactionError("summary_candidate_oversized",
+                            "The returned note does not fit the full request; the prior checkpoint remains intact.")
                 if revision != self.revision:
                     outcome = "superseded"
                     raise RuntimeError("History changed during compaction; stale summary was discarded")
@@ -1030,7 +1082,7 @@ class BoundaryContextManager:
                 if summary_contract_changed():
                     outcome = "superseded"
                     self._discard_unpaid_progress()
-                    raise
+                    raise RuntimeError("Request contract changed during compaction; no stale request was fitted") from exc
                 if revision != self.revision:
                     outcome = "superseded"
                     self._discard_unpaid_progress()
@@ -1060,6 +1112,8 @@ class BoundaryContextManager:
                 stalled = not stats.get("completed_fragments_this_pass", 0)
                 attempts = previous["attempts"] + 1 if stalled and previous and previous["fingerprint"] == fingerprint else 1
                 retryable = bool(getattr(exc, "retryable", isinstance(exc, (TimeoutError, ConnectionError))))
+                if ordinary and self._foreground_unconfirmed:
+                    retryable = False
                 if self._summary_progress and (not self._summary_progress["completed"]
                         or (not retryable and not self._summary_progress["pending"])):
                     # An empty draft or a finished note that failed reduction
@@ -1105,10 +1159,151 @@ class BoundaryContextManager:
             await self._emit("context:budget_exceeded", input_tokens=count,
                 input_limit_tokens=limit, **self.last_budget)
 
+    async def _fit_ordinary(self, provider, token_budget, retain, fit, measurement=None, reason=None):
+        """Optional compaction cannot own foreground admission. Exact fitting does."""
+        async with self.lock:
+            revision, config, factory = self.revision, copy.deepcopy(self.config), self.factory
+            operations = copy.deepcopy(self.active_operations()) if self.active_operations else None
+            identity = lambda: (self.checkpoint_identity() if self.checkpoint_identity else None,
+                                getattr(provider, "name", None), getattr(provider, "default_model", None))
+            selected = copy.deepcopy(identity())
+            checkpoint = None
+
+            def guard():
+                self._check_stop()
+                if (revision != self.revision or config != self.config or factory is not self.factory
+                        or identity() != selected
+                        or checkpoint is not None and checkpoint != (
+                            self.summary, self.summary_omitted_indices, self.summary_identity)
+                        or (self.active_operations() if self.active_operations else None) != operations):
+                    raise RuntimeError("Request contract changed during ordinary fitting")
+
+            guard()
+            prompt = await factory() if factory else None
+            guard()
+            try:
+                try:
+                    fitter, protected = await self._prepare(
+                        provider, token_budget, retain, measurement, reason=reason, ordinary=True,
+                        snapshot=(prompt, operations))
+                    checkpoint = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
+                    result = await fit(fitter, protected)
+                except (CompactionError, ContextLengthError) as error:
+                    guard()
+                    # Storage failure is not optional model work. Nor may an
+                    # untyped provider rejection authorize history omission.
+                    if (isinstance(error, CompactionError) and error.code == "checkpoint_persist_failed"
+                            or isinstance(error, ContextLengthError)
+                            and not hasattr(error, "context_input_limit")):
+                        raise
+                    checkpoint = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
+                    result = await self._fit_continuation(
+                        fit, retain, guard, operations, token_budget, provider, error, prompt,
+                        omit_full=reason == "provider_overflow")
+                guard()
+                return result
+            except ContextLengthError as error:
+                await self._budget_failure(error)
+                raise
+
+    async def _fit_continuation(self, fit, retain, guard, operations, token_budget, provider,
+                                first_error, prompt, *, omit_full=False):
+        """Select whole settled exchanges; never make the latest input a tail boundary."""
+        messages = copy.deepcopy(self.messages)
+        carry = self._carry(messages)
+        unknown = unanswered(messages, self._human)
+        fitter = self._fitter()
+        if self.factory:
+            async def captured_prompt():
+                return prompt
+            await fitter.set_system_prompt_factory(captured_prompt)
+        attempted, last_error = set(), first_error
+
+        async def attempt(rows, omitted=False):
+            nonlocal last_error
+            guard()
+            if omitted:
+                slot = next((i for i, row in enumerate(rows)
+                             if row.get("role") not in {"system", "developer"}), len(rows))
+                rows.insert(slot, {"role": "developer", "content": (
+                    "Older context may be incomplete. Omitted exchanges remain in saved history and are "
+                    "not represented or summarized in this request. Tell the user if missing history affects "
+                    "the answer. Do not invent missing details or replay actions because their evidence "
+                    "is absent; inspect saved history and receipts first."),
+                    "metadata": {"source": "context-managed-continuation", "ephemeral": True}})
+            if operations:
+                rows.append({"role": "user", "content":
+                    "Pending operations (observations, not authorization):\n" + json.dumps(operations),
+                    "metadata": {"source": "context-managed-operations", "ephemeral": True, "persisted": True}})
+            key = digest(rows)
+            if key in attempted:
+                return None
+            attempted.add(key)
+            await fitter.set_messages(rows)
+            try:
+                result = await fit(fitter, retain)
+            except ContextLengthError as error:
+                guard()
+                if not hasattr(error, "context_input_limit"):
+                    raise
+                last_error = error
+                return None
+            guard()
+            if omitted and isinstance(result, dict):
+                result["continuation"] = "incomplete_history"
+            return result
+
+        if not omit_full:
+            result = await attempt(self._project(messages, retain, carry, unknown))
+            if result is not None:
+                return result
+        required = {i for i, row in enumerate(messages) if any(row is item for item in carry)}
+        # Keep live batches, queued receipts, and ambiguous repeated call IDs.
+        # Historical unanswered calls already have an explicit no-replay carrier.
+        interrupted = {item["call_id"] for item in unknown}
+        pending, declared, ambiguous = set(), set(), set()
+        for row in messages:
+            ids = tool_calls(row)
+            ambiguous.update(declared.intersection(ids))
+            ambiguous.update(key for key, call in ids.items() if call is None)
+            declared.update(ids)
+            pending.update(ids)
+            pending.difference_update(settled_results(row))
+        active = (pending - interrupted) | ambiguous
+        required.update(i for i, row in enumerate(messages)
+                        if active.intersection(result_ids(row) | tool_calls(row).keys()))
+        size = lambda rows: max(1, estimate_pressure(fitter, rows)) * 4
+        limit = getattr(last_error, "context_input_limit",
+                        fitter._calculate_budget(token_budget, provider)) * 4
+        for allowance in dict.fromkeys((limit, limit // 2, limit // 4, 0)):
+            _, selection = select_window(messages, len(messages), retain, allowance, self._human,
+                estimate_bytes=size, required_indices=required, strict=False)
+            if selection is None:
+                continue
+            indices = [i for start, end in selection["selectedRanges"] for i in range(start, end)]
+            rows = self._project([messages[i] for i in indices], retain, carry, unknown)
+            result = await attempt(rows, True)
+            if result is not None:
+                return result
+        if isinstance(last_error, ContextLengthError):
+            error = ContextLengthError(
+                "Required current input, instructions or unresolved tool exchange exceeds the selected "
+                "model allowance. Canonical history was not truncated; no request was dispatched.")
+            error.context_input_tokens = last_error.context_input_tokens
+            error.context_input_limit = last_error.context_input_limit
+            raise error from last_error
+        raise last_error
+
     async def get_messages_for_request(self, token_budget=None, provider=None):
         return await self.get_messages_for_request_retaining(retain_contents=[], token_budget=token_budget, provider=provider)
 
     async def get_messages_for_request_retaining(self, *, retain_contents, provider=None, token_budget=None, hard_fit=False):
+        if self.config.get("foreground_continuation") and hard_fit:
+            async def fit(fitter, retain):
+                return await fitter.get_messages_for_request_retaining(
+                    retain_contents=retain, provider=provider, token_budget=token_budget,
+                    hard_fit=True, conservative=True)
+            return await self._fit_ordinary(provider, token_budget, retain_contents, fit)
         async with self.lock:
             revision = self.revision
             try:
@@ -1136,14 +1331,30 @@ class BoundaryContextManager:
         # a fit: the caller must still prove the exact replacement with a count.
         if reason not in (None, "provider_overflow"):
             raise ValueError("Unknown measured request preparation reason")
+        self._check_stop()
         # A host may consume an explicitly requested one-shot recovery here.
         # It owns intent/Stop/storage admission; absence does not change policy.
         # The recovery entry acquires this context's lock itself.
         if self.run_pending_recovery:
             recovered = await self.run_pending_recovery(
                 provider=provider, retain_contents=retain_contents, count_view=count_view)
+            self._check_stop()
             if recovered is not None:
                 return recovered
+        if self.config.get("foreground_continuation"):
+            count_calls = 0
+            async def count(view):
+                nonlocal count_calls
+                count_calls += 1
+                return await count_view(view)
+            measurement = RequestMeasurement(count)
+            async def fit(fitter, retain):
+                return await fitter.get_measured_request_view(
+                    provider=provider, retain_contents=retain, count_view=measurement.count,
+                    fit_output=fit_output, conservative=True)
+            result = await self._fit_ordinary(provider, None, retain_contents, fit, measurement, reason)
+            result["count_calls"] = count_calls
+            return result
         async with self.lock:
             revision = self.revision
             measurement = RequestMeasurement(count_view)
@@ -1173,6 +1384,7 @@ class BoundaryContextManager:
 
 async def mount_boundary(coordinator, config):
     context = BoundaryContextManager(config, getattr(coordinator, "hooks", None))
+    context._is_cancelled = lambda: bool(getattr(getattr(coordinator, "cancellation", None), "is_cancelled", False))
     def operations():
         getter = coordinator.get_capability("context.active_operations")
         return getter() if callable(getter) else None

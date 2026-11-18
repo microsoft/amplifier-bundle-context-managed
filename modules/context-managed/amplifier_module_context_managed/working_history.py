@@ -10,8 +10,36 @@ import json
 from .errors import CompactionError
 
 
+def settled_results(row):
+    """A protocol receipt for queued work does not settle the underlying call."""
+    from .interrupted import result_ids
+    settled = result_ids(row)
+    content = row.get("content")
+    receipts = [(row.get("tool_call_id"), content)] if row.get("role") == "tool" else []
+    if isinstance(content, list):
+        receipts += [(block.get("tool_call_id") or block.get("tool_use_id"),
+                      block.get("output", block.get("content")))
+                     for block in content if isinstance(block, dict) and block.get("type") == "tool_result"]
+    def pending(body):
+        if isinstance(body, list):
+            return any(pending(block.get("text")) for block in body
+                       if isinstance(block, dict) and block.get("type") == "text")
+        try:
+            body = json.loads(body) if isinstance(body, str) else body
+        except ValueError:
+            return False
+        return isinstance(body, dict) and (
+            body.get("job_id") and body.get("status") in {"queued", "pending"}
+            or body.get("status") in {"unknown", "unconfirmed"}
+            or body.get("execution_outcome") == "unconfirmed")
+    for call_id, body in receipts:
+        if pending(body):
+            settled.discard(call_id)
+    return settled
+
+
 def exchanges(messages, human=None):
-    from .interrupted import unanswered
+    from .interrupted import result_ids, unanswered
     interrupted = {}
     for call in unanswered(messages, human) if human else ():
         interrupted.setdefault(call["continued_at"], []).append(call["call_id"])
@@ -26,12 +54,9 @@ def exchanges(messages, human=None):
         if isinstance(content, list):
             calls += [b for b in content if isinstance(b, dict) and b.get("type") in {"tool_call", "tool_use"}]
         pending.update(c["id"] for c in calls if c.get("id"))
-        if row.get("role") == "tool":
-            pending.discard(row.get("tool_call_id"))
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_result":
-                    pending.discard(block.get("tool_use_id"))
+        # Protocol grouping ends at a recorded receipt, including queued work.
+        # The ordinary caller separately requires its still-active whole group.
+        pending.difference_update(result_ids(row))
         if not pending:
             yield start, index + 1
             start = index + 1
@@ -40,7 +65,8 @@ def exchanges(messages, human=None):
         yield start, len(messages)
 
 
-def select_window(messages, end, retain, byte_budget, human, *, estimate_bytes=None):
+def select_window(messages, end, retain, byte_budget, human, *, estimate_bytes=None,
+                  required_indices=(), strict=True):
     """Required context first, then a contiguous suffix of complete exchanges.
 
     Sizing is a local selection heuristic, not permission to dispatch. A caller
@@ -51,7 +77,7 @@ def select_window(messages, end, retain, byte_budget, human, *, estimate_bytes=N
         len(json.dumps(row, ensure_ascii=False).encode()) for row in rows))
     sizes = [size([row]) for row in messages]
     first = next((i for i, row in enumerate(messages) if human(row)), None)
-    required = {i for i, row in enumerate(messages) if i >= end or i == first
+    required = set(required_indices) | {i for i, row in enumerate(messages) if i >= end or i == first
                 or row.get("role") in {"system", "developer"}
                 or (row.get("metadata") or {}).get("source") == "hook"
                 or (isinstance(row.get("content"), str) and row["content"] in retain)}
@@ -63,7 +89,7 @@ def select_window(messages, end, retain, byte_budget, human, *, estimate_bytes=N
     used = sum(sizes[i] for i in selected)
     # Reserve room for the archive notice, model tools and injected overlays.
     allowance = max(0, byte_budget - 4096)
-    if used > allowance:
+    if strict and used > allowance:
         raise CompactionError("native_recovery_required_context_oversized",
             "Required instructions, retained context or the current tool exchange exceed the recovery allowance. "
             "They were not truncated. Reduce the required context or use a larger context window.")
