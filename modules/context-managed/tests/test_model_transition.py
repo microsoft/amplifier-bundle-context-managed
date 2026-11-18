@@ -470,7 +470,8 @@ async def test_confirmed_target_progress_resumes_without_repeating_completed_cal
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
-async def test_installed_candidate_readback_reconciles_without_new_paid_calls(native):
+@pytest.mark.parametrize("remaining", [0, 16])
+async def test_installed_candidate_readback_reconciles_without_new_paid_calls(native, remaining):
     state = transition_fixture(native)
     state.fail = "install"
     with pytest.raises(CompactionError, match="recovery_install_unconfirmed"):
@@ -478,7 +479,14 @@ async def test_installed_candidate_readback_reconciles_without_new_paid_calls(na
     candidate = copy.deepcopy(state.installed[-1][0])
     state.unchanged()
     state.fail = None
-    state.kwargs.update(progress=candidate, max_calls=0)
+    binding = {"messages": len(state.ctx.messages), "sha256": digest(state.ctx.messages)}
+    state.ctx.messages.extend([
+        {"role": "assistant", "content": "Short post-install update."},
+        {"role": "user", "content": "New foreground readback only."},
+    ])
+    assert state.ctx._boundary(state.ctx.messages, []) > candidate["summary"]["throughMessage"]
+    state.kwargs.update(progress=candidate, max_calls=remaining, source_revision=binding,
+                        installed_candidate_sha256=candidate["sha256"])
     state.ctx.preserve_evidence.return_value = [
         {"kind": "fixture", "id": "new-preservation-receipt-not-a-new-install"}]
     state.admitted.clear()
@@ -488,6 +496,57 @@ async def test_installed_candidate_readback_reconciles_without_new_paid_calls(na
     assert result["outcome"] == "transitioned"
     assert state.admitted == state.saved == []
     assert state.ctx.export_checkpoint(TARGET) == candidate
+
+
+@pytest.mark.asyncio
+async def test_portable_prepay_floor_includes_all_canonical_unknown_observations():
+    state = transition_fixture(False)
+    inserted = []
+    for i in range(40):
+        inserted.extend([
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": f"unknown-op-{i}", "name": "write_file", "arguments": {"path": f"evidence-{i}"}}]},
+            {"role": "user", "content": "Later ordinary input does not settle that operation."},
+        ])
+    state.ctx.messages[4:4] = inserted
+    state.kwargs["source_checkpoint"] = state.ctx.export_checkpoint(SOURCE)
+    before = copy.deepcopy(state.ctx.messages)
+    floor_unknown_counts = []
+    async def count_view(view):
+        count = sum(f'"call_id": "unknown-op-{i}"' in str(view) for i in range(40))
+        floor_unknown_counts.append(count)
+        # The source and irreducible notice both exceed the real target limit;
+        # stripping the notice would wrongly make a paid transition look useful.
+        tokens = 25000 if count else 1000
+        return {
+            "dispatch": ChatRequest(messages=[Message(**row) for row in view], model=TARGET["model"]),
+            "budget_decision": {
+                "estimated_input_tokens": tokens, "input_limit_tokens": 20000,
+                "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": tokens}},
+        }
+    state.kwargs["count_view"] = count_view
+    with pytest.raises(CompactionError, match="native_input_oversized"):
+        await state.ctx.recover_request(**state.kwargs)
+    assert floor_unknown_counts == [40, 40]
+    assert state.admitted == state.saved == state.installed == []
+    assert state.ctx.messages == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+async def test_wrong_installed_candidate_digest_never_admits_generation(native):
+    state = transition_fixture(native)
+    state.kwargs["max_calls"] = 1
+    with pytest.raises(CompactionError, match="summary_work_paused"):
+        await state.ctx.recover_request(**state.kwargs)
+    partial = copy.deepcopy(state.saved[-1][0])
+    state.admitted.clear()
+    state.saved.clear()
+    state.kwargs.update(progress=partial, max_calls=16, installed_candidate_sha256="0" * 64)
+    with pytest.raises(CompactionError, match="transition_candidate_invalid"):
+        await state.ctx.recover_request(**state.kwargs)
+    assert state.admitted == state.saved == state.installed == []
+    state.unchanged()
 
 
 @pytest.mark.asyncio

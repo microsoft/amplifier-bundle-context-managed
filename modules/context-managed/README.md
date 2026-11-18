@@ -363,8 +363,13 @@ Both results report exact `sourceRevision`, `targetIdentity`, `requestSha256`,
 `before`, `after`, and `limit`; installed results also report checkpoint `sha256`.
 
 Confirmed target progress may be supplied through `progress` only under the same
-host journal binding. A complete candidate can be measured again with zero paid
-calls; `install` must then acknowledge a digest readback without repeating its
-write. A running reservation, lost response or uncertain install must first be
+host journal binding. For a final installed candidate, additionally pass
+`installed_candidate_sha256=<exact journal-pinned digest>`. This distinct readback
+contract preserves the supplied record's exact coverage/digest even when new
+foreground input advances the eligible boundary. It never extends generation,
+even with a positive remaining allowance. An intermediate native checkpoint or
+portable partial is not a final installed candidate. `install` must acknowledge
+the existing digest readback without repeating its write. A running reservation,
+lost response or uncertain install must first be
 reconciled by the host. Saved progress alone never settles UNKNOWN or authorizes
 replaying a model operation, checkpoint write, tool, task resume or Stop clearance.

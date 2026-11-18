@@ -11,6 +11,7 @@ from amplifier_core import ChatRequest
 
 from .checkpoint import classify_transition, digest
 from .errors import CompactionError
+from .interrupted import project as project_interrupted, unanswered
 from .recovery import _check_guard, _guarded, recover_native, settled_boundaries
 
 
@@ -22,7 +23,7 @@ FIELDS = ("summary", "summary_omitted_indices", "summary_identity", "summary_fai
 async def prepare_transition(context, *, provider, count_view, identity, save_progress,
                              install, guard, retain_contents, target_bytes, progress,
                              source_revision, source_checkpoint, admit_call, max_calls,
-                             transition_source):
+                             transition_source, installed_candidate_sha256):
     """Prepare originals or regenerate target state; activate only after fit.
 
     ``admit_call(report)`` must durably reserve the exact operation before returning
@@ -49,6 +50,7 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         record = copy.deepcopy(source_checkpoint)
         origin = copy.deepcopy(transition_source)
         progress_input, progress = progress, copy.deepcopy(progress)
+        readback_sha = installed_candidate_sha256
         originals = {key: copy.deepcopy(getattr(context, key)) for key in FIELDS}
         factory, operations = context.factory, context.active_operations
         preserve, getter, summarizer = (context.preserve_evidence,
@@ -63,6 +65,7 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                     or context.config != config or context.checkpoint_configuration() != configuration
                     or identity != target or source_checkpoint != record or transition_source != origin
                     or progress_input != progress
+                    or installed_candidate_sha256 != readback_sha
                     or context.factory is not factory or context.active_operations is not operations
                     or context.preserve_evidence is not preserve or context.checkpoint_identity is not getter
                     or context.summary_provider is not summarizer
@@ -126,6 +129,11 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         if (type(configured_cap) is not int or configured_cap < 1
                 or type(cap) is not int or not 0 <= cap <= configured_cap):
             raise ValueError("Transition max_calls must be nonnegative and within summary_max_calls")
+        if readback_sha is not None and (
+                not isinstance(progress, dict) or progress.get("sha256") != readback_sha
+                or progress.get("progress") is not None or progress.get("summary") is None):
+            raise CompactionError("transition_candidate_invalid",
+                                  "Readback requires the exact host-pinned completed candidate.")
 
         staged = BoundaryContextManager(config, context.hooks)
         staged.messages, staged.revision = copy.deepcopy(source), revision
@@ -251,6 +259,15 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 # Finish precisely the accepted source first; the appended tail
                 # stays outside this job, even if more history is now eligible.
                 end = saved_end
+            if readback_sha is not None:
+                # A final installed candidate is not unfinished generation.
+                # New foreground input may advance eligibility, but readback
+                # never extends its exact original coverage or digest.
+                through = staged.summary[0]
+                if staged._boundary(staged.messages, retain, ceiling=through) != through:
+                    raise CompactionError("transition_candidate_invalid",
+                                          "Pinned candidate crosses the current retention boundary.")
+                end = through
             if native and staged.summary:
                 # Reuse cannot silently consume newly required retained rows
                 # that the recorded target window did not leave outside.
@@ -269,7 +286,9 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                    or i == objective or id(row) in required or staged._retained_reminder(row, retain)]
         floor = BoundaryContextManager(config)
         floor.messages = copy.deepcopy(minimal)
-        _floor_count, floor_envelope = await measure(view(floor))
+        floor_view = project_interrupted(
+            view(floor), unanswered(staged.messages, staged._human))
+        _floor_count, floor_envelope = await measure(floor_view)
         count_calls += 1
         if floor_envelope["budget_decision"]["estimated_input_tokens"] > limit:
             raise CompactionError("native_input_oversized",

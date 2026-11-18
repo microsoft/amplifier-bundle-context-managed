@@ -183,7 +183,8 @@ class BoundaryContextManager:
     async def recover_request(self, *, provider, count_view, identity, save_progress,
                               install, guard, retain_contents=(), target_bytes=1_500_000,
                               progress=None, source_revision=None, source_checkpoint=None,
-                              admit_call=None, max_calls=None, transition_source=None):
+                              admit_call=None, max_calls=None, transition_source=None,
+                              installed_candidate_sha256=None):
         """Explicit verified recovery, never an automatic failure fallback.
 
         The host supplies a count-only ordinary-request callback, a synchronous
@@ -195,7 +196,8 @@ class BoundaryContextManager:
             identity=identity, save_progress=save_progress, install=install, guard=guard,
             retain_contents=retain_contents, target_bytes=target_bytes, progress=progress,
             source_revision=source_revision, source_checkpoint=source_checkpoint,
-            admit_call=admit_call, max_calls=max_calls, transition_source=transition_source)
+            admit_call=admit_call, max_calls=max_calls, transition_source=transition_source,
+            installed_candidate_sha256=installed_candidate_sha256)
 
     async def clear(self):
         await self.set_messages([])

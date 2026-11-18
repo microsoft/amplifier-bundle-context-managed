@@ -237,7 +237,8 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
 async def recover_request(context, *, provider, count_view, identity, save_progress,
                           install, guard, retain_contents=(), target_bytes=1_500_000,
                           progress=None, source_revision=None, source_checkpoint=None,
-                          admit_call=None, max_calls=None, transition_source=None):
+                          admit_call=None, max_calls=None, transition_source=None,
+                          installed_candidate_sha256=None):
     """Explicitly recover, verify and install a native checkpoint under the lock.
 
     ``count_view`` must only rebuild/count the complete ordinary ChatRequest:
@@ -270,8 +271,9 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
             identity=identity, save_progress=save_progress, install=install, guard=guard,
             retain_contents=retain_contents, target_bytes=target_bytes, progress=progress,
             source_revision=source_revision, source_checkpoint=source_checkpoint,
-            admit_call=admit_call, max_calls=max_calls, transition_source=transition_source)
-    if admit_call is not None or max_calls is not None:
+            admit_call=admit_call, max_calls=max_calls, transition_source=transition_source,
+            installed_candidate_sha256=installed_candidate_sha256)
+    if admit_call is not None or max_calls is not None or installed_candidate_sha256 is not None:
         raise ValueError("Transition call admission requires source_checkpoint")
 
     from .boundary import BoundaryContextManager
