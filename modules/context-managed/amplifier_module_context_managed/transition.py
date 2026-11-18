@@ -96,7 +96,15 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 active_source.messages = copy.deepcopy(source)
                 for key in FIELDS:
                     setattr(active_source, key, copy.deepcopy(originals[key]))
-                if active_source.export_checkpoint(record["identity"]) != record:
+                active_readback = (
+                    readback_sha is not None and isinstance(progress, dict)
+                    and progress.get("sha256") == readback_sha
+                    and progress.get("summary") is not None and progress.get("progress") is None
+                    and originals["summary_identity"] == target
+                    and originals["_summary_progress"] is None
+                    and originals["_restored_progress"] is None
+                    and active_source.export_checkpoint(target) == progress)
+                if not active_readback and active_source.export_checkpoint(record["identity"]) != record:
                     raise CompactionError("transition_source_invalid",
                                           "The supplied source record does not match the active source unit.")
         else:
@@ -184,7 +192,12 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                                       "Transitions require authoritative full-request measurement.")
             request = envelope["dispatch"]
             count, _estimate, limit, _source = measured
-            if request.model != target["model"]:
+            # Selected-provider adapters deliberately leave the loop's dispatch
+            # unchanged while applying their bound model to cached wire requests.
+            # Preserve that dispatch identity; only an absent model may use the
+            # explicitly guarded provider default, never override an explicit one.
+            effective_model = request.model if request.model is not None else provider_key[1]
+            if effective_model != target["model"]:
                 raise CompactionError("recovery_request_changed", "Target request model does not match selection.")
             if template is None:
                 template, hard_limit = request.model_copy(deep=True), limit

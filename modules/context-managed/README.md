@@ -361,6 +361,9 @@ target requests cannot re-arm the paid campaign. A completed target checkpoint
 instead returns `outcome: transitioned` / `recovery.status: installed`.
 Both results report exact `sourceRevision`, `targetIdentity`, `requestSha256`,
 `before`, `after`, and `limit`; installed results also report checkpoint `sha256`.
+The loop's `dispatch` object is not rewritten: an absent request model is accepted
+only when the guarded selected provider's default matches the exact target model.
+An explicit different request model is rejected.
 
 Confirmed target progress may be supplied through `progress` only under the same
 host journal binding. For a final installed candidate, additionally pass
@@ -373,3 +376,7 @@ the existing digest readback without repeating its write. A running reservation,
 lost response or uncertain install must first be
 reconciled by the host. Saved progress alone never settles UNKNOWN or authorizes
 replaying a model operation, checkpoint write, tool, task resume or Stop clearance.
+If the final host journal write failed after Context had already activated the
+target, the same pinned readback can reconcile only when the complete active
+export exactly equals that candidate and no active paid partial is present.
+Other active target records do not bypass source-unit validation.

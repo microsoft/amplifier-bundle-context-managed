@@ -290,6 +290,7 @@ def transition_fixture(native, *, archive=False):
     state = SimpleNamespace(ctx=ctx, model=model, old=old, saved=[], admitted=[], installed=[],
                             fail=None, limit=6000, counts=[], request_options=[],
                             target=copy.deepcopy(TARGET),
+                            request_model=TARGET["model"],
                             initial=copy.deepcopy({key: getattr(ctx, key) for key in (
                                 "summary", "summary_identity", "summary_omitted_indices",
                                 "_summary_progress", "_restored_progress", "recovery", "evidence_refs")}))
@@ -313,7 +314,7 @@ def transition_fixture(native, *, archive=False):
             raise RuntimeError("synthetic count outage")
         request = ChatRequest(
             messages=[Message(**row) for row in view],
-            model=state.target["model"], reasoning_effort="high", max_output_tokens=73,
+            model=state.request_model, reasoning_effort="high", max_output_tokens=73,
             tools=[ToolSpec(name="fixture", description="Read evidence; do not replay writes",
                             parameters={"type": "object"})],
             metadata={"channel": "exact-account-selection"})
@@ -331,7 +332,7 @@ def transition_fixture(native, *, archive=False):
     async def compact(request):
         unchanged()
         assert state.admitted[-1]["requestSha256"] == digest(request.model_dump(mode="json"))
-        assert request.model == state.target["model"]
+        assert (request.model or model.default_model) == state.target["model"]
         assert request.reasoning_effort == "high"
         if state.fail == "compact":
             raise asyncio.CancelledError()
@@ -551,6 +552,69 @@ async def test_wrong_installed_candidate_digest_never_admits_generation(native):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+@pytest.mark.parametrize("mismatch", [None, "different-record", "paid-partial", "no-pin"])
+async def test_final_journal_failure_reconciles_only_exact_active_pinned_candidate(native, mismatch):
+    state = transition_fixture(native)
+    binding = {"messages": len(state.ctx.messages), "sha256": digest(state.ctx.messages)}
+    await state.ctx.recover_request(**state.kwargs)
+    candidate = copy.deepcopy(state.installed[-1][0])
+    # Context activated B, but the host's subsequent journal COMMITTED write
+    # failed. The host still owns A + the exact installed B readback receipt.
+    if mismatch == "different-record":
+        state.ctx.evidence_refs.append({"kind": "different-active-record"})
+    elif mismatch == "paid-partial":
+        state.ctx._summary_progress = {
+            "completed": 1, "identity": copy.deepcopy(TARGET),
+            "configuration": state.ctx.checkpoint_configuration(),
+            "source_revision": {"messages": len(state.ctx.messages), "sha256": digest(state.ctx.messages)},
+        }
+    state.initial = copy.deepcopy({key: getattr(state.ctx, key) for key in state.initial})
+    state.ctx.messages.extend([
+        {"role": "assistant", "content": "Short post-activation update."},
+        {"role": "user", "content": "Reconcile existing installation, not generation."},
+    ])
+    state.kwargs.update(progress=candidate, max_calls=0, source_revision=binding,
+                        installed_candidate_sha256=None if mismatch == "no-pin" else candidate["sha256"])
+    state.admitted.clear()
+    state.saved.clear()
+    state.installed.clear()
+    if mismatch:
+        with pytest.raises(CompactionError):
+            await state.ctx.recover_request(**state.kwargs)
+        state.unchanged()
+        assert state.installed == []
+    else:
+        result = await state.ctx.recover_request(**state.kwargs)
+        assert result["recovery"]["sha256"] == candidate["sha256"]
+        assert len(state.installed) == 1  # Host callback acknowledges readback only.
+        assert state.ctx.export_checkpoint(TARGET) == candidate
+    assert state.admitted == state.saved == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+@pytest.mark.parametrize("default_model", [TARGET["model"], "different-target"])
+async def test_selected_provider_effective_model_without_mutating_original_dispatch(native, default_model):
+    state = transition_fixture(native)
+    state.request_model = None  # The real loop leaves model application to its selected provider.
+    state.model.default_model = default_model
+    if default_model != TARGET["model"]:
+        with pytest.raises(CompactionError, match="recovery_request_changed"):
+            await state.ctx.recover_request(**state.kwargs)
+        assert state.admitted == state.saved == state.installed == []
+        state.unchanged()
+    else:
+        result = await state.ctx.recover_request(**state.kwargs)
+        assert result["outcome"] == "transitioned"
+        # Surface/provider prepared-request caches depend on preserving the loop
+        # envelope and dispatch identity, not replacing it with a selected copy.
+        assert result["final_attempt"]["dispatch"].model is None
+        assert result["final_attempt"]["fixture"] == "unchanged"
+        assert state.ctx.summary_identity == TARGET
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
 @pytest.mark.parametrize("phase", ["count", "admit", "save", "install"])
 async def test_guard_rejection_at_each_async_boundary_prevents_activation(native, phase):
     state = transition_fixture(native)
@@ -604,6 +668,7 @@ async def test_source_paid_partial_is_parked_not_rebound_or_discarded(native):
     assert state.ctx.export_checkpoint(source_identity) == paid_record
     state.initial = copy.deepcopy({key: getattr(state.ctx, key) for key in state.initial})
     state.target = target_identity
+    state.request_model = target_identity["model"]
     state.model.default_model = target_identity["model"]
     state.ctx.checkpoint_identity = lambda: copy.deepcopy(target_identity)
     state.kwargs.update(identity=target_identity, source_checkpoint=copy.deepcopy(paid_record))
