@@ -189,7 +189,9 @@ class BoundaryContextManager:
                     and all(isinstance(identity.get(k), str) and identity[k]
                             for k in ("provider", "model"))
                     and self.summary is None and self._summary_progress is None
-                    and self._restored_progress is None and self._ordinary_transition is None)
+                    and self._restored_progress is None and self._ordinary_transition is None
+                    and self.summary_identity is None and not self.summary_omitted_indices
+                    and self.recovery is None and self.summary_failure is None)
 
     async def recover_request(self, *, provider, count_view, identity, save_progress,
                               install, guard, retain_contents=(), target_bytes=1_500_000,
@@ -684,7 +686,7 @@ class BoundaryContextManager:
                 revision=revision, identity=identity, system_prompt=system_prompt,
                 operations=operations)
         prior_identity = selected_identity()
-        if check_transition(prior_identity):
+        if self._ordinary_transition is not None or check_transition(prior_identity):
             return await originals_fitter(prior_identity)
         if self.config.get("durable_checkpoints") and self.preserve_evidence:
             self.evidence_refs = await self.preserve_evidence(copy.deepcopy(messages))

@@ -70,6 +70,8 @@ async def ordinary_case(native, measured=True):
                       for row in request.messages)
         if derived and not compact:
             state.derived_counts += 1
+            if state.phase == "candidate-count-error" and state.derived_counts == 1:
+                raise RuntimeError("Synthetic candidate count outage")
             if state.phase in {"count-error", "count-cancel"} and state.derived_counts == 2:
                 raise (asyncio.CancelledError() if state.phase == "count-cancel"
                        else RuntimeError("Synthetic final count outage"))
@@ -179,6 +181,23 @@ async def test_uncertain_paid_call_is_retained_and_never_automatically_rebought(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("measured", [False, True])
+async def test_completed_paid_result_survives_candidate_count_outage_without_rebuy(native, measured):
+    state = await ordinary_case(native, measured)
+    state.phase = "candidate-count-error"
+    with pytest.raises((RuntimeError, CompactionError)):
+        await state.run()
+    assert state.ctx.summary_identity == SOURCE
+    assert state.ctx._ordinary_transition is not None
+    assert state.model.complete.await_count + state.model.compact_context.await_count == 1
+    state.phase = None
+    await state.run()
+    assert state.ctx.summary_identity == TARGET
+    assert state.model.complete.await_count + state.model.compact_context.await_count == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("writer", ["durable", "zero-arg", "host-managed"])
 @pytest.mark.parametrize("native", [False, True])
 async def test_durable_legacy_or_host_managed_requires_explicit_transition_before_generation(native, writer):
@@ -212,7 +231,7 @@ async def test_native_oversized_single_window_refuses_without_batching_or_fallba
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["source", "model", "config"])
+@pytest.mark.parametrize("change", ["source", "model", "config", "provider-instance"])
 async def test_single_provisional_job_is_quarantined_instead_of_rebound(change, monkeypatch):
     state = await ordinary_case(False)
     final = RequestContext.get_measured_request_view
@@ -228,12 +247,41 @@ async def test_single_provisional_job_is_quarantined_instead_of_rebound(change, 
         state.ctx.messages[2]["content"] += " changed original"
     elif change == "model":
         state.model.default_model = "third-model"
+    elif change == "provider-instance":
+        # Same labels/defaults are not evidence of the same account adapter.
+        state.model = copy.copy(state.model)
+        async def changed_run():
+            return await state.ctx.get_messages_for_request(provider=state.model)
+        state.run = changed_run
     else:
         state.ctx.config["summary_max_output_tokens"] = 74
     with pytest.raises(CompactionError, match="summary_progress_incompatible"):
         await state.run()
     assert state.ctx._ordinary_transition is job
     state.model.complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unpaid_native_preflight_job_can_be_replaced_after_configuration_repair():
+    state = await ordinary_case(True)
+    state.compact_count = 12000
+    with pytest.raises(CompactionError, match="native_input_oversized"):
+        await state.run()
+    assert state.ctx._ordinary_transition["paid_calls"] == 0
+    state.ctx.config["native_compaction_max_output_tokens"] = 73
+    state.compact_count = 4000
+    await state.run()
+    assert state.ctx.summary_identity == TARGET
+    state.model.compact_context.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_invalid_participation_policy_refuses_before_generation():
+    state = await ordinary_case(False)
+    state.ctx.transition_policy = lambda: "mistyped-host-managed"
+    with pytest.raises(ValueError, match="transition_policy"):
+        await state.run()
+    state.model.complete.assert_not_awaited()
 
 
 def test_prepared_originals_attestation_is_pure_and_rejects_derived_or_provisional_state():
@@ -244,13 +292,35 @@ def test_prepared_originals_attestation_is_pure_and_rejects_derived_or_provision
     assert ctx.prepared_originals(SOURCE) is False
     assert ctx.prepared_originals({}) is False
     for field, value in (("summary", (3, "foreign summary")),
+                         ("summary_identity", SOURCE),
+                         ("summary_omitted_indices", [0]),
+                         ("recovery", {"source": "foreign"}),
+                         ("summary_failure", {"attempts": 1}),
                          ("_summary_progress", {"completed": 1}),
                          ("_restored_progress", {"completed": 1}),
                          ("_ordinary_transition", {"uncertain": True})):
         setattr(ctx, field, value)
         assert ctx.prepared_originals(TARGET) is False
-        setattr(ctx, field, None)
+        setattr(ctx, field, [] if field == "summary_omitted_indices" else None)
     assert (ctx.messages, ctx.checkpoint_status, ctx.summary_identity) == before
+
+
+@pytest.mark.asyncio
+async def test_covered_history_replacement_cannot_bypass_uncertain_provisional_job():
+    state = await ordinary_case(False)
+    state.phase = "paid-cancel"
+    with pytest.raises(asyncio.CancelledError):
+        await state.run()
+    job = state.ctx._ordinary_transition
+    replacement = copy.deepcopy(state.ctx.messages)
+    replacement[2]["content"] += " replaced canonical evidence"
+    await state.ctx.set_messages(replacement)
+    assert state.ctx.summary is None
+    state.phase = None
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await state.run()
+    assert state.ctx._ordinary_transition is job
+    state.model.complete.assert_awaited_once()
 
 
 @pytest.mark.asyncio
