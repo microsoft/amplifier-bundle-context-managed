@@ -555,9 +555,16 @@ async def test_wrong_installed_candidate_digest_never_admits_generation(native):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
 @pytest.mark.parametrize("mismatch", [None, "different-record", "paid-partial", "no-pin"])
-async def test_final_journal_failure_reconciles_only_exact_active_pinned_candidate(native, mismatch):
+@pytest.mark.parametrize("checkpointless", [False, True], ids=["checkpoint-backed", "canonical-originals"])
+async def test_final_journal_failure_reconciles_only_exact_active_pinned_candidate(native, mismatch, checkpointless):
     state = transition_fixture(native)
     binding = {"messages": len(state.ctx.messages), "sha256": digest(state.ctx.messages)}
+    if checkpointless:
+        state.ctx.summary = state.ctx.summary_identity = None
+        state.ctx.summary_omitted_indices = []
+        state.initial = copy.deepcopy({key: getattr(state.ctx, key) for key in state.initial})
+        state.kwargs.pop("source_checkpoint")
+        state.kwargs["transition_source"] = {"kind": "canonical-originals", "sourceRevision": binding}
     await state.ctx.recover_request(**state.kwargs)
     candidate = copy.deepcopy(state.installed[-1][0])
     # Context activated B, but the host's subsequent journal COMMITTED write

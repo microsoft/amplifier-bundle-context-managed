@@ -84,6 +84,22 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         check()
         if not config.get("durable_checkpoints") or not callable(preserve):
             raise CompactionError("recovery_evidence_required", "Transitions require host-preserved originals.")
+
+        def active_pinned_readback():
+            if not (
+                    readback_sha is not None and isinstance(progress, dict)
+                    and progress.get("sha256") == readback_sha
+                    and progress.get("summary") is not None and progress.get("progress") is None
+                    and originals["summary_identity"] == target
+                    and originals["_summary_progress"] is None
+                    and originals["_restored_progress"] is None):
+                return False
+            active = BoundaryContextManager(config)
+            active.messages = copy.deepcopy(source)
+            for key in FIELDS:
+                setattr(active, key, copy.deepcopy(originals[key]))
+            return active.export_checkpoint(target) == progress
+
         if record is not None:
             classification = classify_transition(context, record, target)
             if classification["status"] != "transition_required":
@@ -96,15 +112,7 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 active_source.messages = copy.deepcopy(source)
                 for key in FIELDS:
                     setattr(active_source, key, copy.deepcopy(originals[key]))
-                active_readback = (
-                    readback_sha is not None and isinstance(progress, dict)
-                    and progress.get("sha256") == readback_sha
-                    and progress.get("summary") is not None and progress.get("progress") is None
-                    and originals["summary_identity"] == target
-                    and originals["_summary_progress"] is None
-                    and originals["_restored_progress"] is None
-                    and active_source.export_checkpoint(target) == progress)
-                if not active_readback and active_source.export_checkpoint(record["identity"]) != record:
+                if not active_pinned_readback() and active_source.export_checkpoint(record["identity"]) != record:
                     raise CompactionError("transition_source_invalid",
                                           "The supplied source record does not match the active source unit.")
         else:
@@ -116,7 +124,8 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             binding = copy.deepcopy(origin["sourceRevision"])
             source_sha = None
             # A checkpointless fork is not an escape from admitted derived work.
-            if originals["summary"] or originals["_summary_progress"] or originals["_restored_progress"]:
+            if (any(originals[key] for key in ("summary", "_summary_progress", "_restored_progress"))
+                    and not active_pinned_readback()):
                 raise CompactionError("transition_source_invalid", "Derived source state requires its exact checkpoint.")
         if source_revision is not None:
             # The journal binds the whole admitted prefix; the source checkpoint
