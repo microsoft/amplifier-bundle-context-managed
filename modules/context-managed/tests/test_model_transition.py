@@ -1,15 +1,16 @@
 """Offline model-switch contracts; no foreground inference or tools execute."""
 import asyncio
 import copy
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from amplifier_core import ChatRequest, Message
-from amplifier_core.llm_errors import ContextLengthError
+from amplifier_core import ChatRequest, Message, ToolSpec
 
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 from amplifier_module_context_managed.checkpoint import digest
+from amplifier_module_context_managed.errors import CompactionError
 
 
 SOURCE = {"provider": "fixture-connection", "model": "source-model"}
@@ -81,10 +82,12 @@ async def test_failed_target_preparation_keeps_source_checkpoint(native, cancell
             raise asyncio.CancelledError()
         raise RuntimeError("Synthetic target count failed")
 
-    with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
+    # Without an admitted host transaction, refuse before target callbacks.
+    # Exception/cancellation recovery itself is exercised by explicit entry tests.
+    with pytest.raises(CompactionError, match="model_transition_required"):
         await ctx.get_measured_request_view(
             provider=model, retain_contents=[], count_view=count_view)
-    assert len(calls) == 1
+    assert len(calls) == 0
     assert (ctx.summary, ctx.summary_identity, ctx.summary_omitted_indices,
             ctx.evidence_refs, ctx.recovery) == source_state
     assert ctx.export_checkpoint(SOURCE) == source_record
@@ -113,10 +116,10 @@ async def test_smaller_target_final_fit_refusal_keeps_source_checkpoint(native):
             },
         }
 
-    with pytest.raises(ContextLengthError):
+    with pytest.raises(CompactionError, match="model_transition_required"):
         await ctx.get_measured_request_view(
             provider=model, retain_contents=[], count_view=count_view)
-    assert views
+    assert not views
     assert ctx.export_checkpoint(SOURCE) == source_record
     assert ctx.messages == rows()
     model.compact_context.assert_not_awaited()
@@ -227,6 +230,8 @@ def test_passive_transition_classification_validates_source_without_installing_i
         "status": "transition_required", "sourceIdentity": SOURCE,
         "targetIdentity": TARGET, "sourceRevision": record["sourceRevision"],
         "configuration": ctx.checkpoint_configuration(), "sha256": record["sha256"],
+        "validation": {"record": "verified", "canonicalPrefix": "verified",
+                       "configuration": "verified", "sourceProviderEnvelope": "unverified"},
     }
     assert (ctx.messages, ctx.summary, ctx.summary_identity) == before
     assert ctx.export_checkpoint(SOURCE) == record
@@ -263,3 +268,182 @@ def test_transition_classifier_never_upgrades_invalid_checkpoint_to_admission(in
     assert status["originalsAvailable"] is True
     assert status["code"] != "model_transition_required"
     assert (ctx.messages, ctx.summary, ctx.summary_identity) == before
+
+
+def transition_fixture(native, *, archive=False):
+    ctx = context(native=native)
+    ctx.config.update(summarize_trigger=.1, summary_max_output_tokens=73,
+                      summary_max_source_chars=3000, archive_recovery=archive)
+    ctx.messages = [
+        {"role": "system", "content": "Current safety: never replay tools."},
+        *[{"role": role, "content": f"entry-{i} " + ("settled evidence " * 70 if role == "assistant"
+                                                 else "Continue report.")}
+          for i in range(8) for role in ("user", "assistant")],
+        {"role": "user", "content": "Keep pending question q1; outcome op1 UNKNOWN."},
+        {"role": "assistant", "content": "No action has been repeated."},
+        {"role": "user", "content": "Use the selected model and retain q1/op1."},
+    ]
+    ctx.summary = (3, native_message(SOURCE["model"]) if native else "Prior source note.")
+    ctx.summary_omitted_indices = [0] if native else []
+    old = ctx.export_checkpoint(SOURCE)
+    ctx.preserve_evidence = AsyncMock(return_value=[{"kind": "fixture", "id": "full-originals"}])
+    model = provider(native=native)
+    state = SimpleNamespace(ctx=ctx, model=model, old=old, saved=[], admitted=[], installed=[],
+                            fail=None, limit=6000, counts=[], request_options=[],
+                            initial=copy.deepcopy({key: getattr(ctx, key) for key in (
+                                "summary", "summary_identity", "summary_omitted_indices",
+                                "_summary_progress", "_restored_progress", "recovery", "evidence_refs")}))
+
+    def unchanged():
+        assert {key: getattr(ctx, key) for key in state.initial} == state.initial
+
+    def size(request):
+        return len(json.dumps(request.model_dump(mode="json"), sort_keys=True))
+
+    async def budget(request, **kwargs):
+        assert "source-private-state" not in str(request)
+        count = size(request)
+        return {"estimated_input_tokens": count, "input_limit_tokens": state.limit,
+                "measurement": {"kind": "provider_count", "source": "fixture",
+                                "input_tokens": count}}
+
+    async def count_view(view):
+        unchanged()
+        if state.fail == "count":
+            raise RuntimeError("synthetic count outage")
+        request = ChatRequest(
+            messages=[Message(**row) for row in view],
+            model=TARGET["model"], reasoning_effort="high", max_output_tokens=73,
+            tools=[ToolSpec(name="fixture", description="Read evidence; do not replay writes",
+                            parameters={"type": "object"})],
+            metadata={"channel": "exact-account-selection"})
+        state.counts.append(request.model_copy(deep=True))
+        return {"dispatch": request, "budget_decision": await budget(request),
+                "fixture": "unchanged"}
+
+    async def admit(report):
+        unchanged()
+        state.admitted.append(copy.deepcopy(report))
+        if state.fail == "admit":
+            return False
+        return True
+
+    async def compact(request):
+        unchanged()
+        assert state.admitted[-1]["requestSha256"] == digest(request.model_dump(mode="json"))
+        assert request.model == TARGET["model"]
+        assert request.reasoning_effort == "high"
+        if state.fail == "compact":
+            raise asyncio.CancelledError()
+        result = native_message(TARGET["model"])
+        result["metadata"]["fixture:opaque"]["payload"] = "target-private-state"
+        return {"kind": "native", "message": result}
+
+    async def complete(request, **kwargs):
+        unchanged()
+        assert state.admitted[-1]["requestSha256"] == digest(request.model_dump(mode="json"))
+        if state.fail == "compact":
+            raise asyncio.CancelledError()
+        return SimpleNamespace(content=[SimpleNamespace(type="text",
+            text="Settled report evidence; keep originals; question q1 and op1 UNKNOWN.")])
+
+    async def save(record, report):
+        unchanged()
+        assert report["call"] == state.admitted[-1]
+        assert report["disposition"] == "completed"
+        if state.fail == "save":
+            raise OSError("synthetic atomic storage rejection")
+        state.saved.append((copy.deepcopy(record), copy.deepcopy(report)))
+
+    async def install(record, verification):
+        unchanged()
+        assert verification["sha256"] == record["sha256"]
+        state.installed.append((copy.deepcopy(record), copy.deepcopy(verification)))
+        if state.fail == "install":
+            return False
+        return {"sha256": record["sha256"]}
+
+    model.request_budget = AsyncMock(side_effect=budget)
+    model.compact_context = AsyncMock(side_effect=compact)
+    model.complete = AsyncMock(side_effect=complete)
+    state.count_view, state.admit, state.save, state.install = count_view, admit, save, install
+    state.unchanged = unchanged
+    state.kwargs = dict(provider=model, count_view=count_view, identity=TARGET,
+                        source_checkpoint=old, admit_call=admit, max_calls=16,
+                        save_progress=save, install=install, guard=lambda: None,
+                        target_bytes=2500)
+    return state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+@pytest.mark.parametrize("archive", [False, True], ids=["full-history", "archive-policy"])
+async def test_transition_batches_only_target_source_and_installs_exact_final_fit(native, archive):
+    state = transition_fixture(native, archive=archive)
+    original = copy.deepcopy(state.ctx.messages)
+    result = await state.ctx.recover_request(**state.kwargs)
+    assert result["outcome"] == "transitioned"
+    assert result["recovery"]["status"] == "installed"
+    assert state.ctx.summary_identity == TARGET
+    assert state.ctx.messages == original
+    assert state.old["identity"] == SOURCE
+    assert len(state.admitted) == len(state.saved) > 1
+    assert len(state.installed) == 1
+    assert result["measured_after"] < result["measured_before"]
+    assert "q1/op1" in str(result["base_view"])
+    assert all(row["sourceCheckpointSha256"] == state.old["sha256"] for row in state.admitted)
+    assert all(row["targetIdentity"] == TARGET for row in state.admitted)
+    assert state.ctx.export_checkpoint(TARGET) == state.installed[0][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+@pytest.mark.parametrize("failure", ["count", "admit", "compact", "save", "install"])
+async def test_explicit_transition_failure_preserves_entire_source_unit(native, failure):
+    state = transition_fixture(native)
+    state.fail = failure
+    with pytest.raises((RuntimeError, CompactionError, OSError, asyncio.CancelledError)):
+        await state.ctx.recover_request(**state.kwargs)
+    state.unchanged()
+    assert state.ctx.export_checkpoint(SOURCE) == state.old
+    if failure in {"count", "admit"}:
+        state.model.compact_context.assert_not_awaited()
+        state.model.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+async def test_irreducible_target_tail_refuses_before_any_paid_work(native):
+    state = transition_fixture(native)
+    state.ctx.messages[-1]["content"] += "required current context " * 1000
+    with pytest.raises(CompactionError, match="native_input_oversized"):
+        await state.ctx.recover_request(**state.kwargs)
+    assert state.admitted == state.saved == state.installed == []
+    state.unchanged()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+async def test_transition_call_cap_preserves_progress_without_activating_partial(native):
+    state = transition_fixture(native)
+    state.kwargs["max_calls"] = 1
+    with pytest.raises(CompactionError, match="summary_work_paused"):
+        await state.ctx.recover_request(**state.kwargs)
+    assert len(state.admitted) == len(state.saved) == 1
+    assert not state.installed
+    state.unchanged()
+
+
+@pytest.mark.asyncio
+async def test_checkpointless_originals_fork_never_fabricates_source_checkpoint():
+    state = transition_fixture(native=True)
+    ctx = state.ctx
+    ctx.summary = ctx.summary_identity = None
+    ctx.summary_omitted_indices = []
+    state.initial = copy.deepcopy({key: getattr(ctx, key) for key in state.initial})
+    binding = {"messages": len(ctx.messages), "sha256": digest(ctx.messages)}
+    state.kwargs.pop("source_checkpoint")
+    state.kwargs["transition_source"] = {"kind": "canonical-originals", "sourceRevision": binding}
+    result = await ctx.recover_request(**state.kwargs)
+    assert result["recovery"]["sourceRevision"] == binding
+    assert all(row["sourceCheckpointSha256"] is None for row in state.admitted)

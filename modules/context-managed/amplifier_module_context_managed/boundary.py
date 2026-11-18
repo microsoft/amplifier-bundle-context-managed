@@ -175,9 +175,15 @@ class BoundaryContextManager:
                 setattr(self, key, value)
         return result
 
+    def classify_checkpoint_transition(self, record, identity):
+        """Passive provenance check, not selection or paid-work admission."""
+        from .checkpoint import classify_transition
+        return classify_transition(self, record, identity)
+
     async def recover_request(self, *, provider, count_view, identity, save_progress,
                               install, guard, retain_contents=(), target_bytes=1_500_000,
-                              progress=None, source_revision=None):
+                              progress=None, source_revision=None, source_checkpoint=None,
+                              admit_call=None, max_calls=None, transition_source=None):
         """Explicit verified recovery, never an automatic failure fallback.
 
         The host supplies a count-only ordinary-request callback, a synchronous
@@ -188,7 +194,8 @@ class BoundaryContextManager:
         return await recover_request(self, provider=provider, count_view=count_view,
             identity=identity, save_progress=save_progress, install=install, guard=guard,
             retain_contents=retain_contents, target_bytes=target_bytes, progress=progress,
-            source_revision=source_revision)
+            source_revision=source_revision, source_checkpoint=source_checkpoint,
+            admit_call=admit_call, max_calls=max_calls, transition_source=transition_source)
 
     async def clear(self):
         await self.set_messages([])
@@ -632,11 +639,22 @@ class BoundaryContextManager:
             return view
         # An opted-in host commits originals before deriving a compacted view.
         # References point to its existing evidence/transcript store.
-        if self.config.get("durable_checkpoints") and self.preserve_evidence:
-            self.evidence_refs = await self.preserve_evidence(copy.deepcopy(messages))
         identity = copy.deepcopy(self.checkpoint_identity()) if self.checkpoint_identity else {
             "provider": getattr(provider, "name", type(provider).__name__),
             "model": getattr(provider, "default_model", None)}
+        # A selection change is not permission to destructively invalidate the
+        # entire accepted source unit or buy replacement work. Hosts consume an
+        # admitted transition before entering this ordinary path.
+        source_identities = [self.summary_identity] if self.summary else []
+        source_identities += [part["identity"] for part in
+                              (self._summary_progress, self._restored_progress)
+                              if part and part.get("completed")]
+        if any(source != identity for source in source_identities):
+            raise CompactionError("model_transition_required",
+                "The selected model differs from saved context. The host must "
+                "prepare a bounded transition from preserved originals before continuing.")
+        if self.config.get("durable_checkpoints") and self.preserve_evidence:
+            self.evidence_refs = await self.preserve_evidence(copy.deepcopy(messages))
         configuration = self.checkpoint_configuration()
         provider_identity = (getattr(provider, "name", type(provider).__name__),
                              getattr(provider, "default_model", None))
@@ -661,10 +679,6 @@ class BoundaryContextManager:
             if self._summary_progress["completed"]:
                 self._refuse_progress()
             self._summary_progress = None
-        if self.summary and self.summary_identity != identity:
-            self.summary = None
-            self.summary_omitted_indices = []
-            self.checkpoint_status = {"status": "stale", "reason": "Provider/model identity changed.", "originalsAvailable": True}
         fitter = self._fitter()
         if self.summary and any(isinstance(row.get("content"), str) and row["content"] in retain
                                 and not self._retained_reminder(row, retain)
@@ -1189,6 +1203,7 @@ async def mount_boundary(coordinator, config):
         coordinator.register_capability("context.checkpoint.export", context.export_checkpoint)
         coordinator.register_capability("context.checkpoint.restore", context.restore_checkpoint)
         coordinator.register_capability("context.checkpoint.status", lambda: copy.deepcopy(context.checkpoint_status))
+        coordinator.register_capability("context.checkpoint.transition", context.classify_checkpoint_transition)
         coordinator.register_capability("context.recovery.recover", context.recover_request)
         async def run_pending(**kwargs):
             callback = coordinator.get_capability("context.recovery.run_pending")
