@@ -447,3 +447,182 @@ async def test_checkpointless_originals_fork_never_fabricates_source_checkpoint(
     result = await ctx.recover_request(**state.kwargs)
     assert result["recovery"]["sourceRevision"] == binding
     assert all(row["sourceCheckpointSha256"] is None for row in state.admitted)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+async def test_confirmed_target_progress_resumes_without_repeating_completed_calls(native):
+    state = transition_fixture(native)
+    state.kwargs["max_calls"] = 1
+    with pytest.raises(CompactionError, match="summary_work_paused"):
+        await state.ctx.recover_request(**state.kwargs)
+    accepted = copy.deepcopy(state.saved[-1][0])
+    prior_requests = {row["requestSha256"] for row in state.admitted}
+    state.kwargs.update(progress=accepted, max_calls=15)
+    state.admitted.clear()
+    result = await state.ctx.recover_request(**state.kwargs)
+    assert result["outcome"] == "transitioned"
+    assert not (prior_requests & {row["requestSha256"] for row in state.admitted})
+    assert state.ctx.summary_identity == TARGET
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+async def test_installed_candidate_readback_reconciles_without_new_paid_calls(native):
+    state = transition_fixture(native)
+    state.fail = "install"
+    with pytest.raises(CompactionError, match="recovery_install_unconfirmed"):
+        await state.ctx.recover_request(**state.kwargs)
+    candidate = copy.deepcopy(state.installed[-1][0])
+    state.unchanged()
+    state.fail = None
+    state.kwargs.update(progress=candidate, max_calls=0)
+    state.admitted.clear()
+    state.saved.clear()
+    result = await state.ctx.recover_request(**state.kwargs)
+    assert result["recovery"]["sha256"] == candidate["sha256"]
+    assert result["outcome"] == "transitioned"
+    assert state.admitted == state.saved == []
+    assert state.ctx.export_checkpoint(TARGET) == candidate
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+@pytest.mark.parametrize("phase", ["count", "admit", "save", "install"])
+async def test_guard_rejection_at_each_async_boundary_prevents_activation(native, phase):
+    state = transition_fixture(native)
+    invalidated = False
+    original = {"count": state.count_view, "admit": state.admit,
+                "save": state.save, "install": state.install}[phase]
+
+    def guard():
+        if invalidated:
+            raise RuntimeError("Synthetic selection or Stop revision changed")
+
+    async def mutate(*args):
+        nonlocal invalidated
+        result = await original(*args)
+        invalidated = True
+        return result
+
+    argument = {"count": "count_view", "admit": "admit_call",
+                "save": "save_progress", "install": "install"}[phase]
+    state.kwargs.update({argument: mutate, "guard": guard})
+    # Portable persistence preserves its public safe storage-error wrapper;
+    # both outcomes must leave the accepted source unit unchanged.
+    with pytest.raises(RuntimeError, match="selection or Stop|checkpoint_persist_failed"):
+        await state.ctx.recover_request(**state.kwargs)
+    state.unchanged()
+    if phase in {"count", "admit"}:
+        state.model.complete.assert_not_awaited()
+        state.model.compact_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+async def test_source_paid_partial_is_parked_not_rebound_or_discarded(native):
+    state = transition_fixture(native)
+    # Reuse a real accepted portable partial; its entire unit is the source.
+    portable = transition_fixture(False)
+    portable.kwargs["max_calls"] = 1
+    with pytest.raises(CompactionError, match="summary_work_paused"):
+        await portable.ctx.recover_request(**portable.kwargs)
+    paid_record = portable.saved[-1][0]
+    # The selected target changes again; the old paid partial remains quarantined.
+    source_identity = copy.deepcopy(paid_record["identity"])
+    target_identity = {**TARGET, "model": "third-model"}
+    state.ctx.messages = copy.deepcopy(portable.ctx.messages)
+    state.ctx.summary = None
+    state.ctx.summary_identity = None
+    assert state.ctx.restore_checkpoint(paid_record, source_identity)["status"] == "resuming"
+    assert state.ctx.export_checkpoint(source_identity) == paid_record
+    classify = state.ctx.classify_checkpoint_transition(paid_record, target_identity)
+    assert classify["status"] == "transition_required"
+    assert state.ctx.export_checkpoint(source_identity) == paid_record
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("queued", [False, True], ids=["unanswered", "queued"])
+async def test_transition_never_infers_unresolved_or_queued_tool_completion(queued):
+    state = transition_fixture(True)
+    ctx = state.ctx
+    insertion = [
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "unresolved-operation", "name": "write_file", "arguments": {"path": "proof"}}]},
+    ]
+    if queued:
+        insertion.append({"role": "tool", "tool_call_id": "unresolved-operation",
+                          "content": '{"status":"queued","job_id":"still-running"}'})
+    ctx.messages[4:4] = insertion
+    state.old = ctx.export_checkpoint(SOURCE)
+    state.kwargs["source_checkpoint"] = state.old
+    # Preserve full originals; no method executes tools or writes a fake result.
+    before = copy.deepcopy(ctx.messages)
+    with pytest.raises(CompactionError):
+        await ctx.recover_request(**state.kwargs)
+    assert ctx.messages == before
+    assert state.admitted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+async def test_fitting_originals_does_not_resolve_unused_utility_provider(native):
+    ctx, model = context(native=native), provider(native=native)
+    old = ctx.export_checkpoint(SOURCE)
+    ctx.preserve_evidence = AsyncMock(return_value=copy.deepcopy(ctx.evidence_refs))
+    def unavailable():
+        raise RuntimeError("Unused utility provider is unavailable")
+    ctx.summary_provider = unavailable
+    async def count_view(view):
+        return {"dispatch": ChatRequest(messages=[Message(**row) for row in view],
+                                        model=TARGET["model"]),
+                "budget_decision": {"estimated_input_tokens": 1000, "input_limit_tokens": 20000,
+                    "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 1000}}}
+    result = await ctx.recover_request(provider=model, count_view=count_view, identity=TARGET,
+        source_checkpoint=old, admit_call=AsyncMock(), max_calls=0,
+        save_progress=AsyncMock(), install=AsyncMock(), guard=lambda: None)
+    assert result["outcome"] == "transition_fitted"
+
+
+@pytest.mark.asyncio
+async def test_native_regeneration_does_not_resolve_unused_utility_provider():
+    state = transition_fixture(True)
+    def unavailable():
+        raise RuntimeError("Unused utility provider is unavailable")
+    state.ctx.summary_provider = unavailable
+    result = await state.ctx.recover_request(**state.kwargs)
+    assert result["outcome"] == "transitioned"
+
+
+@pytest.mark.asyncio
+async def test_live_provider_portable_transition_requires_isolated_utility():
+    state = transition_fixture(False)
+    state.model.native_bundle_live = True
+    with pytest.raises(RuntimeError, match="separate context.summary_provider"):
+        await state.ctx.recover_request(**state.kwargs)
+    assert state.admitted == state.saved == state.installed == []
+    state.unchanged()
+
+
+@pytest.mark.asyncio
+async def test_portable_paid_prefix_resumes_after_eligible_boundary_advances():
+    state = transition_fixture(False)
+    state.kwargs["max_calls"] = 1
+    admitted_prefix = {"messages": len(state.ctx.messages), "sha256": digest(state.ctx.messages)}
+    state.kwargs["source_revision"] = admitted_prefix
+    with pytest.raises(CompactionError, match="summary_work_paused"):
+        await state.ctx.recover_request(**state.kwargs)
+    accepted = copy.deepcopy(state.saved[-1][0])
+    saved_end = accepted["sourceRevision"]["messages"]
+    # This appended normal input advances the eligible boundary within the
+    # original admitted ceiling; finish only the old paid job first.
+    state.ctx.messages.extend([
+        {"role": "assistant", "content": "Short later update."},
+        {"role": "user", "content": "Continue with new evidence still pending."},
+    ])
+    assert state.ctx._boundary(state.ctx.messages, []) > saved_end
+    state.kwargs.update(progress=accepted, max_calls=15)
+    result = await state.ctx.recover_request(**state.kwargs)
+    assert result["outcome"] == "transitioned"
+    assert state.ctx.summary[0] == saved_end
+    assert "new evidence still pending" in str(result["base_view"])

@@ -182,7 +182,7 @@ async def test_preserving_prefix_does_not_bypass_request_boundary_guards(method,
     if guard == "required_original": retain = [replacement[1]["content"]]
     if guard == "native_transport": model.validate_compacted_context = lambda row: False
     if guard == "native_count": model.request_budget = lambda *args, **kwargs: {}
-    if guard in {"native_transport", "native_count"}:
+    if guard in {"identity", "native_transport", "native_count"}:
         previous = copy.deepcopy(manager.summary)
         with pytest.raises(CompactionError):
             await manager._prepare(model, None, retain)

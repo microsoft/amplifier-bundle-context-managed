@@ -650,6 +650,11 @@ class BoundaryContextManager:
                               (self._summary_progress, self._restored_progress)
                               if part and part.get("completed")]
         if any(source != identity for source in source_identities):
+            # Preserve accepted paid-progress refusal semantics outside the
+            # explicit host transition entry (which parks this whole unit).
+            if any(part and part.get("completed") and part["identity"] != identity
+                   for part in (self._summary_progress, self._restored_progress)):
+                self._refuse_progress()
             raise CompactionError("model_transition_required",
                 "The selected model differs from saved context. The host must "
                 "prepare a bounded transition from preserved originals before continuing.")

@@ -52,6 +52,7 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         factory, operations = context.factory, context.active_operations
         preserve, getter, summarizer = (context.preserve_evidence,
                                        context.checkpoint_identity, context.summary_provider)
+        utility = utility_key = None
         provider_key = (getattr(provider, "name", type(provider).__name__),
                         getattr(provider, "default_model", None))
 
@@ -63,6 +64,12 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                     or context.factory is not factory or context.active_operations is not operations
                     or context.preserve_evidence is not preserve or context.checkpoint_identity is not getter
                     or context.summary_provider is not summarizer
+                    or utility is not None and utility_key != (
+                        getattr(utility, "name", type(utility).__name__),
+                        getattr(utility, "default_model", None))
+                    or utility is not None and summarizer is not None and utility_key != (
+                        getattr(summarizer(), "name", type(utility).__name__),
+                        getattr(summarizer(), "default_model", None))
                     or getter is not None and getter() != target
                     or provider_key != (getattr(provider, "name", type(provider).__name__),
                                         getattr(provider, "default_model", None))
@@ -107,8 +114,8 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         configured_cap = config.get("summary_max_calls", 16)
         cap = configured_cap if max_calls is None else max_calls
         if (type(configured_cap) is not int or configured_cap < 1
-                or type(cap) is not int or not 0 < cap <= configured_cap):
-            raise ValueError("Transition max_calls must be positive and within summary_max_calls")
+                or type(cap) is not int or not 0 <= cap <= configured_cap):
+            raise ValueError("Transition max_calls must be nonnegative and within summary_max_calls")
 
         staged = BoundaryContextManager(config, context.hooks)
         staged.messages, staged.revision = copy.deepcopy(source), revision
@@ -195,7 +202,7 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             for key in FIELDS:
                 setattr(context, key, copy.deepcopy(getattr(candidate, key)))
 
-        if initial["budget_decision"]["estimated_input_tokens"] <= limit:
+        if progress is None and initial["budget_decision"]["estimated_input_tokens"] <= limit:
             final_view = view(staged)
             check()
             result = result_for(final_view, initial, before, "prepared-originals")
@@ -208,10 +215,33 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         end = staged._boundary(staged.messages, retain, ceiling=binding["messages"])
         if not end:
             raise CompactionError("recovery_no_eligible_work", "No settled prefix can be transitioned.")
+        native = callable(getattr(provider, "supports_native_compaction", None)) and provider.supports_native_compaction()
+        if progress is not None:
+            restored = staged.restore_checkpoint(copy.deepcopy(progress), target)
+            if restored["status"] not in {"restored", "resuming"}:
+                raise CompactionError("summary_progress_incompatible", "Target progress is incompatible.")
+            if staged.summary and staged.summary[0] > end:
+                raise CompactionError("summary_progress_incompatible", "Target progress crosses the protected prefix.")
+            if (staged.summary and isinstance(staged.summary[1], dict) != native
+                    or native and staged._restored_progress):
+                raise CompactionError("summary_progress_incompatible",
+                                      "Target progress uses an incompatible compaction method.")
+            if staged._restored_progress:
+                saved_end = staged._restored_progress["source_revision"]["messages"]
+                if (saved_end > end or staged._boundary(staged.messages, retain,
+                                                       ceiling=saved_end) != saved_end):
+                    raise CompactionError("summary_progress_incompatible",
+                                          "Portable progress crosses the protected boundary.")
+                # Finish precisely the accepted source first; the appended tail
+                # stays outside this job, even if more history is now eligible.
+                end = saved_end
+            staged.evidence_refs = copy.deepcopy(refs)
         required = {id(row) for row in carry}
+        objective = next((i for i, row in enumerate(staged.messages)
+                          if staged._human(row)), None) if not native else None
         minimal = [row for i, row in enumerate(staged.messages)
                    if i >= end or row.get("role") in {"system", "developer"}
-                   or id(row) in required or staged._retained_reminder(row, retain)]
+                   or i == objective or id(row) in required or staged._retained_reminder(row, retain)]
         floor = BoundaryContextManager(config)
         floor.messages = copy.deepcopy(minimal)
         _floor_count, floor_envelope = await measure(view(floor))
@@ -241,6 +271,8 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         class BoundedProvider:
             def __init__(self, original):
                 self.original = original
+                if not callable(getattr(original, "request_budget", None)):
+                    self.request_budget = None
 
             def __getattr__(self, name):
                 return getattr(self.original, name)
@@ -263,16 +295,6 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             if ack is False:
                 raise CompactionError("checkpoint_persist_failed", "The host refused transition progress.")
 
-        native = callable(getattr(provider, "supports_native_compaction", None)) and provider.supports_native_compaction()
-        if progress is not None:
-            restored = staged.restore_checkpoint(copy.deepcopy(progress), target)
-            if restored["status"] not in {"restored", "resuming"}:
-                raise CompactionError("summary_progress_incompatible", "Target progress is incompatible.")
-            if staged.summary and staged.summary[0] > end:
-                raise CompactionError("summary_progress_incompatible", "Target progress crosses the protected prefix.")
-            # Rebind only evidence refs returned by this preservation callback,
-            # never target source/generation/progress fingerprints.
-            staged.evidence_refs = copy.deepcopy(refs)
         complete_progress = (staged.summary is not None and staged.summary[0] == end
                              and not staged._restored_progress)
         if complete_progress:
@@ -291,6 +313,12 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 save_progress=save, target_bytes=target_bytes, progress=progress,
                 through_message=end, exclude_indices=excluded, guard=check)
         else:
+            utility = summarizer() if summarizer else provider
+            utility_key = (getattr(utility, "name", type(utility).__name__),
+                           getattr(utility, "default_model", None))
+            check()
+            if getattr(utility, "native_bundle_live", False):
+                raise RuntimeError("Native live providers require a separate context.summary_provider for compaction")
             async def persist():
                 record = staged.export_checkpoint(target)
                 if record is None:
@@ -299,7 +327,6 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             staged.persist_checkpoint = persist
             # Existing portable generation, prompt/source partitioning, output
             # policy, progress compatibility and no-native-fallback semantics.
-            utility = summarizer() if summarizer else provider
             portable = BoundedProvider(utility)
             portable_source = staged._assembled(staged.messages[:end], staged.summary,
                                                retain, carry, staged.summary_omitted_indices)
