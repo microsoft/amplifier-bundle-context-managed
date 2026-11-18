@@ -597,6 +597,9 @@ class BoundaryContextManager:
                         stats["completed_fragments_this_pass"] -= 1
                         self._summary_progress_stats(stats, progress)
                         if isinstance(exc, (asyncio.CancelledError, CompactionError)):
+                            if input_key is not None and not isinstance(exc, asyncio.CancelledError):
+                                raise CompactionError("checkpoint_persist_failed",
+                                    "Host storage did not accept the completed summary piece.") from exc
                             raise
                         raise CompactionError("checkpoint_persist_failed", "The host did not save completed summary progress. Restore checkpoint storage and retry.") from exc
                 await self._emit("context:compaction_progress", completed_parts=progress["completed"],
@@ -833,7 +836,14 @@ class BoundaryContextManager:
                     self._refuse_progress()
                 self._summary_progress = None
                 self._restored_progress = None
-            summarizer = provider if native_supported else self.summary_provider() if self.summary_provider else provider
+            try:
+                summarizer = provider if native_supported else self.summary_provider() if self.summary_provider else provider
+            except Exception as error:
+                if ordinary:
+                    check_request_contract()
+                    raise CompactionError("summary_provider_unavailable",
+                        "The optional summary provider is unavailable; no compaction was dispatched.") from error
+                raise
             summary_provider_identity = (getattr(summarizer, "name", type(summarizer).__name__),
                                          getattr(summarizer, "default_model", None))
 
@@ -943,6 +953,9 @@ class BoundaryContextManager:
                     raise CompactionError("previous_failure", "Compaction of this history previously failed. Correct the reported cause or wait for the retry cooldown; the conversation has not advanced.", retryable=failure["retryable"])
         if should_summarize:
             if not native_supported and getattr(summarizer, "native_bundle_live", False):
+                if ordinary:
+                    raise CompactionError("summary_provider_unavailable",
+                        "No separate utility provider is configured; optional compaction was not dispatched.")
                 raise RuntimeError("Native live providers require a separate context.summary_provider for compaction")
             self.is_compacting = True
             await self._emit("context:compaction_started", revision=revision, through_message=end,
@@ -1277,7 +1290,7 @@ class BoundaryContextManager:
                         fitter._calculate_budget(token_budget, provider)) * 4
         for allowance in dict.fromkeys((limit, limit // 2, limit // 4, 0)):
             _, selection = select_window(messages, len(messages), retain, allowance, self._human,
-                estimate_bytes=size, required_indices=required, strict=False)
+                estimate_bytes=size, required_indices=required, strict=False, link_results=True)
             if selection is None:
                 continue
             indices = [i for start, end in selection["selectedRanges"] for i in range(start, end)]

@@ -66,7 +66,7 @@ def exchanges(messages, human=None):
 
 
 def select_window(messages, end, retain, byte_budget, human, *, estimate_bytes=None,
-                  required_indices=(), strict=True):
+                  required_indices=(), strict=True, link_results=False):
     """Required context first, then a contiguous suffix of complete exchanges.
 
     Sizing is a local selection heuristic, not permission to dispatch. A caller
@@ -81,11 +81,30 @@ def select_window(messages, end, retain, byte_budget, human, *, estimate_bytes=N
                 or row.get("role") in {"system", "developer"}
                 or (row.get("metadata") or {}).get("source") == "hook"
                 or (isinstance(row.get("content"), str) and row["content"] in retain)}
-    units = list(exchanges(messages, human))
+    units = [set(range(start, stop)) for start, stop in exchanges(messages, human)]
+    if link_results:
+        from .interrupted import calls, result_ids
+        # A background call may have both a queued receipt and a later final
+        # result. Join their protocol groups without requiring unrelated rows
+        # between them. No selected late result may lose its original batch.
+        owners = {}
+        for unit in units:
+            ids = set().union(*(result_ids(messages[i]) | calls(messages[i]).keys() for i in unit))
+            linked = [owners[key] for key in ids if key in owners]
+            for other in linked:
+                unit.update(other)
+            for key in list(owners):
+                if any(owners[key] is other for other in linked):
+                    owners[key] = unit
+            for key in ids:
+                owners[key] = unit
+        # Earlier units now referenced by a merged unit are redundant.
+        units = [unit for n, unit in enumerate(units)
+                 if not any(unit <= later for later in units[n + 1:])]
     selected = set()
-    for start, stop in units:
-        if any(i in required for i in range(start, stop)):
-            selected.update(range(start, stop))
+    for unit in units:
+        if required.intersection(unit):
+            selected.update(unit)
     used = sum(sizes[i] for i in selected)
     # Reserve room for the archive notice, model tools and injected overlays.
     allowance = max(0, byte_budget - 4096)
@@ -93,8 +112,8 @@ def select_window(messages, end, retain, byte_budget, human, *, estimate_bytes=N
         raise CompactionError("native_recovery_required_context_oversized",
             "Required instructions, retained context or the current tool exchange exceed the recovery allowance. "
             "They were not truncated. Reduce the required context or use a larger context window.")
-    for start, stop in reversed(units):
-        missing = set(range(start, stop)) - selected
+    for unit in reversed(units):
+        missing = unit - selected
         cost = sum(sizes[i] for i in missing)
         if used + cost > allowance:
             break

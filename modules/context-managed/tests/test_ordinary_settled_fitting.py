@@ -435,3 +435,58 @@ async def test_native_count_contract_change_prevents_paid_dispatch(mutation):
     with pytest.raises(RuntimeError):
         await measured(context, model)
     model.compact_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("large", [False, True])
+async def test_queued_then_appended_final_result_keeps_declaration_and_parallel_group(large):
+    rows = history() + [{"role": "assistant", "content": "", "tool_calls": [
+        {"id": "async-call", "name": "write", "arguments": {"large": "x" * (24000 if large else 10)}},
+        {"id": "async-sibling", "name": "read", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "async-sibling", "content": "Complete sibling"},
+        {"role": "tool", "tool_call_id": "async-call", "content": json.dumps({
+            "job_id": "job-original", "status": "queued"})},
+        {"role": "assistant", "content": "Waiting for original job."},
+        {"role": "tool", "tool_call_id": "async-call", "content": json.dumps({
+            "job_id": "job-original", "status": "completed", "output": "Final result"})},
+        {"role": "user", "content": "Current status only"}]
+    context = await manager(rows)
+    result = await measured(context, Provider())
+    view = result["base_view"]
+    assert_protocol(view)
+    if "async-call" in str(view):
+        assert "async-sibling" in str(view) and "Complete sibling" in str(view)
+    assert await context.get_messages() == rows
+
+
+@pytest.mark.asyncio
+async def test_missing_optional_utility_provider_does_not_block_ordinary_response():
+    context = await manager(history())
+    def missing():
+        raise RuntimeError("Host has no utility provider")
+    context.summary_provider = missing
+    model = Provider()
+    result = await measured(context, model)
+    await model.complete(result["final_attempt"]["dispatch"])
+    assert len(model.completed) == 1 and model.summaries == 0
+
+
+@pytest.mark.asyncio
+async def test_storage_callback_compaction_error_still_blocks_fallback():
+    from amplifier_module_context_managed.errors import CompactionError
+    context = await manager(history(), durable_checkpoints=True)
+    utility = Provider()
+    async def budget(request, **kwargs):
+        return {"estimated_input_tokens": 100, "input_limit_tokens": 1_000_000,
+            "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 100}}
+    async def complete(request, **kwargs):
+        utility.summaries += 1
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text="A returned summary")])
+    utility.request_budget, utility.complete = budget, complete
+    context.summary_provider = lambda: utility
+    context.preserve_evidence = AsyncMock(return_value=[])
+    context.persist_checkpoint = AsyncMock(side_effect=CompactionError("native_failed", "Storage failed"))
+    model = Provider()
+    with pytest.raises(CompactionError, match="checkpoint_persist_failed"):
+        await measured(context, model)
+    assert utility.summaries == 1 and not model.completed
