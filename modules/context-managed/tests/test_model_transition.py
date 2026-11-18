@@ -9,6 +9,7 @@ from amplifier_core import ChatRequest, Message
 from amplifier_core.llm_errors import ContextLengthError
 
 from amplifier_module_context_managed.boundary import BoundaryContextManager
+from amplifier_module_context_managed.checkpoint import digest
 
 
 SOURCE = {"provider": "fixture-connection", "model": "source-model"}
@@ -164,3 +165,53 @@ def test_restart_does_not_admit_foreign_checkpoint_as_target_state(native, inval
     assert status["originalsAvailable"] is True
     assert restored.summary is None
     assert restored.messages == ctx.messages
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "opaque"])
+def test_passive_transition_classification_validates_source_without_installing_it(native):
+    ctx = context(native=native)
+    record = ctx.export_checkpoint(SOURCE)
+    before = copy.deepcopy((ctx.messages, ctx.summary, ctx.summary_identity))
+    classify = getattr(ctx, "classify_checkpoint_transition", None)
+    assert callable(classify), "Host needs structured identity-only transition provenance"
+    status = classify(record, TARGET)
+    assert status == {
+        "status": "transition_required", "sourceIdentity": SOURCE,
+        "targetIdentity": TARGET, "sourceRevision": record["sourceRevision"],
+        "configuration": ctx.checkpoint_configuration(), "sha256": record["sha256"],
+    }
+    assert (ctx.messages, ctx.summary, ctx.summary_identity) == before
+    assert ctx.export_checkpoint(SOURCE) == record
+
+
+@pytest.mark.parametrize("invalid", [
+    "digest", "canonical-prefix", "configuration", "forged-configuration",
+    "opaque-envelope", "target-identity",
+])
+def test_transition_classifier_never_upgrades_invalid_checkpoint_to_admission(invalid):
+    ctx = context(native=True)
+    record = ctx.export_checkpoint(SOURCE)
+    target = copy.deepcopy(TARGET)
+    if invalid == "digest":
+        record["summary"]["message"]["content"] = "Tampered evidence"
+    elif invalid == "canonical-prefix":
+        ctx.messages[1]["content"] = "Different canonical objective"
+    elif invalid == "configuration":
+        ctx.config["summary_target_tokens"] = 999
+    elif invalid == "forged-configuration":
+        # A self-consistent foreign record is not proof of the trusted contract.
+        record["configuration"] = digest({"config": "attacker-selected"})
+    elif invalid == "opaque-envelope":
+        record["summary"]["message"]["metadata"]["persisted"] = False
+    else:
+        target["model"] = None
+    if invalid in {"forged-configuration", "opaque-envelope"}:
+        record["sha256"] = digest({k: v for k, v in record.items() if k != "sha256"})
+    before = copy.deepcopy((ctx.messages, ctx.summary, ctx.summary_identity))
+    classify = getattr(ctx, "classify_checkpoint_transition", None)
+    assert callable(classify), "Host needs structured identity-only transition provenance"
+    status = classify(record, target)
+    assert status["status"] == "rejected"
+    assert status["originalsAvailable"] is True
+    assert status["code"] != "model_transition_required"
+    assert (ctx.messages, ctx.summary, ctx.summary_identity) == before
