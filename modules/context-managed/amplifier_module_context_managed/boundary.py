@@ -638,7 +638,7 @@ class BoundaryContextManager:
         return count if measured.get("kind") == "provider_count" and type(count) is int and count >= 0 else None
 
     async def _prepare(self, provider, token_budget, retain, measurement=None, *, reason=None,
-                       ordinary=False, snapshot=None):
+                       ordinary=False, snapshot=None, on_preserved=None):
         messages, revision = copy.deepcopy(self.messages), self.revision
         self._check_stop()
         input_key = next(((i, digest(row)) for i, row in reversed(list(enumerate(messages)))
@@ -669,6 +669,8 @@ class BoundaryContextManager:
                 if ordinary:
                     raise RuntimeError("Host evidence preservation failed; no foreground fitting was attempted") from error
                 raise
+        if on_preserved is not None:
+            on_preserved()
         identity = copy.deepcopy(self.checkpoint_identity()) if self.checkpoint_identity else {
             "provider": getattr(provider, "name", type(provider).__name__),
             "model": getattr(provider, "default_model", None)}
@@ -1191,6 +1193,17 @@ class BoundaryContextManager:
                         or (self.active_operations() if self.active_operations else None) != operations):
                     raise RuntimeError("Request contract changed during ordinary fitting")
 
+            def bind_preserved_identity():
+                nonlocal selected
+                # The host's mandatory preserve step lazily resolves identity
+                # and restores its checkpoint. Bind only an absent identity at
+                # this boundary, before counting or any paid model operation.
+                # Already-bound identity and every other contract field must
+                # still match; later awaits cannot rebind this value.
+                if selected[0] is None:
+                    selected = (copy.deepcopy(identity()[0]), *selected[1:])
+                guard()
+
             guard()
             prompt = await factory() if factory else None
             guard()
@@ -1198,7 +1211,7 @@ class BoundaryContextManager:
                 try:
                     fitter, protected = await self._prepare(
                         provider, token_budget, retain, measurement, reason=reason, ordinary=True,
-                        snapshot=(prompt, operations))
+                        snapshot=(prompt, operations), on_preserved=bind_preserved_identity)
                     checkpoint = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
                     result = await fit(fitter, protected)
                 except (CompactionError, ContextLengthError) as error:

@@ -490,3 +490,75 @@ async def test_storage_callback_compaction_error_still_blocks_fallback():
     with pytest.raises(CompactionError, match="checkpoint_persist_failed"):
         await measured(context, model)
     assert utility.summaries == 1 and not model.completed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("oversized", [False, True])
+async def test_host_preservation_binds_initially_absent_identity_before_counting(oversized):
+    rows = history() if oversized else [{"role": "user", "content": "SEED-EFFECT: save once."}]
+    context = await manager(rows, durable_checkpoints=True)
+    model = Provider()
+    state = {"identity": None}
+    context.checkpoint_identity = lambda: copy.deepcopy(state["identity"])
+    async def preserve(messages):
+        assert messages == rows
+        # ContextContinuity.preserve refreshes the selected provider identity
+        # before the very first request and any lazy checkpoint restoration.
+        state["identity"] = {"provider": model.name, "model": model.default_model}
+        return []
+    context.preserve_evidence = AsyncMock(side_effect=preserve)
+    for _ in range(2):
+        result = await measured(context, model)
+        await model.complete(result["final_attempt"]["dispatch"])
+    assert len(model.completed) == 2
+    assert context.preserve_evidence.await_count == 2
+    assert await context.get_messages() == rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["identity", "history", "config", "model", "operations", "stop"])
+async def test_host_preservation_cannot_change_bound_contract_or_bypass_other_guards(mutation):
+    import asyncio
+    rows = [{"role": "user", "content": "SEED-EFFECT: save once."}]
+    context = await manager(rows, durable_checkpoints=True)
+    model = Provider()
+    state = {"identity": {"provider": model.name, "model": model.default_model}}
+    context.checkpoint_identity = lambda: copy.deepcopy(state["identity"])
+    async def preserve(messages):
+        if mutation == "identity":
+            state["identity"]["model"] = "Changed selected model"
+        elif mutation == "history":
+            await context.add_message({"role": "user", "content": "New input"})
+        elif mutation == "config":
+            context.config["max_tokens"] = 12345
+        elif mutation == "model":
+            model.default_model = "Changed provider model"
+        elif mutation == "operations":
+            context.active_operations = lambda: [{"job_id": "New current job"}]
+        else:
+            context._is_cancelled = lambda: True
+        return []
+    context.preserve_evidence = preserve
+    with pytest.raises((RuntimeError, asyncio.CancelledError)):
+        await measured(context, model)
+    assert not model.counted and not model.completed and not model.summaries
+
+
+@pytest.mark.asyncio
+async def test_lazy_host_identity_is_frozen_before_final_measurement():
+    rows = [{"role": "user", "content": "SEED-EFFECT: save once."}]
+    context = await manager(rows, durable_checkpoints=True)
+    model = Provider()
+    state = {"identity": None}
+    context.checkpoint_identity = lambda: copy.deepcopy(state["identity"])
+    async def preserve(messages):
+        state["identity"] = {"provider": model.name, "model": model.default_model}
+        return []
+    context.preserve_evidence = preserve
+    async def count(view):
+        state["identity"]["model"] = "Changed while counting"
+        request = ChatRequest(messages=[Message(**row) for row in view])
+        return {"dispatch": request, "budget_decision": await model.request_budget(request)}
+    with pytest.raises(RuntimeError, match="contract changed"):
+        await context.get_measured_request_view(provider=model, retain_contents=[], count_view=count)
+    assert len(model.counted) == 1 and not model.completed
