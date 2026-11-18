@@ -324,6 +324,24 @@ async def test_covered_history_replacement_cannot_bypass_uncertain_provisional_j
 
 
 @pytest.mark.asyncio
+async def test_host_recovery_entry_cannot_bypass_uncertain_ordinary_job():
+    state = await ordinary_case(False)
+    state.phase = "paid-cancel"
+    with pytest.raises(asyncio.CancelledError):
+        await state.run()
+    callback = AsyncMock(side_effect=AssertionError("Host intent must not bypass retained UNKNOWN"))
+    state.ctx.run_pending_recovery = callback
+    with pytest.raises(CompactionError, match="transition_operation_unconfirmed"):
+        await state.run()
+    callback.assert_not_awaited()
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await state.ctx.recover_request(provider=state.model, count_view=callback,
+            identity=TARGET, save_progress=callback, install=callback, guard=lambda: None)
+    callback.assert_not_awaited()
+    state.model.complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_portable_completed_piece_survives_later_preflight_cancellation_without_rebuy():
     state = await ordinary_case(False)
     state.ctx.config.update(summary_max_source_chars=3000, summary_max_calls=16)

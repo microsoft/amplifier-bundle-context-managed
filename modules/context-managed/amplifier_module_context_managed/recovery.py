@@ -265,6 +265,10 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
     Returns the ordinary measured-view envelope plus bounded recovery evidence.
     Only an explicit host intent may invoke it during ordinary preparation.
     """
+    if context._ordinary_transition is not None:
+        raise CompactionError("summary_progress_incompatible",
+            "A provisional ordinary transition is still retained. Reconcile it "
+            "before starting a separate host recovery transaction.")
     if source_checkpoint is not None or transition_source is not None:
         from .transition import prepare_transition
         return await prepare_transition(context, provider=provider, count_view=count_view,

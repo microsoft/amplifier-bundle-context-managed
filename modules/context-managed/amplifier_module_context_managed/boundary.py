@@ -1197,7 +1197,7 @@ class BoundaryContextManager:
         # A host may consume an explicitly requested one-shot recovery here.
         # It owns intent/Stop/storage admission; absence does not change policy.
         # The recovery entry acquires this context's lock itself.
-        if self.run_pending_recovery:
+        if self.run_pending_recovery and self._ordinary_transition is None:
             recovered = await self.run_pending_recovery(
                 provider=provider, retain_contents=retain_contents, count_view=count_view)
             if recovered is not None:
