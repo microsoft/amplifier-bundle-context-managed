@@ -187,6 +187,10 @@ async def test_preserving_prefix_does_not_bypass_request_boundary_guards(method,
         with pytest.raises(CompactionError):
             await manager._prepare(model, None, retain)
         assert manager.summary == previous
+    elif guard == "identity":
+        previous = copy.deepcopy(manager.summary)
+        await manager._prepare(model, None, retain)
+        assert manager.summary == previous  # Inactive; originals-only fitting.
     else:
         await manager._prepare(model, None, retain)
         assert manager.summary is None

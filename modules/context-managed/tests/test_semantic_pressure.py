@@ -1,5 +1,6 @@
 """Semantic triggers follow the complete request, not transcript byte size."""
 
+import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -7,6 +8,7 @@ import pytest
 from amplifier_module_context_managed.errors import CompactionError
 
 from amplifier_module_context_managed.boundary import BoundaryContextManager
+from amplifier_module_context_managed.checkpoint import digest
 
 
 def history():
@@ -161,10 +163,14 @@ async def test_contract_change_during_final_measurement_cannot_commit_or_dispatc
     context.checkpoint_identity = lambda: identity
     summary_connection = [provider]
     context.summary_provider = lambda: summary_connection[0]
+    old_configuration = context.checkpoint_configuration()
+    old_identity = copy.deepcopy(identity)
+    paid = []
 
     async def count_view(view):
         if "Continuation note" not in str(view):
             return envelope(16000)
+        paid.append(copy.deepcopy(context._summary_progress))
         # Final preflight can await a remote count while a settings save changes
         # the intended contract. The old note/request must remain unpublished.
         if change == "configuration":
@@ -182,6 +188,28 @@ async def test_contract_change_during_final_measurement_cannot_commit_or_dispatc
         await context.get_measured_request_view(provider=provider, retain_contents=[], count_view=count_view)
     provider.complete.assert_awaited_once()
     assert context.summary is None
-    assert context._summary_progress is None
+    # Accepted paid work is quarantined, not deleted, relabelled or published
+    # under a contract that changed during final request measurement.
+    assert len(paid) == 1
+    progress = context._summary_progress
+    assert progress == paid[0]
+    assert progress["completed"] == progress["calls"] == 1
+    assert progress["pending"] == progress["segments"] == []
+    assert progress["source_revision"] == {"messages": 3, "sha256": digest(original[:3])}
+    assert progress["identity"] == old_identity
+    assert progress["configuration"] == old_configuration
+    assert progress["provider"] == ("fixture", "unchanged")
+    assert progress["generation_contract"]["model"] == "unchanged"
+    assert progress["text"] == provider.complete.return_value.content[0].text
+    # Retrying the changed target cannot buy replacement work or dispatch the
+    # old piece. This legacy fixture intentionally uses `connection`, not a
+    # valid export identity; no fake durable checkpoint is needed for the guard.
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await context.get_measured_request_view(provider=provider, retain_contents=[], count_view=count_view)
+    provider.complete.assert_awaited_once()
+    if summary_connection[0] is not provider:
+        summary_connection[0].complete.assert_not_awaited()
+    assert context._summary_progress == paid[0]
+    assert context.summary is None
     assert not context.is_compacting
     assert await context.get_messages() == original

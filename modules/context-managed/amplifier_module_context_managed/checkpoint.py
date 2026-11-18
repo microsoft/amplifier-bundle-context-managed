@@ -14,6 +14,45 @@ def digest(value):
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def classify_transition(context, record, identity):
+    """Validate against host originals/config, without installing foreign state.
+
+    The host must additionally bind the actual saved bytes and explicit selection
+    to its admission journal. A record's self-declared identity is not authority.
+    No provider is contacted, including to validate source-native transport.
+    """
+    from .boundary import BoundaryContextManager
+
+    def rejected(code, reason):
+        return {"status": "rejected", "code": code, "reason": reason,
+                "originalsAvailable": True}
+
+    valid_identity = lambda value: (isinstance(value, dict)
+        and all(isinstance(value.get(key), str) and value[key].strip()
+                for key in ("provider", "model")))
+    if not valid_identity(identity):
+        return rejected("transition_identity_invalid", "Target identity is incomplete.")
+    source_identity = record.get("identity") if isinstance(record, dict) else None
+    if not valid_identity(source_identity):
+        return rejected("transition_source_invalid", "Source identity is incomplete.")
+    scratch = BoundaryContextManager(copy.deepcopy(context.config))
+    scratch.messages = copy.deepcopy(context.messages)
+    status = scratch.restore_checkpoint(copy.deepcopy(record), source_identity)
+    if status["status"] not in {"restored", "resuming"}:
+        return rejected("transition_source_invalid", status["reason"])
+    if source_identity == identity:
+        return {"status": "compatible", "sha256": record["sha256"]}
+    return {"status": "transition_required",
+            "sourceIdentity": copy.deepcopy(source_identity),
+            "targetIdentity": copy.deepcopy(identity),
+            "sourceRevision": copy.deepcopy(record["sourceRevision"]),
+            "configuration": context.checkpoint_configuration(),
+            "sha256": record["sha256"],
+            "validation": {"record": "verified", "canonicalPrefix": "verified",
+                           "configuration": "verified",
+                           "sourceProviderEnvelope": "unverified"}}
+
+
 def export_checkpoint(context, identity):
     if not context.config.get("durable_checkpoints"):
         context._checkpoint_prefix_digest.clear()

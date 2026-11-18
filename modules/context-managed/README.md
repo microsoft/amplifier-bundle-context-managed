@@ -296,3 +296,127 @@ returns the measured-view result; failure stops that preparation. An optional
 appended input stays outside it. The host owns intent persistence, source/model/
 configuration/Stop checks, and uncertain-outcome reconciliation. Overflow must
 not create or re-arm an intent, submit input, resume a task, or replay a tool.
+
+### Deliberate foreground model transitions
+
+Selecting another model alone does not run a model or migrate a checkpoint.
+Ordinary preparation can count and return fitting canonical originals, keeping
+the incompatible completed source unit inactive and intact without generating
+or persisting a replacement. Hosts explicitly implementing the journal admission
+protocol register `context.transition_policy()` returning `host-managed`; the
+presence of a mounted `run_pending` wrapper alone is not participation.
+For other **non-durable hosts without a persistence callback**, ordinary preparation
+can regenerate from originals using the existing portable or single-window native
+compaction policy. Trigger, output allowance and per-preparation call caps are
+unchanged; it does not invoke chronological native recovery, archive-omission
+migration or a native-error portable fallback.
+
+Ordinary regeneration holds the source unit inactive and one provisional target
+job in memory until final full-request fitting and source/selection/configuration
+guards succeed. Completed target pieces/candidates survive a later failure or
+cancellation within that instance and are not repurchased or rebound. A paid call
+with an unconfirmed outcome refuses automatic continuation. Changed source,
+configuration, or target quarantines that one job rather than replacing it.
+This memory-only behavior does **not** promise restart durability or recover
+private results after the host discards the Context instance.
+
+**Durable legacy-host compatibility limit:** a nonparticipating host configured
+with `durable_checkpoints` or a zero-argument `persist_checkpoint` callback can still
+return fitting originals without paid work. If regeneration is required, it raises
+`transition_persistence_required` **before generation**, preserving the old
+checkpoint. Such hosts must integrate the existing explicit transition
+`source_checkpoint`/`save_progress`/`install` transaction: the legacy callback
+cannot safely save detached target pieces while retaining the source unit.
+It is never repointed to a clone, called to export the old mounted context as if
+it saved target progress, or treated as a fake acknowledgement. This deliberately
+does not preserve c18's destructive overwrite behavior for durable model switches.
+Single-window native overflow still refuses without extra recovery batches.
+Incompatible
+paid portable progress retains the existing `summary_progress_incompatible`
+refusal. A host may admit a bounded transition on a genuine foreground input
+through the same `context.recovery.recover` entry, before ordinary preparation.
+This is not an automatic overflow fallback or permission to retry UNKNOWN work.
+
+`context.checkpoint.prepared_originals(identity)` is a pure synchronous bool
+attestation: the current identity getter must equal the exact target and summary,
+portable progress and provisional ordinary-transition state must all be empty.
+It neither clears foreign state nor validates a settled host receipt or grants
+fresh model work. Compatible target-derived state uses ordinary strict validation,
+not this empty-state shortcut.
+An ordinary compaction failure/cooldown latch is not derived request state: it
+does not invalidate this attestation and is neither cleared nor rewritten by it.
+
+`context.checkpoint.transition(record, identity)` is passive. It checks record
+integrity, summary shape, current canonical prefix and generation configuration
+on a detached context. It returns structured `transition_required` provenance,
+`compatible` for the same identity, or `rejected`. Its `validation` coverage
+explicitly reports `sourceProviderEnvelope: unverified`: a self-declared source
+identity is not source-provider attestation. The host must bind exact previously
+accepted source bytes/provenance and the deliberate target selection. No source
+opaque checkpoint is sent to the target, even for counting.
+
+For a transition, supply `source_checkpoint=<exact prior record>`, or the distinct
+checkpointless fork contract
+`transition_source={"kind": "canonical-originals", "sourceRevision": {"messages": N, "sha256": digest}}`.
+Never supply both or substitute canonical-originals for a rejected saved record.
+Optional `source_revision` binds the full journal-admitted prefix, which can be
+longer than source-checkpoint coverage; later appended input stays outside it.
+The host retains the source summary, identity, omission/recovery metadata and paid
+partials together in its existing recovery transaction, not a per-model bank or
+a second transcript store.
+
+The existing `guard`, `save_progress(record, report)` and exact-digest `install`
+callbacks still apply. A mandatory `admit_call(report)` additionally reserves each
+logical generation operation durably **before** transport and must return exactly
+`True`. Reports contain `method` (`native` or `semantic`),
+`sourceCheckpointSha256` (null for canonical-originals), `targetIdentity`,
+one-based local `sequence`, `requestSha256` and `maxOutputTokens`. Progress saves
+include that exact report in `call` and `disposition: completed`; only an
+acknowledged save establishes resumable progress. False/exception/cancellation
+does not authorize another call. Hosts enforce a finite cumulative allowance
+across restarts and repeated preparations using `summary_max_calls` (default 16).
+`max_calls` supplies this invocation's remaining allowance, from zero through the
+configured limit; zero permits only no-generation fitting/reconciliation. Existing
+bounded provider transport retries are not additional logical calls.
+
+Transitions preserve originals and derive fresh target state on a detached
+context. Before generation they count the full irreducible current
+instructions/tools/options and required recent tail. Native targets reuse
+chronological whole-exchange batching; archive-recent selection does not stand in
+for full eligible-prefix coverage. Portable targets reuse the existing public
+projection, summary prompt/output policy and exact partial-progress validation.
+Native errors never fall back to portable summaries. The final full target request
+must fit the unchanged conservative allowance and authoritatively reduce its
+originals-only baseline before checkpoint installation. Guards fence callbacks,
+paid operations and final activation; source state survives failures/cancellation.
+
+When originals already fit, the result is `outcome: transition_fitted` with
+`recovery.status: prepared-originals`: zero paid calls, no `install(None)` or fake
+digest acknowledgement, and no checkpoint-format change. The host keeps the exact
+source record quarantined and marks that transaction prepared, so later ordinary
+target requests cannot re-arm the paid campaign. A completed target checkpoint
+instead returns `outcome: transitioned` / `recovery.status: installed`.
+Both results report exact `sourceRevision`, `targetIdentity`, `requestSha256`,
+`before`, `after`, and `limit`; installed results also report checkpoint `sha256`.
+The loop's `dispatch` object is not rewritten: an absent request model is accepted
+only when the guarded selected provider's default matches the exact target model.
+The host count callback must also return `effective_identity` with the exact
+selected provider-instance/model after measuring through that same selected
+adapter. The current identity getter must confirm it. A bare provider default,
+missing/stale account binding or explicit different request model is rejected.
+
+Confirmed target progress may be supplied through `progress` only under the same
+host journal binding. For a final installed candidate, additionally pass
+`installed_candidate_sha256=<exact journal-pinned digest>`. This distinct readback
+contract preserves the supplied record's exact coverage/digest even when new
+foreground input advances the eligible boundary. It never extends generation,
+even with a positive remaining allowance. An intermediate native checkpoint or
+portable partial is not a final installed candidate. `install` must acknowledge
+the existing digest readback without repeating its write. A running reservation,
+lost response or uncertain install must first be
+reconciled by the host. Saved progress alone never settles UNKNOWN or authorizes
+replaying a model operation, checkpoint write, tool, task resume or Stop clearance.
+If the final host journal write failed after Context had already activated the
+target, the same pinned readback can reconcile only when the complete active
+export exactly equals that candidate and no active paid partial is present.
+Other active target records do not bypass source-unit validation.

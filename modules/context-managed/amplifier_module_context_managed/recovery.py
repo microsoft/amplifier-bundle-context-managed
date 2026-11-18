@@ -236,7 +236,9 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
 
 async def recover_request(context, *, provider, count_view, identity, save_progress,
                           install, guard, retain_contents=(), target_bytes=1_500_000,
-                          progress=None, source_revision=None):
+                          progress=None, source_revision=None, source_checkpoint=None,
+                          admit_call=None, max_calls=None, transition_source=None,
+                          installed_candidate_sha256=None):
     """Explicitly recover, verify and install a native checkpoint under the lock.
 
     ``count_view`` must only rebuild/count the complete ordinary ChatRequest:
@@ -263,6 +265,21 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
     Returns the ordinary measured-view envelope plus bounded recovery evidence.
     Only an explicit host intent may invoke it during ordinary preparation.
     """
+    if context._ordinary_transition is not None:
+        raise CompactionError("summary_progress_incompatible",
+            "A provisional ordinary transition is still retained. Reconcile it "
+            "before starting a separate host recovery transaction.")
+    if source_checkpoint is not None or transition_source is not None:
+        from .transition import prepare_transition
+        return await prepare_transition(context, provider=provider, count_view=count_view,
+            identity=identity, save_progress=save_progress, install=install, guard=guard,
+            retain_contents=retain_contents, target_bytes=target_bytes, progress=progress,
+            source_revision=source_revision, source_checkpoint=source_checkpoint,
+            admit_call=admit_call, max_calls=max_calls, transition_source=transition_source,
+            installed_candidate_sha256=installed_candidate_sha256)
+    if admit_call is not None or max_calls is not None or installed_candidate_sha256 is not None:
+        raise ValueError("Transition call admission requires source_checkpoint")
+
     from .boundary import BoundaryContextManager
 
     if not all(callable(callback) for callback in (count_view, save_progress, install, guard)):
