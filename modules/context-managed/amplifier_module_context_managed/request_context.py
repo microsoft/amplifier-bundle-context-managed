@@ -1,11 +1,19 @@
 """Validate a compacted request without mechanically deleting or clipping history."""
 import copy
+import json
 
 from amplifier_core import ChatRequest, Message
 from amplifier_core.llm_errors import ContextLengthError
 from amplifier_module_context_simple import SimpleContextManager
 
 from .summary import request_fits, public_messages
+
+
+def conservative_tokens(request):
+    # Include structured tool arguments, tools and overlays when no authoritative
+    # count exists. This is a labelled conservative bound, not a provider count.
+    return len(json.dumps(request.model_dump(mode="json", exclude_none=True),
+                          ensure_ascii=False).encode()) + 16 * len(request.messages)
 
 
 class RequestContext(SimpleContextManager):
@@ -34,18 +42,23 @@ class RequestContext(SimpleContextManager):
         error.context_input_limit = limit
         raise error
 
-    async def get_messages_for_request_retaining(self, *, retain_contents, provider=None, token_budget=None, hard_fit=False):
+    async def get_messages_for_request_retaining(self, *, retain_contents, provider=None, token_budget=None,
+                                                 hard_fit=False, conservative=False):
         view = await self._view()
         budget = self._calculate_budget(token_budget, provider)
-        count = self._estimate_tokens(public_messages(view))
-        fits, decision = await request_fits(provider, ChatRequest(messages=[Message(**row) for row in view]))
+        request = ChatRequest(messages=[Message(**row) for row in view])
+        count = conservative_tokens(request) if conservative else self._estimate_tokens(public_messages(view))
+        fits, decision = await request_fits(provider, request)
         if decision:
-            count, budget = decision["input_tokens"], min(budget, decision["input_limit_tokens"])
+            count = (max(count, decision["input_tokens"]) if conservative
+                     and decision["measurement_kind"] != "provider_count" else decision["input_tokens"])
+            budget = min(budget, decision["input_limit_tokens"])
         if not fits or count > budget:
             self._oversize(count, budget)
         return view
 
-    async def get_measured_request_view(self, *, provider, retain_contents, count_view, fit_output=None):
+    async def get_measured_request_view(self, *, provider, retain_contents, count_view, fit_output=None,
+                                        conservative=False):
         view = await self._view()
         attempt = await count_view(view)
         if not isinstance(attempt, dict) or "dispatch" not in attempt:
@@ -64,9 +77,16 @@ class RequestContext(SimpleContextManager):
                 outcome = "reduced_output"
             if decision["estimated_input_tokens"] > decision["input_limit_tokens"]:
                 self._oversize(decision["estimated_input_tokens"], decision["input_limit_tokens"])
-        if decision is None:
+        if decision is None or conservative and measurement is None:
             budget = self._calculate_budget(None, provider)
-            count = self._estimate_tokens(public_messages(view))
+            if decision is not None:
+                budget = min(budget, decision["input_limit_tokens"])
+            if conservative:
+                if not isinstance(attempt["dispatch"], ChatRequest):
+                    raise TypeError("Conservative fitting requires the exact ChatRequest dispatch")
+                count = conservative_tokens(attempt["dispatch"])
+            else:
+                count = self._estimate_tokens(public_messages(view))
             if count > budget:
                 self._oversize(count, budget)
         else:
