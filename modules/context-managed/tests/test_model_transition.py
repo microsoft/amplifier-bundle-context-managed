@@ -125,6 +125,54 @@ async def test_smaller_target_final_fit_refusal_keeps_source_checkpoint(native):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True], ids=["portable", "opaque"])
+async def test_explicit_transition_fitting_originals_never_pays_or_installs_none(native):
+    ctx, model = context(native=native), provider(native=native)
+    source_record = ctx.export_checkpoint(SOURCE)
+    source_bytes = copy.deepcopy(source_record)
+    save, install, admit = AsyncMock(), AsyncMock(), AsyncMock()
+    ctx.preserve_evidence = AsyncMock(return_value=copy.deepcopy(ctx.evidence_refs))
+    guard = SimpleNamespace(calls=0)
+
+    def check():
+        guard.calls += 1
+
+    async def count_view(view):
+        assert ctx.summary_identity == SOURCE  # No early target activation.
+        assert "source-private-state" not in str(view)
+        return {
+            "dispatch": ChatRequest(
+                messages=[Message(**row) for row in view], model=TARGET["model"],
+                reasoning_effort="high", max_output_tokens=73),
+            "budget_decision": {
+                "estimated_input_tokens": 1000, "input_limit_tokens": 20000,
+                "max_output_tokens": 73,
+                "measurement": {"kind": "provider_count", "source": "fixture",
+                                "input_tokens": 1000},
+            },
+        }
+
+    result = await ctx.recover_request(
+        provider=model, count_view=count_view, identity=TARGET,
+        source_checkpoint=source_record, admit_call=admit, max_calls=16,
+        save_progress=save, install=install, guard=check)
+    assert result["outcome"] == "transition_fitted"
+    assert result["final_attempt"]["dispatch"].model == TARGET["model"]
+    assert result["final_attempt"]["dispatch"].reasoning_effort == "high"
+    assert result["final_attempt"]["dispatch"].max_output_tokens == 73
+    assert "source-private-state" not in str(result["base_view"])
+    assert guard.calls >= 2
+    assert source_record == source_bytes
+    assert ctx.messages == rows()
+    assert ctx.summary is None  # Host retains quarantined source_record, not target-active.
+    admit.assert_not_awaited()
+    save.assert_not_awaited()
+    install.assert_not_awaited()
+    model.complete.assert_not_awaited()
+    model.compact_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "opaque"])
 async def test_same_identity_reuses_checkpoint_without_generation(native):
     ctx, model = context(native=native), provider(native=native, identity=SOURCE)
     ctx.checkpoint_identity = lambda: copy.deepcopy(SOURCE)
