@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from amplifier_core import ChatRequest, Message
 
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 from amplifier_module_context_managed.checkpoint import digest
@@ -114,10 +115,32 @@ def test_paid_partial_is_preserved_but_cannot_be_exported_under_foreign_identity
     assert ctx.restore_checkpoint(record, identity)["status"] == "resuming"
     before = copy.deepcopy(ctx._restored_progress)
     assert ctx.export_checkpoint(identity) == record
+    assert ctx.restore_checkpoint(record, {**identity, "model": "other-model"})["status"] == "rejected"
+    assert ctx._restored_progress == before  # Rejected import is transactional.
+    assert ctx.classify_checkpoint_transition(
+        record, {**identity, "model": "other-model"})["status"] == "transition_required"
     with pytest.raises(CompactionError, match="summary_progress_incompatible"):
         ctx.export_checkpoint({**identity, "model": "other-model"})
     assert ctx._restored_progress == before
     assert ctx.export_checkpoint(identity) == record
+
+
+@pytest.mark.parametrize("version", [4, 5])
+@pytest.mark.parametrize("change", ["summary-policy", "canonical-prefix"])
+def test_foreground_policy_keeps_paid_partial_source_and_generation_rejection(version, change):
+    packet = json.loads(Path(__file__).with_name("summary_work_pause_baseline.json").read_text())
+    fixture = packet["fixtures"][f"v{version}_completed_with_partial"]
+    ctx = BoundaryContextManager({**fixture["config"], "foreground_continuation": True})
+    ctx.messages = copy.deepcopy(fixture["messages"])
+    if change == "summary-policy":
+        ctx.config["summary_reasoning_effort"] = "high"
+    else:
+        ctx.messages[0]["content"] += " changed source"
+    record = fixture["checkpoint"]
+    assert ctx.restore_checkpoint(record, record["identity"])["status"] == "rejected"
+    assert ctx.classify_checkpoint_transition(
+        record, {**record["identity"], "model": "other-model"})["status"] == "rejected"
+    assert ctx._restored_progress is None
 
 
 @pytest.mark.asyncio
@@ -135,3 +158,41 @@ async def test_foreground_compatibility_does_not_rebind_inflight_summary_policy_
         await ctx._prepare(provider, None, [])
     assert ctx.summary is None
     provider.complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+async def test_legacy_restored_checkpoint_reaches_foreground_count_without_generation(native):
+    ctx = manager({"foreground_continuation": True, "compaction_schedule": "after_turn"})
+    ctx.checkpoint_identity = lambda: copy.deepcopy(SOURCE)
+    record = legacy_completed(native)
+    assert ctx.restore_checkpoint(record, SOURCE)["status"] == "restored"
+    provider = SimpleNamespace(name=SOURCE["provider"], default_model=SOURCE["model"],
+        supports_native_compaction=lambda: native,
+        validate_compacted_context=lambda row: (
+            row.get("metadata", {}).get("fixture:opaque", {}).get("model") == SOURCE["model"]),
+        complete=AsyncMock(), compact_context=AsyncMock())
+    async def count_view(view):
+        return {"dispatch": ChatRequest(messages=[Message(**row) for row in view], model=SOURCE["model"]),
+                "budget_decision": {"estimated_input_tokens": 1000, "input_limit_tokens": 10000,
+                    "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 1000}}}
+    result = await ctx.get_measured_request_view(
+        provider=provider, retain_contents=[], count_view=count_view)
+    assert result["final_attempt"]["dispatch"].model == SOURCE["model"]
+    assert ctx.export_checkpoint(SOURCE) == record
+    provider.complete.assert_not_awaited()
+    provider.compact_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+async def test_legacy_cross_model_checkpoint_reaches_existing_guarded_transition(native):
+    from .test_model_transition import transition_fixture
+    state = transition_fixture(native)
+    source_record = copy.deepcopy(state.old)
+    state.ctx.config.update(foreground_continuation=True, compaction_schedule="after_turn")
+    result = await state.ctx.recover_request(**state.kwargs)
+    assert result["outcome"] == "transitioned"
+    assert state.ctx.summary_identity == state.target
+    assert state.old == source_record
+    assert state.installed[-1][0] == state.ctx.export_checkpoint(state.target)
