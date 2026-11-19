@@ -81,6 +81,7 @@ class BoundaryContextManager:
         self._foreground_unconfirmed = False
         self._foreground_native_refusal = None
         self._is_cancelled = None
+        self._settled_maintenance = False
         self._maintenance_task = None
         self._maintenance_revision = None
         self._maintenance_requested = False
@@ -1132,20 +1133,30 @@ class BoundaryContextManager:
                             if ordinary and self._foreground_native_refusal == refusal_key:
                                 raise CompactionError("ordinary_compaction_deferred",
                                     "Unchanged optional native input previously exceeded its allowance; no retry was made.")
-                            fits, compact_budget = await request_fits(provider, request)
-                            check_summary_contract()
-                            if not fits:
-                                # Native compaction accepts one complete eligible
-                                # window, never fragments. Oversized legacy history
-                                # requires explicit recovery; never silently switch
-                                # compaction methods or discard input to make it fit.
-                                stats["native_selection"] = "input_exceeds_native_allowance"
-                                stats["native_request_budget"] = compact_budget
-                                if ordinary:
-                                    self._foreground_native_refusal = copy.deepcopy(refusal_key)
-                                raise CompactionError("native_input_oversized", "Native input exceeds the provider allowance. Restore the last compatible checkpoint or explicitly recover this oversized history; it was not sent to native compaction.")
-                            stats["calls"] += 1
-                            result = await self._paid_compaction(lambda: provider.compact_context(request), input_key)
+                            try:
+                                fits, compact_budget = await request_fits(provider, request)
+                                check_summary_contract()
+                                if self._settled_maintenance and (not compact_budget
+                                        or compact_budget["measurement_kind"] != "provider_count"):
+                                    raise CompactionError("native_measurement_unavailable",
+                                        "Deferred native compaction needs a verified native input budget.")
+                                if not fits:
+                                    # Native compaction accepts one complete eligible
+                                    # window, never fragments. Oversized legacy history
+                                    # requires explicit recovery; never silently switch
+                                    # compaction methods or discard input to make it fit.
+                                    stats["native_selection"] = "input_exceeds_native_allowance"
+                                    stats["native_request_budget"] = compact_budget
+                                    if ordinary:
+                                        self._foreground_native_refusal = copy.deepcopy(refusal_key)
+                                    raise CompactionError("native_input_oversized", "Native input exceeds the provider allowance. Restore the last compatible checkpoint or explicitly recover this oversized history; it was not sent to native compaction.")
+                                stats["calls"] += 1
+                                result = await self._paid_compaction(lambda: provider.compact_context(request), input_key)
+                            finally:
+                                if self._settled_maintenance:
+                                    release = getattr(provider, "release_media_request", None)
+                                    if callable(release):
+                                        release(request, request_options=None)
                             if revision != self.revision:
                                 raise RuntimeError("History changed during compaction; stale summary was discarded")
                             check_summary_contract()

@@ -45,6 +45,7 @@ def schedule(context, provider, count_view, retain_contents):
         worker = copy.copy(context)
         worker.messages = list(context.messages)
         worker.config = config
+        worker._settled_maintenance = True
         if context.hooks is not None:
             class MaintenanceHooks:
                 async def emit(self, event, data):

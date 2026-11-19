@@ -1,7 +1,7 @@
 """Foreground selection and independent checkpoint ownership across a tool boundary."""
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from amplifier_core import ChatRequest, Message
@@ -148,7 +148,8 @@ async def test_oversized_completed_result_is_addressable_with_its_real_call_id()
 
 
 @pytest.mark.asyncio
-async def test_mac_native_oversized_preflight_is_independent_of_ordinary_dispatch():
+@pytest.mark.parametrize("native_decision", ["oversized", "unavailable"])
+async def test_mac_native_oversized_preflight_is_independent_of_ordinary_dispatch(native_decision):
     # Reproduce the observed 163-row shape and one previously executed tool.
     # Values, tool data and the measured allowances here are synthetic.
     rows = [{"role": "user", "content": "Inspect this project."}]
@@ -164,7 +165,8 @@ async def test_mac_native_oversized_preflight_is_independent_of_ordinary_dispatc
     native_counts = []
     async def native_budget(request, **kwargs):
         native_counts.append(request)
-        return attempt([], 30000)["budget_decision"]
+        return attempt([], 30000)["budget_decision"] if native_decision == "oversized" else None
+    model.release_media_request = Mock()
     model.request_budget = native_budget
     async def count(view):
         return attempt(view, len(str(view)) // 4)
@@ -176,7 +178,8 @@ async def test_mac_native_oversized_preflight_is_independent_of_ordinary_dispatc
     await asyncio.gather(ctx._maintenance_task, return_exceptions=True)
     assert len(native_counts) == 1
     model.compact_context.assert_not_awaited()
-    assert ctx._foreground_native_refusal is not None
+    assert (ctx._foreground_native_refusal is not None) == (native_decision == "oversized")
+    model.release_media_request.assert_called_once_with(native_counts[0], request_options=None)
     assert (await ctx.get_messages()) == rows
 
 
