@@ -138,8 +138,11 @@ shortened, corrupt, incompatibly configured, or differently identified history
 rejects the derived summary with a visible reason and `originalsAvailable: true`.
 It never restores/replays a tool or changes original messages. `set_messages`
 retains completed derived notes only when their entire covered prefix is unchanged.
-Trigger, retry, observer, and call-allowance changes do not invalidate
-an otherwise compatible note; summary-generation settings still do. Older
+Trigger, retry, observer, call-allowance, `compaction_schedule`, and
+`foreground_continuation` changes do not invalidate an otherwise compatible note;
+summary-generation settings still do. Checkpoints created with an explicit
+`foreground_continuation` value before it was excluded from this digest retain
+their previous incompatible hash; this does not rewrite saved records. Older
 checkpoints retain their original, stricter configuration validation.
 Normalized omitted-engine mounts keep the configuration identity of old explicit
 `engine: boundary` mounts. Legacy summary markers are not Boundary checkpoints.

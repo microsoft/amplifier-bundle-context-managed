@@ -165,7 +165,7 @@ class BoundaryContextManager:
         inert = {"summarize_trigger", "summary_retry_delay", "summary_max_calls",
                  "native_min_new_tokens", "compaction_notice_enabled",
                  "compaction_notice_token_reserve", "token_meter", "durable_checkpoints",
-                 "archive_recovery", "compaction_schedule"}
+                 "archive_recovery", "compaction_schedule", "foreground_continuation"}
         return digest({"config": {k: v for k, v in self.config.items() if k not in inert},
                        "prompt": SUMMARY_PROMPT})
 
