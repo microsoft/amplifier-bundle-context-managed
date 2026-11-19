@@ -69,7 +69,8 @@ class RequestContext(SimpleContextManager):
         outcome = "unchanged"
         if decision and decision["estimated_input_tokens"] > decision["input_limit_tokens"]:
             # Output reserve relief may change generation options, never input.
-            fitted = await self._fit_measured_output(fit_output, view, attempt) if fit_output else None
+            independent = decision.get("input_limit_independent_of_output") is True
+            fitted = await self._fit_measured_output(fit_output, view, attempt) if fit_output and not independent else None
             if fitted:
                 attempt, measurement, extra = fitted
                 decision = attempt["budget_decision"]
