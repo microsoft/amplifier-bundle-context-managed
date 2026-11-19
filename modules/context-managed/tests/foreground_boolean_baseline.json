@@ -1,0 +1,662 @@
+{
+  "boundary_sha256": "3600e81c3b26e458cdbd65037b7f38838dac61eb7cc5a50d481c809cbfef1136",
+  "fixtures": {
+    "completed-partial-v5-false": {
+      "checkpoint": {
+        "configuration": "54151940e80a8fa9e914f87cbc3c141a9fc623614e0e07b1f58eba5e60c96bfa",
+        "configurationVersion": 5,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": {
+          "calls": 1,
+          "completed": 1,
+          "fingerprint": "a4998bcd97d56afb6f95f4e6b851d91b9d97c4a385fa7387a09ecca3c361380f",
+          "generation_contract": {
+            "max_output_tokens": 8192,
+            "model": "fixture-model",
+            "prompt_sha256": "efee20e5bb367ffc2bcb85ef36cc1b2632827ef3524e0b5516dbc792862895a6",
+            "reasoning_effort": "low"
+          },
+          "identity": {
+            "model": "fixture-model",
+            "provider": "fixture"
+          },
+          "parts_digest": "528fa49d9b597201d0382ff04fed77b26bb95b6f0b3c5d2a5dd20c44971716fc",
+          "provider": [
+            "fixture",
+            "fixture-model"
+          ],
+          "segments": [
+            [
+              1,
+              0,
+              1231
+            ],
+            [
+              2,
+              0,
+              1231
+            ],
+            [
+              3,
+              0,
+              1231
+            ],
+            [
+              4,
+              0,
+              513
+            ]
+          ],
+          "source_revision": {
+            "messages": 3,
+            "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+          },
+          "text": "PAID piece; originals retained; UNKNOWN stays unresolved."
+        },
+        "recovery": null,
+        "sha256": "0f9517e96f0c0704ccacf55c22b8bbe16d0be524c6ec1a7752e2cae66f8890aa",
+        "sourceRevision": {
+          "messages": 1,
+          "sha256": "66a92a8f5a2e38382aa023debd8b26b687b1d62aceaedb07b20381aa2c1ed63b"
+        },
+        "summary": {
+          "text": "Previously completed source note; tools never replay.",
+          "throughMessage": 1
+        }
+      },
+      "config": {
+        "durable_checkpoints": true,
+        "foreground_continuation": false,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "summary_target_tokens": 1500
+      },
+      "generation_calls": 1
+    },
+    "completed-partial-v5-true": {
+      "checkpoint": {
+        "configuration": "8e9e6de4d4b72924457a69aedc52e8b7b898f2168589a9aeaf89bb5d5e0050d4",
+        "configurationVersion": 5,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": {
+          "calls": 1,
+          "completed": 1,
+          "fingerprint": "05d5acbe8436fcbdde75308ef3d05486a7a63dc5d05e1bea1048552a52342320",
+          "generation_contract": {
+            "max_output_tokens": 8192,
+            "model": "fixture-model",
+            "prompt_sha256": "efee20e5bb367ffc2bcb85ef36cc1b2632827ef3524e0b5516dbc792862895a6",
+            "reasoning_effort": "low"
+          },
+          "identity": {
+            "model": "fixture-model",
+            "provider": "fixture"
+          },
+          "parts_digest": "528fa49d9b597201d0382ff04fed77b26bb95b6f0b3c5d2a5dd20c44971716fc",
+          "provider": [
+            "fixture",
+            "fixture-model"
+          ],
+          "segments": [
+            [
+              1,
+              0,
+              1231
+            ],
+            [
+              2,
+              0,
+              1231
+            ],
+            [
+              3,
+              0,
+              1231
+            ],
+            [
+              4,
+              0,
+              513
+            ]
+          ],
+          "source_revision": {
+            "messages": 3,
+            "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+          },
+          "text": "PAID piece; originals retained; UNKNOWN stays unresolved."
+        },
+        "recovery": null,
+        "sha256": "adac1740385f607eb64c5c37d0bbe3feecbedad8488d3387849cad85040b61a6",
+        "sourceRevision": {
+          "messages": 1,
+          "sha256": "66a92a8f5a2e38382aa023debd8b26b687b1d62aceaedb07b20381aa2c1ed63b"
+        },
+        "summary": {
+          "text": "Previously completed source note; tools never replay.",
+          "throughMessage": 1
+        }
+      },
+      "config": {
+        "durable_checkpoints": true,
+        "foreground_continuation": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "summary_target_tokens": 1500
+      },
+      "generation_calls": 1
+    },
+    "native-false": {
+      "checkpoint": {
+        "configuration": "54151940e80a8fa9e914f87cbc3c141a9fc623614e0e07b1f58eba5e60c96bfa",
+        "configurationVersion": 3,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": null,
+        "recovery": null,
+        "sha256": "0dfdd02f50969bce1606931be47c297d18c98a22e70e8f34a1e8a8bd591f3bdd",
+        "sourceRevision": {
+          "messages": 3,
+          "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+        },
+        "summary": {
+          "kind": "native",
+          "message": {
+            "content": "Completed source note; pending operations remain UNKNOWN.",
+            "metadata": {
+              "ephemeral": true,
+              "fixture:opaque": {
+                "model": "fixture-model",
+                "state": "source-only"
+              },
+              "persisted": true,
+              "source": "context-managed"
+            },
+            "role": "user"
+          },
+          "omittedIndices": [],
+          "throughMessage": 3,
+          "version": 2
+        }
+      },
+      "config": {
+        "durable_checkpoints": true,
+        "foreground_continuation": false,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "summary_target_tokens": 1500
+      },
+      "generation_calls": 0
+    },
+    "native-true": {
+      "checkpoint": {
+        "configuration": "8e9e6de4d4b72924457a69aedc52e8b7b898f2168589a9aeaf89bb5d5e0050d4",
+        "configurationVersion": 3,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": null,
+        "recovery": null,
+        "sha256": "42e52353c9169a79707836ff653d80935d58817add6debdad39eeca64e9053d2",
+        "sourceRevision": {
+          "messages": 3,
+          "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+        },
+        "summary": {
+          "kind": "native",
+          "message": {
+            "content": "Completed source note; pending operations remain UNKNOWN.",
+            "metadata": {
+              "ephemeral": true,
+              "fixture:opaque": {
+                "model": "fixture-model",
+                "state": "source-only"
+              },
+              "persisted": true,
+              "source": "context-managed"
+            },
+            "role": "user"
+          },
+          "omittedIndices": [],
+          "throughMessage": 3,
+          "version": 2
+        }
+      },
+      "config": {
+        "durable_checkpoints": true,
+        "foreground_continuation": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "summary_target_tokens": 1500
+      },
+      "generation_calls": 0
+    },
+    "partial-v4-false": {
+      "checkpoint": {
+        "configuration": "3fa94225dccbcde061b6045fa3b407ee1d715f7dbe83b502884b1a77c1a64649",
+        "configurationVersion": 4,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": {
+          "calls": 1,
+          "completed": 1,
+          "fingerprint": "60be8d139a1f19c111f2a2f6a77d2c0c90d819663a8e89dcfbe624807bbcfa30",
+          "generation_contract": {
+            "max_output_tokens": 8192,
+            "model": "fixture-model",
+            "reasoning_effort": "low"
+          },
+          "identity": {
+            "model": "fixture-model",
+            "provider": "fixture"
+          },
+          "parts_digest": "5926715e1c78d8302860975c70dbcd0f9284aabb9ac5c42cc3be67df708670d1",
+          "provider": [
+            "fixture",
+            "fixture-model"
+          ],
+          "segments": [
+            [
+              1,
+              0,
+              1231
+            ],
+            [
+              2,
+              0,
+              1231
+            ],
+            [
+              3,
+              0,
+              1231
+            ],
+            [
+              4,
+              0,
+              513
+            ]
+          ],
+          "source_revision": {
+            "messages": 3,
+            "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+          },
+          "text": "PAID piece; originals retained; UNKNOWN stays unresolved."
+        },
+        "recovery": null,
+        "sha256": "fb3aa82cff915e722a18dc0a282829366414e68fceccd6c54fab03c04fe1db24",
+        "sourceRevision": {
+          "messages": 3,
+          "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+        },
+        "summary": null
+      },
+      "config": {
+        "durable_checkpoints": true,
+        "foreground_continuation": false,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0
+      },
+      "generation_calls": 1
+    },
+    "partial-v4-true": {
+      "checkpoint": {
+        "configuration": "ab8a35a2b6bc323a400cba8b3f4762a7def3e61168d753d374798a13614ac0f2",
+        "configurationVersion": 4,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": {
+          "calls": 1,
+          "completed": 1,
+          "fingerprint": "fe9e17f95e2bbc208d89673c3340ae6bf69061e2d49b4141418ea904eef46f94",
+          "generation_contract": {
+            "max_output_tokens": 8192,
+            "model": "fixture-model",
+            "reasoning_effort": "low"
+          },
+          "identity": {
+            "model": "fixture-model",
+            "provider": "fixture"
+          },
+          "parts_digest": "5926715e1c78d8302860975c70dbcd0f9284aabb9ac5c42cc3be67df708670d1",
+          "provider": [
+            "fixture",
+            "fixture-model"
+          ],
+          "segments": [
+            [
+              1,
+              0,
+              1231
+            ],
+            [
+              2,
+              0,
+              1231
+            ],
+            [
+              3,
+              0,
+              1231
+            ],
+            [
+              4,
+              0,
+              513
+            ]
+          ],
+          "source_revision": {
+            "messages": 3,
+            "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+          },
+          "text": "PAID piece; originals retained; UNKNOWN stays unresolved."
+        },
+        "recovery": null,
+        "sha256": "ad560d4f1de5d2dd31f708cbbdab75b3a8c7681bbf92d246f808edd719fc8895",
+        "sourceRevision": {
+          "messages": 3,
+          "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+        },
+        "summary": null
+      },
+      "config": {
+        "durable_checkpoints": true,
+        "foreground_continuation": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0
+      },
+      "generation_calls": 1
+    },
+    "partial-v5-false": {
+      "checkpoint": {
+        "configuration": "54151940e80a8fa9e914f87cbc3c141a9fc623614e0e07b1f58eba5e60c96bfa",
+        "configurationVersion": 5,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": {
+          "calls": 1,
+          "completed": 1,
+          "fingerprint": "20749a4ef07a8e424f041bf58679e23c31a9e581e3da49622d97ef3eb0e23bb5",
+          "generation_contract": {
+            "max_output_tokens": 8192,
+            "model": "fixture-model",
+            "prompt_sha256": "efee20e5bb367ffc2bcb85ef36cc1b2632827ef3524e0b5516dbc792862895a6",
+            "reasoning_effort": "low"
+          },
+          "identity": {
+            "model": "fixture-model",
+            "provider": "fixture"
+          },
+          "parts_digest": "5926715e1c78d8302860975c70dbcd0f9284aabb9ac5c42cc3be67df708670d1",
+          "provider": [
+            "fixture",
+            "fixture-model"
+          ],
+          "segments": [
+            [
+              1,
+              0,
+              1231
+            ],
+            [
+              2,
+              0,
+              1231
+            ],
+            [
+              3,
+              0,
+              1231
+            ],
+            [
+              4,
+              0,
+              513
+            ]
+          ],
+          "source_revision": {
+            "messages": 3,
+            "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+          },
+          "text": "PAID piece; originals retained; UNKNOWN stays unresolved."
+        },
+        "recovery": null,
+        "sha256": "7acea6163b20ce142e13797d448ba96a8b4172a5898dd557b66d884e787304a7",
+        "sourceRevision": {
+          "messages": 3,
+          "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+        },
+        "summary": null
+      },
+      "config": {
+        "durable_checkpoints": true,
+        "foreground_continuation": false,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "summary_target_tokens": 1500
+      },
+      "generation_calls": 1
+    },
+    "partial-v5-true": {
+      "checkpoint": {
+        "configuration": "8e9e6de4d4b72924457a69aedc52e8b7b898f2168589a9aeaf89bb5d5e0050d4",
+        "configurationVersion": 5,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": {
+          "calls": 1,
+          "completed": 1,
+          "fingerprint": "5064c996f0fe151e6d6d457ddb082642ce83b84bd1805ca04a48b072a0a61c5f",
+          "generation_contract": {
+            "max_output_tokens": 8192,
+            "model": "fixture-model",
+            "prompt_sha256": "efee20e5bb367ffc2bcb85ef36cc1b2632827ef3524e0b5516dbc792862895a6",
+            "reasoning_effort": "low"
+          },
+          "identity": {
+            "model": "fixture-model",
+            "provider": "fixture"
+          },
+          "parts_digest": "5926715e1c78d8302860975c70dbcd0f9284aabb9ac5c42cc3be67df708670d1",
+          "provider": [
+            "fixture",
+            "fixture-model"
+          ],
+          "segments": [
+            [
+              1,
+              0,
+              1231
+            ],
+            [
+              2,
+              0,
+              1231
+            ],
+            [
+              3,
+              0,
+              1231
+            ],
+            [
+              4,
+              0,
+              513
+            ]
+          ],
+          "source_revision": {
+            "messages": 3,
+            "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+          },
+          "text": "PAID piece; originals retained; UNKNOWN stays unresolved."
+        },
+        "recovery": null,
+        "sha256": "ff308708fc1cc4594ff97ce8300e600c4a4bc13af58cf92ef43f3ea98562e0e5",
+        "sourceRevision": {
+          "messages": 3,
+          "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+        },
+        "summary": null
+      },
+      "config": {
+        "durable_checkpoints": true,
+        "foreground_continuation": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_calls": 1,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "summary_target_tokens": 1500
+      },
+      "generation_calls": 1
+    },
+    "portable-false": {
+      "checkpoint": {
+        "configuration": "54151940e80a8fa9e914f87cbc3c141a9fc623614e0e07b1f58eba5e60c96bfa",
+        "configurationVersion": 2,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": null,
+        "recovery": null,
+        "sha256": "9c00aecc1bb8bc722af572dbb3bcdb6bca7e76f2ce3d37f5a34d577c905c1edc",
+        "sourceRevision": {
+          "messages": 3,
+          "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+        },
+        "summary": {
+          "text": "Completed source note; pending operations remain UNKNOWN.",
+          "throughMessage": 3
+        }
+      },
+      "config": {
+        "durable_checkpoints": true,
+        "foreground_continuation": false,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "summary_target_tokens": 1500
+      },
+      "generation_calls": 0
+    },
+    "portable-true": {
+      "checkpoint": {
+        "configuration": "8e9e6de4d4b72924457a69aedc52e8b7b898f2168589a9aeaf89bb5d5e0050d4",
+        "configurationVersion": 2,
+        "evidenceRefs": [],
+        "format": "context-managed-boundary-v1",
+        "identity": {
+          "model": "fixture-model",
+          "provider": "fixture"
+        },
+        "progress": null,
+        "recovery": null,
+        "sha256": "ce63644ed494bcd2ce74b14f037e0dbc37e432e0339ea0495103abe391a426b8",
+        "sourceRevision": {
+          "messages": 3,
+          "sha256": "6ed7ffe17a3a7ab6ba62620a6baeab6312ee2fd85610b7f9068ef364fd26cd5e"
+        },
+        "summary": {
+          "text": "Completed source note; pending operations remain UNKNOWN.",
+          "throughMessage": 3
+        }
+      },
+      "config": {
+        "durable_checkpoints": true,
+        "foreground_continuation": true,
+        "max_tokens": 10000,
+        "summarize_trigger": 0.01,
+        "summary_max_source_chars": 1200,
+        "summary_retry_delay": 0,
+        "summary_target_tokens": 1500
+      },
+      "generation_calls": 0
+    }
+  },
+  "identity": {
+    "model": "fixture-model",
+    "provider": "fixture"
+  },
+  "messages": [
+    {
+      "content": "Never replay completed tools.",
+      "role": "system"
+    },
+    {
+      "content": "Preserve ORBIT originals and UNKNOWN effects.",
+      "role": "user"
+    },
+    {
+      "content": "FIRST verified evidence. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx LAST verified evidence.",
+      "role": "assistant"
+    },
+    {
+      "content": "Correction: preserve all originals.",
+      "role": "user"
+    },
+    {
+      "content": "Recent completed work.",
+      "role": "assistant"
+    },
+    {
+      "content": "Finish the current report.",
+      "role": "user"
+    }
+  ],
+  "source_commit": "a4464af2027f4e03fe7fc388d8d8e3e8ff436da2"
+}

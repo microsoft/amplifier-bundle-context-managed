@@ -9,7 +9,8 @@ from .errors import CompactionError
 
 
 UNIT = ("summary", "summary_identity", "summary_omitted_indices", "recovery",
-        "_summary_progress", "_restored_progress", "summary_failure", "evidence_refs")
+        "_summary_progress", "_restored_progress", "summary_failure", "evidence_refs",
+        "_checkpoint_legacy_foreground")
 
 
 async def prepare(context, *, provider, token_budget, retain, measurement, reason,

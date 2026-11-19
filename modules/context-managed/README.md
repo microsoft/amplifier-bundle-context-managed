@@ -140,9 +140,12 @@ It never restores/replays a tool or changes original messages. `set_messages`
 retains completed derived notes only when their entire covered prefix is unchanged.
 Trigger, retry, observer, call-allowance, `compaction_schedule`, and
 `foreground_continuation` changes do not invalidate an otherwise compatible note;
-summary-generation settings still do. Checkpoints created with an explicit
-`foreground_continuation` value before it was excluded from this digest retain
-their previous incompatible hash; this does not rewrite saved records. Older
+summary-generation settings still do. Configuration versions 2–5 also accept a
+historical digest only when it is exactly reproduced from the current summary
+configuration and prompt with the former `foreground_continuation: false` or
+`true` key. Restored state retains that proven hash for exact export and paid
+progress resume; no record, provider identity, source, or fingerprint is rewritten.
+Other configuration differences still reject. Older
 checkpoints retain their original, stricter configuration validation.
 Normalized omitted-engine mounts keep the configuration identity of old explicit
 `engine: boundary` mounts. Legacy summary markers are not Boundary checkpoints.

@@ -124,14 +124,26 @@ def restore_checkpoint(context, record, identity):
             raise ValueError("Checkpoint digest does not match its contents")
         if record.get("identity") != identity or not identity.get("provider") or not identity.get("model"):
             raise ValueError("Provider or model identity changed")
-        configuration = context.checkpoint_configuration()
+        # Restore admission always starts with the current canonical projection,
+        # never the active unit's historical provenance.
+        configuration = context._checkpoint_configuration()
+        legacy_foreground = None
         if record.get("configurationVersion", 1) == 1:
             from .boundary import SUMMARY_PROMPT
             configuration = digest({"config": context.config, "prompt": SUMMARY_PROMPT})
         elif record.get("configurationVersion") not in {2, 3, 4, 5}:
             raise ValueError("Checkpoint configuration contract is unsupported")
         if record.get("configuration") != configuration:
-            raise ValueError("Summary configuration or prompt changed")
+            if (record.get("configurationVersion") not in {2, 3, 4, 5}
+                    or ("foreground_continuation" in context.config
+                        and type(context.config["foreground_continuation"]) is not bool)):
+                raise ValueError("Summary configuration or prompt changed")
+            for flag in (False, True):
+                if record.get("configuration") == context._checkpoint_configuration(flag):
+                    legacy_foreground = flag
+                    break
+            else:
+                raise ValueError("Summary configuration or prompt changed")
         source, summary = record["sourceRevision"], record.get("summary")
         if record.get("configurationVersion") == 3 and (
                 not isinstance(summary, dict) or summary.get("kind") != "native"
@@ -221,6 +233,9 @@ def restore_checkpoint(context, record, identity):
                     or any(not isinstance(v, list) or len(v) != 3 or any(type(n) is not int for n in v)
                            for v in partial["segments"])):
                 raise ValueError("Saved summary progress is incompatible")
+        # Set only after the full record/identity/source/shape checks. This keeps
+        # exports and paid fingerprints exact, without rewriting saved records.
+        context._checkpoint_legacy_foreground = legacy_foreground
         context._restored_progress = copy.deepcopy(partial)
         if context._restored_progress:
             # In-memory provenance for export before the first resumed call.

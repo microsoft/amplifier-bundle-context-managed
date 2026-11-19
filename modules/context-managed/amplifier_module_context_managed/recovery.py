@@ -142,7 +142,8 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
         # supplied recovery progress must not erase an already accepted checkpoint
         # or its failure latch in this caller-owned context.
         fields = ("summary", "summary_omitted_indices", "summary_identity", "summary_failure", "_summary_progress",
-                  "_restored_progress", "evidence_refs", "recovery", "checkpoint_status")
+                  "_restored_progress", "evidence_refs", "recovery", "checkpoint_status",
+                  "_checkpoint_legacy_foreground")
         prior = {key: copy.deepcopy(getattr(context, key)) for key in fields}
         try:
             state = context.restore_checkpoint(progress, identity)
@@ -309,7 +310,8 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
         provider_identity = (getattr(provider, "name", type(provider).__name__),
                              getattr(provider, "default_model", None))
         fields = ("summary", "summary_omitted_indices", "summary_identity", "summary_failure", "_summary_progress",
-                  "_restored_progress", "evidence_refs", "recovery", "checkpoint_status")
+                  "_restored_progress", "evidence_refs", "recovery", "checkpoint_status",
+                  "_checkpoint_legacy_foreground")
         originals = {key: copy.deepcopy(getattr(context, key)) for key in fields}
 
         def check():

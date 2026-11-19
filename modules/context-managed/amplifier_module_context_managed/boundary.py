@@ -50,6 +50,9 @@ class BoundaryContextManager:
         self.hooks = hooks
         self.messages = []
         self._checkpoint_prefix_digest = PrefixDigest()
+        # Historical boolean-hashed provenance travels with one derived unit.
+        # It is not a configuration override or a second checkpoint.
+        self._checkpoint_legacy_foreground = None
         self.revision = 0
         self.summary = None
         # Canonical offsets deliberately kept outside this native summary.
@@ -156,8 +159,13 @@ class BoundaryContextManager:
             self.summary_identity = None
             self.recovery = None
             self.checkpoint_status = {"status": "invalidated", "reason": "Canonical history was replaced.", "originalsAvailable": True}
+            if not self._summary_progress and not self._restored_progress:
+                self._checkpoint_legacy_foreground = None
 
     def checkpoint_configuration(self):
+        return self._checkpoint_configuration(self._checkpoint_legacy_foreground)
+
+    def _checkpoint_configuration(self, legacy_foreground=None):
         from .checkpoint import digest
         # Trigger, observer and retry policy changes do not change the meaning
         # of an already completed note. Keep identity, source and summary
@@ -166,8 +174,14 @@ class BoundaryContextManager:
                  "native_min_new_tokens", "compaction_notice_enabled",
                  "compaction_notice_token_reserve", "token_meter", "durable_checkpoints",
                  "archive_recovery", "compaction_schedule", "foreground_continuation"}
-        return digest({"config": {k: v for k, v in self.config.items() if k not in inert},
-                       "prompt": SUMMARY_PROMPT})
+        config = {k: v for k, v in self.config.items() if k not in inert}
+        if type(legacy_foreground) is bool:
+            config["foreground_continuation"] = legacy_foreground
+        return digest({"config": config, "prompt": SUMMARY_PROMPT})
+
+    def _checkpoint_state(self):
+        return (self.summary, self.summary_omitted_indices, self.summary_identity,
+                self._checkpoint_legacy_foreground)
 
     def export_checkpoint(self, identity):
         from .checkpoint import export_checkpoint
@@ -179,7 +193,8 @@ class BoundaryContextManager:
         # Validation is transactional. A rejected incoming record is not an
         # explicit discard of already admitted (possibly paid) work.
         fields = ("_summary_progress", "_restored_progress", "summary_failure", "summary",
-                  "summary_omitted_indices", "summary_identity", "evidence_refs", "recovery")
+                  "summary_omitted_indices", "summary_identity", "evidence_refs", "recovery",
+                  "_checkpoint_legacy_foreground")
         previous = {key: getattr(self, key) for key in fields}
         self._summary_progress = None
         self._restored_progress = None
@@ -206,7 +221,7 @@ class BoundaryContextManager:
                     and self.summary is None and self._summary_progress is None
                     and self._restored_progress is None and self._ordinary_transition is None
                     and self.summary_identity is None and not self.summary_omitted_indices
-                    and self.recovery is None)
+                    and self.recovery is None and self._checkpoint_legacy_foreground is None)
 
     async def recover_request(self, *, provider, count_view, identity, save_progress,
                               install, guard, retain_contents=(), target_bytes=1_500_000,
@@ -232,6 +247,7 @@ class BoundaryContextManager:
         await self.set_messages([])
         self._summary_progress = None
         self._restored_progress = None
+        self._checkpoint_legacy_foreground = None
 
     async def set_system_prompt_factory(self, factory):
         self.cancel_settled_compaction()
@@ -805,7 +821,7 @@ class BoundaryContextManager:
                 "provider": current_provider[0], "model": current_provider[1]}
             return (configuration != self.checkpoint_configuration()
                     or identity != current_identity or provider_identity != current_provider
-                    or summary_state != (self.summary, self.summary_omitted_indices, self.summary_identity)
+                    or summary_state != self._checkpoint_state()
                     or ordinary and operations_guard is not None and not operations_guard())
 
         def check_request_contract():
@@ -833,7 +849,7 @@ class BoundaryContextManager:
                     "Required originals are outside the saved checkpoint; ordinary fitting uses originals.")
             self.summary = None
             self.summary_omitted_indices = []
-        summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
+        summary_state = copy.deepcopy(self._checkpoint_state())
         native = getattr(provider, "supports_native_compaction", None)
         validate_native = getattr(provider, "validate_compacted_context", None)
         requires_context = getattr(provider, "native_compaction_requires_request_context", False)
@@ -1234,7 +1250,7 @@ class BoundaryContextManager:
                 # Our accepted commit advances the expected state. Observers
                 # and final fitting may suspend, but may not replace this view's
                 # checkpoint behind an unchanged canonical history revision.
-                summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
+                summary_state = copy.deepcopy(self._checkpoint_state())
                 assembled, outcome = candidate, "completed"
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -1340,8 +1356,7 @@ class BoundaryContextManager:
                 self._check_stop()
                 if (revision != self.revision or config != self.config or factory is not self.factory
                         or identity() != selected
-                        or checkpoint is not None and checkpoint != (
-                            self.summary, self.summary_omitted_indices, self.summary_identity)
+                        or checkpoint is not None and checkpoint != self._checkpoint_state()
                         or not operations_guard()):
                     raise RuntimeError("Request contract changed during ordinary fitting")
 
@@ -1363,7 +1378,7 @@ class BoundaryContextManager:
 
             async def select(checkpoint_rows, messages):
                 nonlocal checkpoint
-                checkpoint = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
+                checkpoint = copy.deepcopy(self._checkpoint_state())
                 return await self._fit_continuation(fit, retain, guard, operations, token_budget,
                     provider, None, prompt, omit_full=True, select_first=True,
                     checkpoint_rows=checkpoint_rows, messages=messages, provider_overflow=reason == "provider_overflow")
@@ -1378,7 +1393,7 @@ class BoundaryContextManager:
                         guard()
                         return prepared
                     fitter, protected = prepared
-                    checkpoint = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
+                    checkpoint = copy.deepcopy(self._checkpoint_state())
                     result = await fit(fitter, protected)
                 except (CompactionError, ContextLengthError) as error:
                     guard()
@@ -1388,7 +1403,7 @@ class BoundaryContextManager:
                             or isinstance(error, ContextLengthError)
                             and (after_turn or not hasattr(error, "context_input_limit"))):
                         raise
-                    checkpoint = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
+                    checkpoint = copy.deepcopy(self._checkpoint_state())
                     result = await self._fit_continuation(
                         fit, retain, guard, operations, token_budget, provider, error, prompt,
                         select_first=after_turn, provider_overflow=reason == "provider_overflow",
@@ -1564,7 +1579,7 @@ class BoundaryContextManager:
             revision = self.revision
             try:
                 fitter, retain = await self._prepare(provider, token_budget, retain_contents)
-                summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
+                summary_state = copy.deepcopy(self._checkpoint_state())
                 result = await fitter.get_messages_for_request_retaining(retain_contents=retain, provider=provider,
                     token_budget=token_budget, hard_fit=hard_fit)
             except asyncio.CancelledError:
@@ -1577,7 +1592,7 @@ class BoundaryContextManager:
                 raise
             if revision != self.revision:
                 raise RuntimeError("History changed during request preparation")
-            if summary_state != (self.summary, self.summary_omitted_indices, self.summary_identity):
+            if summary_state != self._checkpoint_state():
                 raise RuntimeError("Checkpoint changed during request preparation")
             if getattr(fitter, "_transition_guard", None):
                 fitter._transition_guard()
@@ -1634,7 +1649,7 @@ class BoundaryContextManager:
             measurement = RequestMeasurement(count_view)
             try:
                 fitter, retain = await self._prepare(provider, None, retain_contents, measurement, reason=reason)
-                summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
+                summary_state = copy.deepcopy(self._checkpoint_state())
                 result = await fitter.get_measured_request_view(provider=provider, retain_contents=retain,
                     count_view=measurement.count, fit_output=fit_output)
             except asyncio.CancelledError:
@@ -1649,7 +1664,7 @@ class BoundaryContextManager:
             if getattr(fitter, "_transition_guard", None):
                 fitter._transition_guard()
             if (revision != self.revision
-                    or summary_state != (self.summary, self.summary_omitted_indices, self.summary_identity)):
+                    or summary_state != self._checkpoint_state()):
                 if result.get("transaction"):
                     result["transaction"].rollback()
                 if revision != self.revision:

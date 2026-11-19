@@ -196,3 +196,209 @@ async def test_legacy_cross_model_checkpoint_reaches_existing_guarded_transition
     assert state.ctx.summary_identity == state.target
     assert state.old == source_record
     assert state.installed[-1][0] == state.ctx.export_checkpoint(state.target)
+
+
+def boolean_fixture(kind, flag):
+    packet = json.loads(Path(__file__).with_name("foreground_boolean_baseline.json").read_text())
+    fixture = packet["fixtures"][f"{kind}-{str(flag).lower()}"]
+    return packet, copy.deepcopy(fixture)
+
+
+@pytest.mark.parametrize("kind", ["portable", "native", "partial-v4", "partial-v5",
+                                 "completed-partial-v5"])
+@pytest.mark.parametrize("flag", [False, True])
+def test_real_boolean_writer_roundtrip_and_cross_identity_classification(kind, flag):
+    packet, fixture = boolean_fixture(kind, flag)
+    ctx = BoundaryContextManager({**fixture["config"], "foreground_continuation": not flag})
+    ctx.messages = copy.deepcopy(packet["messages"])
+    record, identity = fixture["checkpoint"], packet["identity"]
+    untouched = copy.deepcopy(record)
+    expected = "resuming" if record["progress"] else "restored"
+    assert ctx.restore_checkpoint(record, identity)["status"] == expected
+    assert ctx.export_checkpoint(identity) == untouched  # Also keeps original fingerprint/digest.
+    other = {**identity, "model": "other"}
+    assert ctx.restore_checkpoint(record, other)["status"] == "rejected"
+    assert ctx.export_checkpoint(identity) == untouched
+    assert ctx.classify_checkpoint_transition(record, other)["status"] == "transition_required"
+    assert ctx.export_checkpoint(identity) == untouched
+    if record["progress"]:
+        with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+            ctx.export_checkpoint(other)
+    assert record == untouched
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["partial-v4", "partial-v5", "completed-partial-v5"])
+@pytest.mark.parametrize("flag", [False, True])
+async def test_real_boolean_paid_prefix_resumes_without_repurchase_or_rebinding(kind, flag):
+    packet, fixture = boolean_fixture(kind, flag)
+    config = {**fixture["config"], "foreground_continuation": not flag}
+    ctx = BoundaryContextManager(config)
+    ctx.messages = copy.deepcopy(packet["messages"])
+    identity, record = packet["identity"], fixture["checkpoint"]
+    ctx.checkpoint_identity = lambda: copy.deepcopy(identity)
+    assert ctx.restore_checkpoint(record, identity)["status"] == "resuming"
+    old = copy.deepcopy(ctx._restored_progress)
+    provider = SimpleNamespace(name="fixture", default_model="fixture-model",
+        complete=AsyncMock(return_value=SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="Finished note preserving paid prefix.")],
+            usage={"input_tokens": 10, "output_tokens": 5})))
+    with pytest.raises(CompactionError, match="summary_work_paused"):
+        await ctx._prepare(provider, None, [])
+    assert old["text"] in str(provider.complete.call_args_list[0])
+    assert ctx._restored_progress is None
+    assert ctx.messages == packet["messages"]
+    exported = ctx.export_checkpoint(identity)
+    assert exported["configuration"] == record["configuration"]
+    # Only the first pending piece ran, against the original bound prefix.
+    provider.complete.assert_awaited_once()
+    assert exported["progress"]["fingerprint"] == old["fingerprint"]
+    assert exported["progress"]["source_revision"] == old["source_revision"]
+    assert exported["progress"]["completed"] == old["completed"] + 1
+    assert exported["progress"]["calls"] == old["calls"] + 1
+    remaining = exported["progress"]["segments"]
+    assert remaining == old["segments"][1:] or (
+        remaining[1:] == old["segments"][1:]
+        and remaining[0][0] == old["segments"][0][0]
+        and old["segments"][0][1] < remaining[0][1] < remaining[0][2] == old["segments"][0][2])
+
+
+@pytest.mark.parametrize("change", ["summary-target", "summary-output", "summary-effort",
+    "summary-prompt", "sibling-key", "prefix", "digest", "partial-provider"])
+def test_boolean_digest_proof_still_rejects_other_changes_transactionally(change):
+    packet, fixture = boolean_fixture("partial-v5", True)
+    config = {**fixture["config"], "foreground_continuation": False}
+    record = fixture["checkpoint"]
+    if change == "summary-target": config["summary_target_tokens"] = 1100
+    if change == "summary-output": config["summary_max_output_tokens"] = 4096
+    if change == "summary-effort": config["summary_reasoning_effort"] = "high"
+    if change == "summary-prompt": config["summary_prompt"] = "Changed instructions"
+    if change == "sibling-key": config["compaction_schedule_new_meaning"] = True
+    ctx = BoundaryContextManager(config)
+    ctx.messages = copy.deepcopy(packet["messages"])
+    if change == "prefix": ctx.messages[0]["content"] += " changed"
+    if change == "digest": record["progress"]["text"] += " corrupt"
+    if change == "partial-provider": record["progress"]["identity"]["model"] = "other"
+    if change == "partial-provider":
+        record["sha256"] = digest({k: v for k, v in record.items() if k != "sha256"})
+    assert ctx.restore_checkpoint(record, packet["identity"])["status"] == "rejected"
+    assert ctx.classify_checkpoint_transition(
+        record, {**packet["identity"], "model": "other"})["status"] == "rejected"
+    assert ctx.summary is None and ctx._restored_progress is None
+
+
+@pytest.mark.parametrize("bad_flag", [0, 1, "true", None, {}, []])
+def test_nonboolean_legacy_flag_hash_does_not_match_boolean_proof(bad_flag):
+    from amplifier_module_context_managed.boundary import SUMMARY_PROMPT
+    packet, fixture = boolean_fixture("portable", True)
+    # Historical writer projection with a non-boolean value: bool coercion would
+    # wrongly accept these distinct canonical JSON hashes.
+    projected = {k: v for k, v in fixture["config"].items() if k not in {
+        "durable_checkpoints", "summarize_trigger", "summary_retry_delay",
+        "summary_max_calls", "token_meter", "archive_recovery", "compaction_schedule"}}
+    projected["foreground_continuation"] = bad_flag
+    record = fixture["checkpoint"]
+    record["configuration"] = digest({"config": projected, "prompt": SUMMARY_PROMPT})
+    record["sha256"] = digest({k: v for k, v in record.items() if k != "sha256"})
+    ctx = BoundaryContextManager(fixture["config"])
+    ctx.messages = copy.deepcopy(packet["messages"])
+    assert ctx.restore_checkpoint(record, packet["identity"])["status"] == "rejected"
+
+
+def test_boolean_proof_never_applies_to_v1_full_configuration_contract():
+    packet, fixture = boolean_fixture("portable", True)
+    record = fixture["checkpoint"]
+    record["configurationVersion"] = 1  # Re-signed, but not a v1 full-config digest.
+    record["sha256"] = digest({k: v for k, v in record.items() if k != "sha256"})
+    ctx = BoundaryContextManager(fixture["config"])
+    ctx.messages = copy.deepcopy(packet["messages"])
+    assert ctx.restore_checkpoint(record, packet["identity"])["status"] == "rejected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["portable", "native", "partial-v5"])
+async def test_legacy_hash_provenance_moves_only_with_its_derived_unit(kind):
+    packet, fixture = boolean_fixture(kind, True)
+    ctx = BoundaryContextManager({**fixture["config"], "foreground_continuation": False})
+    ctx.messages = copy.deepcopy(packet["messages"])
+    assert ctx.restore_checkpoint(fixture["checkpoint"], packet["identity"])["status"] in {
+        "restored", "resuming"}
+    original = copy.deepcopy(ctx.export_checkpoint(packet["identity"]))
+    corrupt = copy.deepcopy(original); corrupt["configuration"] = "wrong"
+    corrupt["sha256"] = digest({k: v for k, v in corrupt.items() if k != "sha256"})
+    assert ctx.restore_checkpoint(corrupt, packet["identity"])["status"] == "rejected"
+    assert ctx.export_checkpoint(packet["identity"]) == original
+    await ctx.clear()
+    assert ctx._checkpoint_legacy_foreground is None
+    assert ctx.checkpoint_configuration() == ctx._checkpoint_configuration()
+
+
+@pytest.mark.parametrize("flag", [0, 1, "true", None])
+def test_malformed_current_flag_cannot_admit_historical_boolean_digest(flag):
+    packet, fixture = boolean_fixture("portable", True)
+    ctx = BoundaryContextManager({**fixture["config"], "foreground_continuation": flag})
+    ctx.messages = copy.deepcopy(packet["messages"])
+    assert ctx.restore_checkpoint(fixture["checkpoint"], packet["identity"])["status"] == "rejected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+async def test_historical_boolean_source_transition_installs_fresh_canonical_target(native):
+    from .test_model_transition import transition_fixture
+    state = transition_fixture(native)
+    state.ctx._checkpoint_legacy_foreground = True  # Exactly proof-selected historical hash.
+    state.old = state.ctx.export_checkpoint(state.old["identity"])
+    state.kwargs["source_checkpoint"] = state.old
+    state.ctx.config["foreground_continuation"] = False
+    result = await state.ctx.recover_request(**state.kwargs)
+    assert result["outcome"] == "transitioned"
+    assert state.ctx._checkpoint_legacy_foreground is None
+    assert state.installed[-1][0]["configuration"] == state.ctx._checkpoint_configuration()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,request_sha", [
+    ("partial-v4", "14223048915900e4badad9264f6d248a0022b8b699c97f65bdd2f04917dd2de2"),
+    ("partial-v5", "b4951f13b7778a91d34c95755d04db974773315dd921ac52cb090bde49a8aa93")])
+@pytest.mark.parametrize("flag", [False, True])
+async def test_flag_is_inert_in_actual_summary_request_against_frozen_writer(kind, request_sha, flag):
+    packet, fixture = boolean_fixture(kind, flag)
+    ctx = BoundaryContextManager(fixture["config"])
+    ctx.checkpoint_identity = lambda: copy.deepcopy(packet["identity"])
+    ctx.messages = copy.deepcopy(packet["messages"])
+    requests = []
+    async def complete(request, **kwargs):
+        requests.append({"request": request.model_dump(mode="json"), "kwargs": kwargs})
+        return SimpleNamespace(content=[SimpleNamespace(type="text",
+            text="PAID piece; originals retained; UNKNOWN stays unresolved.")],
+            usage={"input_tokens": 100, "output_tokens": 10})
+    provider = SimpleNamespace(name="fixture", default_model="fixture-model", complete=complete)
+    with pytest.raises(CompactionError, match="summary_work_paused"):
+        await ctx._prepare(provider, None, [])
+    assert digest(requests) == request_sha  # Exact a446 writer request/options, False == True.
+
+
+@pytest.mark.asyncio
+async def test_replaced_completed_unit_cannot_keep_legacy_binding():
+    packet, fixture = boolean_fixture("portable", True)
+    ctx = BoundaryContextManager(fixture["config"])
+    ctx.messages = copy.deepcopy(packet["messages"])
+    assert ctx.restore_checkpoint(fixture["checkpoint"], packet["identity"])["status"] == "restored"
+    replacement = copy.deepcopy(packet["messages"])
+    replacement[0]["content"] += " replaced prefix"
+    await ctx.set_messages(replacement)
+    assert ctx.summary is None and ctx._checkpoint_legacy_foreground is None
+    assert ctx.checkpoint_configuration() == ctx._checkpoint_configuration()
+
+
+def test_fresh_restore_does_not_borrow_prior_unit_proof():
+    packet, fixture = boolean_fixture("portable", True)
+    ctx = BoundaryContextManager(fixture["config"])
+    ctx.messages = copy.deepcopy(packet["messages"])
+    assert ctx.restore_checkpoint(fixture["checkpoint"], packet["identity"])["status"] == "restored"
+    canonical = copy.deepcopy(fixture["checkpoint"])
+    canonical["configuration"] = ctx._checkpoint_configuration()
+    canonical["sha256"] = digest({k: v for k, v in canonical.items() if k != "sha256"})
+    assert ctx.restore_checkpoint(canonical, packet["identity"])["status"] == "restored"
+    assert ctx._checkpoint_legacy_foreground is None
+    assert ctx.export_checkpoint(packet["identity"]) == canonical
