@@ -46,7 +46,7 @@ def classify_transition(context, record, identity):
             "sourceIdentity": copy.deepcopy(source_identity),
             "targetIdentity": copy.deepcopy(identity),
             "sourceRevision": copy.deepcopy(record["sourceRevision"]),
-            "configuration": context.checkpoint_configuration(),
+            "configuration": record["configuration"],
             "sha256": record["sha256"],
             "validation": {"record": "verified", "canonicalPrefix": "verified",
                            "configuration": "verified",
@@ -133,10 +133,11 @@ def restore_checkpoint(context, record, identity):
             configuration = digest({"config": context.config, "prompt": SUMMARY_PROMPT})
         elif record.get("configurationVersion") not in {2, 3, 4, 5}:
             raise ValueError("Checkpoint configuration contract is unsupported")
+        elif ("foreground_continuation" in context.config
+                and type(context.config["foreground_continuation"]) is not bool):
+            raise ValueError("Foreground continuation policy must be boolean")
         if record.get("configuration") != configuration:
-            if (record.get("configurationVersion") not in {2, 3, 4, 5}
-                    or ("foreground_continuation" in context.config
-                        and type(context.config["foreground_continuation"]) is not bool)):
+            if record.get("configurationVersion") not in {2, 3, 4, 5}:
                 raise ValueError("Summary configuration or prompt changed")
             for flag in (False, True):
                 if record.get("configuration") == context._checkpoint_configuration(flag):

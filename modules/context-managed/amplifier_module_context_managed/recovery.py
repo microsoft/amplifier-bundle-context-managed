@@ -329,6 +329,11 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
                 raise RuntimeError("Recovery source or request contract changed; active checkpoint was not replaced")
 
         check()
+        if any(originals[key] and originals[key].get("completed")
+               for key in ("_summary_progress", "_restored_progress")):
+            # This native-only route cannot resume a paid portable prefix.
+            # A completed-only snapshot would silently discard its binding.
+            context._refuse_progress()
         if not config.get("durable_checkpoints") or not callable(preserve):
             raise CompactionError("recovery_evidence_required", "Explicit recovery requires durable checkpoints and the host preserve_evidence callback.")
         if not isinstance(identity, dict) or not identity.get("provider") or not identity.get("model"):
@@ -371,7 +376,7 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
 
         active_record = None
         if originals["summary"] is not None:
-            for key in ("summary", "summary_omitted_indices", "summary_identity", "evidence_refs", "recovery"):
+            for key in fields:
                 setattr(baseline, key, copy.deepcopy(originals[key]))
             active_record = baseline.export_checkpoint(identity)
             baseline = validate(active_record)

@@ -847,8 +847,15 @@ class BoundaryContextManager:
             if ordinary:
                 raise CompactionError("checkpoint_retention_incompatible",
                     "Required originals are outside the saved checkpoint; ordinary fitting uses originals.")
+            if any(part and part.get("completed")
+                   for part in (self._summary_progress, self._restored_progress)):
+                self._refuse_progress()
             self.summary = None
             self.summary_omitted_indices = []
+            self.summary_identity = None
+            self.recovery = None
+            self._checkpoint_legacy_foreground = None
+            configuration = self.checkpoint_configuration()
         summary_state = copy.deepcopy(self._checkpoint_state())
         native = getattr(provider, "supports_native_compaction", None)
         validate_native = getattr(provider, "validate_compacted_context", None)

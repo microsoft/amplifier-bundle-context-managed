@@ -426,3 +426,243 @@ async def test_boolean_paid_binding_mismatch_refuses_before_any_new_call_or_writ
     provider.compact_context.assert_not_awaited()
     ctx.persist_checkpoint.assert_not_awaited()
     assert ctx._restored_progress == paid and ctx._summary_progress is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["portable", "native"])
+@pytest.mark.parametrize("flag", [False, True])
+async def test_retention_discard_without_paid_work_starts_canonical_fingerprint(kind, flag):
+    packet, fixture = boolean_fixture(kind, flag)
+    ctx = BoundaryContextManager(fixture["config"])
+    ctx.messages = copy.deepcopy(packet["messages"])
+    identity = packet["identity"]
+    ctx.checkpoint_identity = lambda: copy.deepcopy(identity)
+    record = copy.deepcopy(fixture["checkpoint"])
+    assert ctx.restore_checkpoint(record, identity)["status"] == "restored"
+    await ctx.get_messages_for_request_retaining(
+        provider=None, retain_contents=[packet["messages"][0]["content"]])
+    assert ctx.summary is None and ctx._checkpoint_legacy_foreground is None
+    assert ctx.checkpoint_configuration() == ctx._checkpoint_configuration()
+    fresh = BoundaryContextManager(fixture["config"])
+    provider = SimpleNamespace(name="fixture", default_model="fixture-model")
+    assert ctx._summary_fingerprint(ctx.messages, identity, provider) == fresh._summary_fingerprint(
+        ctx.messages, identity, provider)
+    assert record == fixture["checkpoint"]  # No host-file rewrite/rollback claim.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", [False, True])
+async def test_retention_discard_cannot_rebind_completed_paid_prefix(flag):
+    packet, fixture = boolean_fixture("completed-partial-v5", flag)
+    ctx = BoundaryContextManager(fixture["config"])
+    ctx.messages = copy.deepcopy(packet["messages"])
+    identity = packet["identity"]
+    ctx.checkpoint_identity = lambda: copy.deepcopy(identity)
+    assert ctx.restore_checkpoint(fixture["checkpoint"], identity)["status"] == "resuming"
+    before = ctx.export_checkpoint(identity)
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await ctx.get_messages_for_request_retaining(
+            provider=None, retain_contents=[packet["messages"][0]["content"]])
+    assert ctx.export_checkpoint(identity) == before
+
+
+@pytest.mark.parametrize("kind", ["portable", "native", "partial-v4", "partial-v5"])
+@pytest.mark.parametrize("flag", [False, True])
+@pytest.mark.parametrize("caller", ["cold", "warm-source", "opposite", "canonical"])
+def test_classification_configuration_is_verified_source_not_caller_state(kind, flag, caller):
+    packet, fixture = boolean_fixture(kind, flag)
+    ctx = BoundaryContextManager(fixture["config"])
+    ctx.messages = copy.deepcopy(packet["messages"])
+    identity, record = packet["identity"], fixture["checkpoint"]
+    if caller != "cold":
+        previous = copy.deepcopy(record)
+        if caller == "opposite":
+            previous = boolean_fixture(kind, not flag)[1]["checkpoint"]
+        elif caller == "canonical":
+            previous = legacy_completed(False)
+            previous["identity"] = copy.deepcopy(identity)
+            previous["sourceRevision"] = {"messages": 2, "sha256": digest(ctx.messages[:2])}
+            previous["configuration"] = ctx._checkpoint_configuration()
+            previous["sha256"] = digest({k: v for k, v in previous.items() if k != "sha256"})
+        assert ctx.restore_checkpoint(previous, identity)["status"] in {"restored", "resuming"}
+    state = copy.deepcopy(ctx.__dict__)
+    result = ctx.classify_checkpoint_transition(record, {**identity, "model": "target"})
+    assert result["status"] == "transition_required"
+    assert result["configuration"] == record["configuration"]
+    assert result["sha256"] == record["sha256"]
+    # Classifier may not clear caller provenance/paid state while verifying a foreign unit.
+    for field in ("summary", "_summary_progress", "_restored_progress", "_checkpoint_legacy_foreground"):
+        assert getattr(ctx, field) == state[field]
+
+
+@pytest.mark.parametrize("bad_flag", [0, 1, "true", None, {}, []])
+def test_canonical_digest_restore_rejects_malformed_flag_not_just_legacy_fallback(bad_flag):
+    packet, fixture = boolean_fixture("portable", True)
+    ctx = BoundaryContextManager({**fixture["config"], "foreground_continuation": bad_flag})
+    ctx.messages = copy.deepcopy(packet["messages"])
+    record = copy.deepcopy(fixture["checkpoint"])
+    record["configuration"] = ctx._checkpoint_configuration()
+    record["sha256"] = digest({k: v for k, v in record.items() if k != "sha256"})
+    result = ctx.restore_checkpoint(record, packet["identity"])
+    assert result["status"] == "rejected"
+    assert "boolean" in result["reason"]
+    assert ctx.classify_checkpoint_transition(
+        record, {**packet["identity"], "model": "target"})["status"] == "rejected"
+
+
+def same_model_recovery_case(kind, flag):
+    packet, fixture = boolean_fixture(kind, flag)
+    ctx = BoundaryContextManager(fixture["config"])
+    ctx.messages = copy.deepcopy(packet["messages"]) + [
+        {"role": "assistant", "content": "New verified evidence since source note."},
+        {"role": "user", "content": "Continue; no completed effects may be repeated."}]
+    identity = copy.deepcopy(packet["identity"])
+    ctx.checkpoint_identity = lambda: copy.deepcopy(identity)
+    assert ctx.restore_checkpoint(fixture["checkpoint"], identity)["status"] in {"restored", "resuming"}
+    before = ctx.export_checkpoint(identity)
+    def unchanged():
+        assert ctx.export_checkpoint(identity) == before
+    async def budget(request, **kwargs):
+        return {"estimated_input_tokens": 100, "input_limit_tokens": 10000,
+                "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 100}}
+    async def compact(request):
+        unchanged()
+        return {"kind": "native", "message": {"role": "user", "content": "New derived note.",
+            "metadata": {"source": "context-managed", "ephemeral": True, "persisted": True,
+                         "fixture:opaque": {"model": identity["model"], "state": "replacement"}}}}
+    model = SimpleNamespace(name=identity["provider"], default_model=identity["model"],
+        supports_native_compaction=lambda: True, validate_compacted_context=lambda row: (
+            row.get("metadata", {}).get("fixture:opaque", {}).get("model") == identity["model"]),
+        request_budget=AsyncMock(side_effect=budget), compact_context=AsyncMock(side_effect=compact),
+        complete=AsyncMock())
+    async def count(view):
+        unchanged()
+        replaced = "replacement" in str(view)
+        return {"dispatch": ChatRequest(messages=[Message(**row) for row in view], model=identity["model"]),
+            "budget_decision": {"estimated_input_tokens": 500 if replaced else 7000,
+                "input_limit_tokens": 10000, "measurement": {"kind": "provider_count",
+                    "source": "fixture", "input_tokens": 500 if replaced else 7000}}}
+    async def save(*args):
+        unchanged()
+    async def install(record, report):
+        unchanged()
+        return record["sha256"]
+    ctx.preserve_evidence = AsyncMock(return_value=copy.deepcopy(ctx.evidence_refs))
+    return SimpleNamespace(ctx=ctx, model=model, before=before, identity=identity,
+        kwargs={"provider": model, "identity": identity, "count_view": AsyncMock(side_effect=count),
+            "guard": lambda: None, "save_progress": AsyncMock(side_effect=save),
+            "install": AsyncMock(side_effect=install), "target_bytes": 10000})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["partial-v4", "partial-v5", "completed-partial-v5"])
+@pytest.mark.parametrize("flag", [False, True])
+@pytest.mark.parametrize("location", ["restored", "in-memory"])
+async def test_same_model_native_recovery_cannot_drop_real_paid_partial(kind, flag, location):
+    state = same_model_recovery_case(kind, flag)
+    if location == "in-memory":
+        state.ctx._summary_progress = copy.deepcopy(state.ctx._restored_progress)
+        state.ctx._restored_progress = None
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await state.ctx.recover_request(**state.kwargs)
+    assert state.ctx.export_checkpoint(state.identity) == state.before
+    state.model.compact_context.assert_not_awaited()
+    state.model.complete.assert_not_awaited()
+    state.ctx.preserve_evidence.assert_not_awaited()
+    for key in ("count_view", "save_progress", "install"):
+        state.kwargs[key].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", [False, True])
+@pytest.mark.parametrize("phase", ["count", "save", "install", "success"])
+async def test_same_model_historical_native_recovery_retains_source_until_exact_replace(flag, phase):
+    state = same_model_recovery_case("native", flag)
+    if phase != "success":
+        key = {"count": "count_view", "save": "save_progress", "install": "install"}[phase]
+        state.kwargs[key].side_effect = OSError("Synthetic storage/count boundary")
+        with pytest.raises(OSError):
+            await state.ctx.recover_request(**state.kwargs)
+        assert state.ctx.export_checkpoint(state.identity) == state.before
+    else:
+        result = await state.ctx.recover_request(**state.kwargs)
+        assert result["outcome"] == "recovered"
+        installed = state.kwargs["install"].call_args.args[0]
+        assert state.ctx.export_checkpoint(state.identity) == installed
+        assert installed["sha256"] != state.before["sha256"]
+        assert installed["configuration"] == state.before["configuration"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["portable", "native"])
+@pytest.mark.parametrize("warm", [False, True], ids=["cold", "warm"])
+@pytest.mark.parametrize("phase", ["count", "install", "success"])
+async def test_real_frozen_source_transition_keeps_exact_readback_and_rollback_scope(kind, warm, phase):
+    packet, fixture = boolean_fixture(kind, True)
+    ctx = BoundaryContextManager(fixture["config"])
+    ctx.messages = copy.deepcopy(packet["messages"])
+    source_identity, record = packet["identity"], copy.deepcopy(fixture["checkpoint"])
+    source_bytes = copy.deepcopy(record)
+    if warm:
+        assert ctx.restore_checkpoint(record, source_identity)["status"] == "restored"
+    selected = {**source_identity, "model": "model-b"}
+    ctx.checkpoint_identity = lambda: copy.deepcopy(selected)
+    active_before = copy.deepcopy(ctx._checkpoint_state())
+    def unchanged():
+        assert ctx._checkpoint_state() == active_before
+        assert record == source_bytes
+        if warm:
+            assert ctx.export_checkpoint(source_identity) == source_bytes
+    async def budget(request, **kwargs):
+        assert "source-only" not in str(request)
+        return {"estimated_input_tokens": 100, "input_limit_tokens": 10000,
+                "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 100}}
+    async def count(view):
+        unchanged()
+        assert "source-only" not in str(view)
+        if phase == "count":
+            raise OSError("Synthetic target count error")
+        tokens = 12000 if any(len(str(row.get("content", ""))) > 3000 for row in view) else 500
+        return {"dispatch": ChatRequest(messages=[Message(**row) for row in view], model=selected["model"]),
+            "budget_decision": {"estimated_input_tokens": tokens, "input_limit_tokens": 10000,
+                "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": tokens}}}
+    async def compact(request):
+        unchanged()
+        assert request.model == selected["model"]
+        return {"kind": "native", "message": {"role": "user", "content": "Target note.",
+            "metadata": {"source": "context-managed", "ephemeral": True, "persisted": True,
+                         "fixture:opaque": {"model": selected["model"], "state": "target-only"}}}}
+    async def install(candidate, verification):
+        unchanged()
+        if phase == "install":
+            raise OSError("Synthetic installation failure")
+        return candidate["sha256"]
+    model = SimpleNamespace(name=selected["provider"], default_model=selected["model"],
+        supports_native_compaction=lambda: True, validate_compacted_context=lambda row: (
+            row.get("metadata", {}).get("fixture:opaque", {}).get("model") == selected["model"]),
+        compact_context=AsyncMock(side_effect=compact), request_budget=AsyncMock(side_effect=budget),
+        complete=AsyncMock())
+    ctx.preserve_evidence = AsyncMock(return_value=copy.deepcopy(record["evidenceRefs"]))
+    write, admit = AsyncMock(), AsyncMock(return_value=True)
+    kwargs = dict(provider=model, count_view=count, identity=selected, save_progress=write,
+        install=install, guard=lambda: None, source_checkpoint=record, admit_call=admit,
+        max_calls=16, target_bytes=10000)
+    if phase != "success":
+        with pytest.raises(OSError):
+            await ctx.recover_request(**kwargs)
+        unchanged()
+        if phase == "count":
+            model.compact_context.assert_not_awaited()
+            admit.assert_not_awaited()
+            write.assert_not_awaited()
+    else:
+        result = await ctx.recover_request(**kwargs)
+        assert result["outcome"] == "transitioned"
+        target_record = ctx.export_checkpoint(selected)
+        readback = BoundaryContextManager(fixture["config"])
+        readback.messages = copy.deepcopy(packet["messages"])
+        assert readback.restore_checkpoint(target_record, selected)["status"] == "restored"
+        assert readback.export_checkpoint(selected) == target_record
+        assert target_record["configuration"] == ctx._checkpoint_configuration()
+        assert ctx._checkpoint_legacy_foreground is None
+        assert record == source_bytes

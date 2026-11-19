@@ -145,10 +145,22 @@ historical digest only when it is exactly reproduced from the current summary
 configuration and prompt with the former `foreground_continuation: false` or
 `true` key. Restored state retains that proven hash for exact export and paid
 progress resume; no record, provider identity, source, or fingerprint is rewritten.
+For these versions, restore rejects a non-boolean foreground policy even when the
+normalized digest matches. Passive transition classification reports the verified
+source record's configuration, independent of the caller's active checkpoint.
 Other configuration differences still reject. Older
 checkpoints retain their original, stricter configuration validation.
 Normalized omitted-engine mounts keep the configuration identity of old explicit
 `engine: boundary` mounts. Legacy summary markers are not Boundary checkpoints.
+
+Rejected incoming restores preserve the previous active derived unit. This is not
+a promise that every preparation failure rolls back an intentionally invalidated
+completed note: required-original retention may discard that note and its legacy
+hash witness, after which fresh work uses the canonical configuration. A retained
+paid partial instead refuses before that discard. The same-model native recovery
+entry also refuses an active paid partial rather than snapshotting only its
+completed note; reconciliation of that paid work is not implicit recovery consent.
+These in-memory boundaries do not rewrite or delete the host's source checkpoint.
 
 Export may reuse a bounded, exact witness of unchanged covered history. If the
 whole witness exceeds its 8 MiB budget, only complete leading rows are retained;
