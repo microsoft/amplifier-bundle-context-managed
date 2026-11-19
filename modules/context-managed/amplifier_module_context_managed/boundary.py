@@ -17,10 +17,10 @@ from .request_context import RequestContext
 from .errors import CompactionError
 
 from .interrupted import calls as tool_calls, project as project_interrupted, result_ids, unanswered
-from .working_history import select_window, settled_results
+from .working_history import reference_settled_results, select_window, settled_results
 from .checkpoint import digest
 from .prefix_digest import PrefixDigest
-from .measurement import RequestMeasurement, estimate_pressure
+from .measurement import RequestMeasurement, estimate_pressure, transient_count_unavailable
 from .summary import (SummaryInputTooLarge, add_usage, public_messages, request_fits,
                       source_fragments, summary_config, summary_prompt, summary_request)
 
@@ -81,6 +81,10 @@ class BoundaryContextManager:
         self._foreground_unconfirmed = False
         self._foreground_native_refusal = None
         self._is_cancelled = None
+        self._settled_maintenance = False
+        self._maintenance_task = None
+        self._maintenance_revision = None
+        self._maintenance_requested = False
 
     @staticmethod
     def _same_prefix(record, messages):
@@ -94,6 +98,7 @@ class BoundaryContextManager:
             return False
 
     async def add_message(self, message):
+        self.cancel_settled_compaction()
         self.messages.append(copy.deepcopy(message))
         self.revision += 1
 
@@ -115,6 +120,7 @@ class BoundaryContextManager:
             raise TypeError("History consumers must not return an awaitable")
 
     async def set_messages(self, messages):
+        self.cancel_settled_compaction()
         replacement = copy.deepcopy(messages)
         self._checkpoint_prefix_digest.clear()
         # A completed background job can replace a tool receipt in the recent
@@ -159,7 +165,7 @@ class BoundaryContextManager:
         inert = {"summarize_trigger", "summary_retry_delay", "summary_max_calls",
                  "native_min_new_tokens", "compaction_notice_enabled",
                  "compaction_notice_token_reserve", "token_meter", "durable_checkpoints",
-                 "archive_recovery"}
+                 "archive_recovery", "compaction_schedule"}
         return digest({"config": {k: v for k, v in self.config.items() if k not in inert},
                        "prompt": SUMMARY_PROMPT})
 
@@ -168,6 +174,7 @@ class BoundaryContextManager:
         return export_checkpoint(self, identity)
 
     def restore_checkpoint(self, record, identity):
+        self.cancel_settled_compaction()
         from .checkpoint import restore_checkpoint
         # Validation is transactional. A rejected incoming record is not an
         # explicit discard of already admitted (possibly paid) work.
@@ -212,6 +219,7 @@ class BoundaryContextManager:
         ownership guard and an exact-SHA installation acknowledgement. See
         recovery.recover_request for progress, retention and failure semantics.
         """
+        self.cancel_settled_compaction()
         from .recovery import recover_request
         return await recover_request(self, provider=provider, count_view=count_view,
             identity=identity, save_progress=save_progress, install=install, guard=guard,
@@ -226,6 +234,7 @@ class BoundaryContextManager:
         self._restored_progress = None
 
     async def set_system_prompt_factory(self, factory):
+        self.cancel_settled_compaction()
         self.factory = factory
 
     def _fitter(self):
@@ -699,7 +708,7 @@ class BoundaryContextManager:
         return unchanged
 
     async def _prepare(self, provider, token_budget, retain, measurement=None, *, reason=None,
-                       ordinary=False, snapshot=None, on_preserved=None, operations_guard=None):
+                       ordinary=False, snapshot=None, on_preserved=None, operations_guard=None, foreground_select=None):
         messages, revision = copy.deepcopy(self.messages), self.revision
         self._check_stop()
         input_key = next(((i, digest(row)) for i, row in reversed(list(enumerate(messages)))
@@ -825,7 +834,6 @@ class BoundaryContextManager:
             self.summary = None
             self.summary_omitted_indices = []
         summary_state = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
-        assembled = self._assembled(messages, self.summary, retain, carry)
         native = getattr(provider, "supports_native_compaction", None)
         validate_native = getattr(provider, "validate_compacted_context", None)
         requires_context = getattr(provider, "native_compaction_requires_request_context", False)
@@ -844,6 +852,11 @@ class BoundaryContextManager:
             if not valid_native:
                 self.checkpoint_status = {"status": "rejected", "reason": "Native checkpoint transport is unavailable or invalid.", "originalsAvailable": True}
                 raise CompactionError("native_checkpoint_invalid", "The saved native checkpoint cannot be used by this provider. Restore a compatible checkpoint or explicitly recover the history.")
+        if foreground_select is not None:
+            # Only a validated checkpoint may represent its covered prefix.
+            rows = self._assembled(messages, self.summary, retain, carry) if self.summary else None
+            return await foreground_select(rows, messages)
+        assembled = self._assembled(messages, self.summary, retain, carry)
         end = self._boundary(messages, retain)
         unknown = unanswered(messages, self._human)
         covered_unknown = [call for call in unknown if call["source_message"] < end]
@@ -1120,20 +1133,30 @@ class BoundaryContextManager:
                             if ordinary and self._foreground_native_refusal == refusal_key:
                                 raise CompactionError("ordinary_compaction_deferred",
                                     "Unchanged optional native input previously exceeded its allowance; no retry was made.")
-                            fits, compact_budget = await request_fits(provider, request)
-                            check_summary_contract()
-                            if not fits:
-                                # Native compaction accepts one complete eligible
-                                # window, never fragments. Oversized legacy history
-                                # requires explicit recovery; never silently switch
-                                # compaction methods or discard input to make it fit.
-                                stats["native_selection"] = "input_exceeds_native_allowance"
-                                stats["native_request_budget"] = compact_budget
-                                if ordinary:
-                                    self._foreground_native_refusal = copy.deepcopy(refusal_key)
-                                raise CompactionError("native_input_oversized", "Native input exceeds the provider allowance. Restore the last compatible checkpoint or explicitly recover this oversized history; it was not sent to native compaction.")
-                            stats["calls"] += 1
-                            result = await self._paid_compaction(lambda: provider.compact_context(request), input_key)
+                            try:
+                                fits, compact_budget = await request_fits(provider, request)
+                                check_summary_contract()
+                                if self._settled_maintenance and (not compact_budget
+                                        or compact_budget["measurement_kind"] != "provider_count"):
+                                    raise CompactionError("native_measurement_unavailable",
+                                        "Deferred native compaction needs a verified native input budget.")
+                                if not fits:
+                                    # Native compaction accepts one complete eligible
+                                    # window, never fragments. Oversized legacy history
+                                    # requires explicit recovery; never silently switch
+                                    # compaction methods or discard input to make it fit.
+                                    stats["native_selection"] = "input_exceeds_native_allowance"
+                                    stats["native_request_budget"] = compact_budget
+                                    if ordinary:
+                                        self._foreground_native_refusal = copy.deepcopy(refusal_key)
+                                    raise CompactionError("native_input_oversized", "Native input exceeds the provider allowance. Restore the last compatible checkpoint or explicitly recover this oversized history; it was not sent to native compaction.")
+                                stats["calls"] += 1
+                                result = await self._paid_compaction(lambda: provider.compact_context(request), input_key)
+                            finally:
+                                if self._settled_maintenance:
+                                    release = getattr(provider, "release_media_request", None)
+                                    if callable(release):
+                                        release(request, request_options=None)
                             if revision != self.revision:
                                 raise RuntimeError("History changed during compaction; stale summary was discarded")
                             check_summary_contract()
@@ -1303,6 +1326,7 @@ class BoundaryContextManager:
 
     async def _fit_ordinary(self, provider, token_budget, retain, fit, measurement=None, reason=None):
         """Optional compaction cannot own foreground admission. Exact fitting does."""
+        self.cancel_settled_compaction()
         async with self.lock:
             revision, config, factory = self.revision, copy.deepcopy(self.config), self.factory
             operations = copy.deepcopy(self.active_operations()) if self.active_operations else None
@@ -1335,12 +1359,25 @@ class BoundaryContextManager:
             guard()
             prompt = await factory() if factory else None
             guard()
+            after_turn = self.config.get("compaction_schedule") == "after_turn"
+
+            async def select(checkpoint_rows, messages):
+                nonlocal checkpoint
+                checkpoint = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
+                return await self._fit_continuation(fit, retain, guard, operations, token_budget,
+                    provider, None, prompt, omit_full=True, select_first=True,
+                    checkpoint_rows=checkpoint_rows, messages=messages, provider_overflow=reason == "provider_overflow")
+
             try:
                 try:
-                    fitter, protected = await self._prepare(
+                    prepared = await self._prepare(
                         provider, token_budget, retain, measurement, reason=reason, ordinary=True,
                         snapshot=(prompt, operations), on_preserved=bind_preserved_identity,
-                        operations_guard=operations_guard)
+                        operations_guard=operations_guard, foreground_select=select if after_turn else None)
+                    if after_turn:
+                        guard()
+                        return prepared
+                    fitter, protected = prepared
                     checkpoint = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
                     result = await fit(fitter, protected)
                 except (CompactionError, ContextLengthError) as error:
@@ -1349,12 +1386,13 @@ class BoundaryContextManager:
                     # untyped provider rejection authorize history omission.
                     if (isinstance(error, CompactionError) and error.code == "checkpoint_persist_failed"
                             or isinstance(error, ContextLengthError)
-                            and not hasattr(error, "context_input_limit")):
+                            and (after_turn or not hasattr(error, "context_input_limit"))):
                         raise
                     checkpoint = copy.deepcopy((self.summary, self.summary_omitted_indices, self.summary_identity))
                     result = await self._fit_continuation(
                         fit, retain, guard, operations, token_budget, provider, error, prompt,
-                        omit_full=(reason == "provider_overflow"
+                        select_first=after_turn, provider_overflow=reason == "provider_overflow",
+                        omit_full=(after_turn or reason == "provider_overflow"
                             or isinstance(error, CompactionError) and error.code == "ordinary_pressure_unavailable"))
                 guard()
                 return result
@@ -1363,9 +1401,11 @@ class BoundaryContextManager:
                 raise
 
     async def _fit_continuation(self, fit, retain, guard, operations, token_budget, provider,
-                                first_error, prompt, *, omit_full=False):
+                                first_error, prompt, *, omit_full=False, select_first=False,
+                                checkpoint_rows=None, messages=None, provider_overflow=False):
         """Select whole settled exchanges; never make the latest input a tail boundary."""
-        messages = copy.deepcopy(self.messages)
+        if messages is None:
+            messages = copy.deepcopy(self.messages)
         carry = self._carry(messages)
         unknown = unanswered(messages, self._human)
         fitter = self._fitter()
@@ -1398,17 +1438,29 @@ class BoundaryContextManager:
             await fitter.set_messages(rows)
             try:
                 result = await fit(fitter, retain)
-            except ContextLengthError as error:
+            except Exception as error:
                 guard()
-                if not hasattr(error, "context_input_limit"):
+                if not (isinstance(error, ContextLengthError) and hasattr(error, "context_input_limit")
+                        or select_first and transient_count_unavailable(error)):
                     raise
                 last_error = error
                 return None
             guard()
+            if select_first:
+                measured = result.get("measured_after") if isinstance(result, dict) else None
+                budget = result.get("policy_budget") if isinstance(result, dict) else None
+                if omitted or (measured is not None and budget
+                               and measured >= budget * self.config.get("summarize_trigger", 0.70)):
+                    self._maintenance_requested = True
             if omitted and isinstance(result, dict):
                 result["continuation"] = "incomplete_history"
             return result
 
+        if checkpoint_rows is not None and not provider_overflow:
+            if estimate_pressure(fitter, checkpoint_rows) <= fitter._calculate_budget(token_budget, provider):
+                result = await attempt(checkpoint_rows)
+                if result is not None:
+                    return result
         if not omit_full:
             result = await attempt(self._project(messages, retain, carry, unknown))
             if result is not None:
@@ -1426,8 +1478,19 @@ class BoundaryContextManager:
             pending.update(ids)
             pending.difference_update(settled_results(row))
         active = (pending - interrupted) | ambiguous
+        latest_results = set()
+        if select_first:
+            # The last completed batch is input for the next model step. Keep
+            # its declaration and receipts together on the minimum candidate.
+            for row in reversed(messages):
+                receipts = result_ids(row)
+                if receipts:
+                    latest_results.update(receipts)
+                elif self._human(row) or row.get("role") == "assistant":
+                    break
+        protected_calls = active | latest_results
         required.update(i for i, row in enumerate(messages)
-                        if active.intersection(result_ids(row) | tool_calls(row).keys()))
+                        if protected_calls.intersection(result_ids(row) | tool_calls(row).keys()))
         size = lambda rows: max(1, estimate_pressure(fitter, rows)) * 4
         limit = getattr(last_error, "context_input_limit",
                         fitter._calculate_budget(token_budget, provider)) * 4
@@ -1435,25 +1498,62 @@ class BoundaryContextManager:
             _, selection = select_window(messages, len(messages), retain, allowance, self._human,
                 estimate_bytes=size, required_indices=required, strict=False, link_results=True)
             if selection is None:
+                indices = range(len(messages))
+                if select_first and not provider_overflow:
+                    result = await attempt(self._project(messages, retain, carry, unknown))
+                    if result is not None:
+                        return result
                 continue
             indices = [i for start, end in selection["selectedRanges"] for i in range(start, end)]
             rows = self._project([messages[i] for i in indices], retain, carry, unknown)
             result = await attempt(rows, True)
             if result is not None:
                 return result
-        if isinstance(last_error, ContextLengthError):
+        if select_first and latest_results and (provider_overflow or hasattr(last_error, "context_input_limit")
+                or transient_count_unavailable(last_error)):
+            # A single settled output can exceed the model's entire allowance.
+            # Keep the real call and result id and address the full saved result.
+            smaller = reference_settled_results(
+                messages, indices, (latest_results & declared) - active, retain, self._human)
+            if smaller is not None:
+                result = await attempt(self._project(smaller, retain, carry, unknown), True)
+                if result is not None:
+                    return result
+        if isinstance(last_error, ContextLengthError) and hasattr(last_error, "context_input_limit"):
             error = ContextLengthError(
                 "Required current input, instructions or unresolved tool exchange exceeds the selected "
                 "model allowance. Canonical history was not truncated; no request was dispatched.")
             error.context_input_tokens = last_error.context_input_tokens
             error.context_input_limit = last_error.context_input_limit
             raise error from last_error
+        if last_error is None:
+            raise ContextLengthError("The rejected view has no smaller complete foreground candidate.")
         raise last_error
+
+    @property
+    def requires_measured_foreground(self):
+        return bool(self.config.get("foreground_continuation")
+                    and self.config.get("compaction_schedule") == "after_turn")
+
+    async def close_settled_compaction(self):
+        task = self._maintenance_task
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    def cancel_settled_compaction(self):
+        if self._maintenance_task is not None:
+            self._maintenance_task.cancel()
+
+    def schedule_settled_compaction(self, *, provider, count_view, retain_contents):
+        from .settled_maintenance import schedule
+        return schedule(self, provider, count_view, retain_contents)
 
     async def get_messages_for_request(self, token_budget=None, provider=None):
         return await self.get_messages_for_request_retaining(retain_contents=[], token_budget=token_budget, provider=provider)
 
     async def get_messages_for_request_retaining(self, *, retain_contents, provider=None, token_budget=None, hard_fit=False):
+        self.cancel_settled_compaction()
         if self.config.get("foreground_continuation") and hard_fit:
             async def fit(fitter, retain):
                 return await fitter.get_messages_for_request_retaining(
@@ -1491,6 +1591,7 @@ class BoundaryContextManager:
         # a fit: the caller must still prove the exact replacement with a count.
         if reason not in (None, "provider_overflow"):
             raise ValueError("Unknown measured request preparation reason")
+        self.cancel_settled_compaction()
         self._check_stop()
         # A host may consume an explicitly requested one-shot recovery here.
         # It owns intent/Stop/storage admission; absence does not change policy.
@@ -1503,17 +1604,24 @@ class BoundaryContextManager:
                 return recovered
         if self.config.get("foreground_continuation"):
             count_calls = 0
+            transient_count_error = None
+
             async def count(view):
-                nonlocal count_calls
+                nonlocal count_calls, transient_count_error
                 count_calls += 1
-                return await count_view(view)
+                try:
+                    return await count_view(view)
+                except Exception as error:
+                    if self.requires_measured_foreground and transient_count_unavailable(error):
+                        transient_count_error = error
+                    raise
             measurement = RequestMeasurement(count)
             async def fit(fitter, retain):
                 async def final_count(view):
                     attempt = await measurement.count(view)
-                    if (getattr(measurement, "pressure_error", None) is not None
-                            and fitter._measured_budget_decision(attempt) is None):
-                        raise measurement.pressure_error
+                    missing_count = transient_count_error or getattr(measurement, "pressure_error", None)
+                    if missing_count is not None and fitter._measured_budget_decision(attempt) is None:
+                        raise missing_count
                     return attempt
                 return await fitter.get_measured_request_view(
                     provider=provider, retain_contents=retain, count_view=final_count,
@@ -1593,6 +1701,12 @@ async def mount_boundary(coordinator, config):
     coordinator.register_capability("context.request_retention", context.get_messages_for_request_retaining)
     if context.config["token_meter"] == "actual":
         coordinator.register_capability("context.measured_request_view", context.get_measured_request_view)
+    if config.get("foreground_continuation") and config.get("compaction_schedule") == "after_turn":
+        coordinator.register_capability("context.schedule_settled_compaction", context.schedule_settled_compaction)
+        coordinator.register_capability("context.cancel_settled_compaction", context.cancel_settled_compaction)
+        register_cleanup = getattr(coordinator, "register_cleanup", None)
+        if register_cleanup:
+            register_cleanup(context.close_settled_compaction)
     coordinator.register_capability("context.compacting", lambda: context.is_compacting)
     coordinator.register_capability("context.history_authority", "host")
     coordinator.register_capability("context.history", context.get_messages)

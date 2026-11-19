@@ -34,6 +34,7 @@ or writes a private transcript. See [Boundary policy](BOUNDARY_ENGINE.md) and
 | `summary_retry_delay` | 60 seconds | Initial transient-failure cooldown with exponential backoff and bounded attempts. Not a generation deadline. |
 | `separate_summary_provider` | `false` | Require the host's `context.summary_provider` for portable notes. |
 | `durable_checkpoints` | `false` | Opt into host evidence preservation and checkpoint capabilities. Storage is host-owned. |
+| `compaction_schedule` | foreground | With `foreground_continuation`, select `after_turn` to fit ordinary requests before scheduling independent checkpoint maintenance on a successful turn. |
 | `archive_recovery` | `false` | Opt-in bounded working-view selection from host-retained originals, with durable checkpoints; not automatic Legacy import. |
 
 Shared request settings such as `max_tokens_fallback`, `output_reserve_fraction`,

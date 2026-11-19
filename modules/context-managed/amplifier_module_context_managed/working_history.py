@@ -38,6 +38,42 @@ def settled_results(row):
     return settled
 
 
+def reference_settled_results(messages, indices, eligible, retain, human):
+    """Reduce only result bodies with an exact settled original in this transcript."""
+    from .checkpoint import digest
+
+    reduced = []
+    changed = False
+    for index in indices:
+        row = messages[index]
+        known = settled_results(row) & eligible
+        body = row.get("content")
+        if not known or human(row) or (isinstance(body, str) and body in retain):
+            reduced.append(row)
+            continue
+        record = (f"Result recorded in saved history at message index {index}, SHA-256 {digest(row)}. "
+                  "Its full output was omitted from this request. Read the original result for details. "
+                  "Do not execute the tool again to recover its output.")
+        def shorter(value):
+            return isinstance(value, (dict, list, str)) and len(json.dumps(value, ensure_ascii=False)) > len(record)
+        if row.get("role") == "tool" and row.get("tool_call_id") in known and shorter(body):
+            row = {**row, "content": record}
+            changed = True
+        elif isinstance(body, list):
+            blocks = []
+            for block in body:
+                if (isinstance(block, dict) and block.get("type") == "tool_result"
+                        and (block.get("tool_call_id") or block.get("tool_use_id")) in known):
+                    key = "output" if "output" in block else "content"
+                    if shorter(block.get(key)):
+                        block = {**block, key: record}
+                        changed = True
+                blocks.append(block)
+            row = {**row, "content": blocks}
+        reduced.append(row)
+    return reduced if changed else None
+
+
 def exchanges(messages, human=None):
     from .interrupted import result_ids, unanswered
     interrupted = {}
@@ -87,20 +123,25 @@ def select_window(messages, end, retain, byte_budget, human, *, estimate_bytes=N
         # A background call may have both a queued receipt and a later final
         # result. Join their protocol groups without requiring unrelated rows
         # between them. No selected late result may lose its original batch.
+        parents = list(range(len(units)))
+
+        def root(index):
+            while index != parents[index]:
+                parents[index] = parents[parents[index]]
+                index = parents[index]
+            return index
+
         owners = {}
-        for unit in units:
-            ids = set().union(*(result_ids(messages[i]) | calls(messages[i]).keys() for i in unit))
-            linked = [owners[key] for key in ids if key in owners]
-            for other in linked:
-                unit.update(other)
-            for key in list(owners):
-                if any(owners[key] is other for other in linked):
-                    owners[key] = unit
-            for key in ids:
-                owners[key] = unit
-        # Earlier units now referenced by a merged unit are redundant.
-        units = [unit for n, unit in enumerate(units)
-                 if not any(unit <= later for later in units[n + 1:])]
+        for index, unit in enumerate(units):
+            for row_index in unit:
+                for key in result_ids(messages[row_index]) | calls(messages[row_index]).keys():
+                    if key in owners:
+                        parents[root(owners[key])] = index
+                    owners[key] = index
+        merged = {}
+        for index, unit in enumerate(units):
+            merged.setdefault(root(index), set()).update(unit)
+        units = [merged[key] for key in sorted(merged)]
     selected = set()
     for unit in units:
         if required.intersection(unit):

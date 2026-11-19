@@ -41,6 +41,26 @@ this is read-only access, not automatic canonical import. See the
 
 ### Ordinary request fitting (host opt in)
 
+Hosts enabling both `foreground_continuation: true` and
+`compaction_schedule: after_turn` select whole exchanges locally before
+counting a foreground candidate. The modeled request uses the validated
+checkpoint when it fits. A transient, explicitly classified counter outage
+can select a smaller candidate. A fresh authoritative measurement then admits
+that exact request. The latest completed tool batch stays paired with its
+receipts. If its saved result alone prevents a measured fit, its result body
+can carry the canonical message index and digest for retrieval.
+
+After a successful turn the optional synchronous capability
+`context.schedule_settled_compaction(provider=..., count_view=..., retain_contents=...)`
+queues one session-owned task when the last turn needed less history or crossed
+the configured pressure threshold. The host supplies a count callback that
+remains valid for background work. The capability returns whether it queued a
+task. Call `context.cancel_settled_compaction()` at Stop. The mounted context
+cancels and drains its task on coordinator cleanup. New foreground work
+supersedes the task. Only validated results for the same source revision and
+selection can advance the checkpoint. Observers can distinguish these events
+using `context_work: settled_maintenance`.
+
 `foreground_continuation: true` makes measured ordinary requests (and explicit
 `hard_fit` requests) independent of optional compaction success. It reuses the
 existing whole-exchange selector and exact request fitter; it does not install a

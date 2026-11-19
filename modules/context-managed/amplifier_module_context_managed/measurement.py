@@ -14,6 +14,18 @@ def estimate_pressure(fitter, messages):
     return fitter._estimate_tokens(public_messages(messages))
 
 
+def transient_count_unavailable(error):
+    """Classify count outages, including OpenAI providers predating the shared flag."""
+    if getattr(error, "context_count_unavailable", False) is True:
+        return True
+    if (type(error).__module__, type(error).__name__) != (
+            "amplifier_module_provider_openai._token_count", "TokenCountError"):
+        return False
+    diagnostic = getattr(error, "count_failure", None)
+    return (isinstance(diagnostic, dict) and diagnostic.get("retryable") is True
+            and diagnostic.get("category") in {"timeout", "connection", "rate_limit", "service"})
+
+
 class RequestMeasurement:
     """Reuse one preflight only when the final provider-facing view is exact.
 
