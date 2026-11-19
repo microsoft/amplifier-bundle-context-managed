@@ -149,6 +149,22 @@ async def test_oversized_completed_result_is_addressable_with_its_real_call_id()
 
 
 @pytest.mark.asyncio
+async def test_provider_overflow_can_reference_the_only_completed_exchange():
+    rows = [{"role": "user", "content": "What did the tool find?"}] + exchange("once", size=12)
+    rows[-1]["content"] = "Full saved tool output. " * 10000
+    ctx = await manager(rows, compaction_schedule="after_turn")
+    model = Provider()
+    result = await measured(ctx, model, reason="provider_overflow")
+    visible = result["base_view"]
+    assert rows[0] in visible and visible[-2] == rows[-2]
+    assert visible[-1]["tool_call_id"] == "once"
+    assert "SHA-256" in visible[-1]["content"] and "Do not execute" in visible[-1]["content"]
+    assert len(model.counted) == 1
+    assert model.counted[0] == result["final_attempt"]["dispatch"]
+    assert (await ctx.get_messages()) == rows
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("native_decision", ["oversized", "unavailable"])
 async def test_mac_native_oversized_preflight_is_independent_of_ordinary_dispatch(native_decision):
     # Reproduce the observed 163-row shape and one previously executed tool.

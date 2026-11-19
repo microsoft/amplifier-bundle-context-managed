@@ -1509,7 +1509,7 @@ class BoundaryContextManager:
             result = await attempt(rows, True)
             if result is not None:
                 return result
-        if select_first and latest_results and (hasattr(last_error, "context_input_limit")
+        if select_first and latest_results and (provider_overflow or hasattr(last_error, "context_input_limit")
                 or transient_count_unavailable(last_error)):
             # A single settled output can exceed the model's entire allowance.
             # Keep the real call and result id and address the full saved result.
