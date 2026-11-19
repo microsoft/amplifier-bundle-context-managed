@@ -94,6 +94,7 @@ async def test_settled_compaction_never_blocks_foreground_or_commits_superseded_
     ctx = await manager(rows, compaction_schedule="after_turn", summarize_trigger=.01,
                         native_min_new_tokens=0)
     provider = native_provider()
+    provider.request_budget = lambda request, **kwargs: attempt([], 1000)["budget_decision"]
     response = provider.compact_context.return_value
     started, finish, cancelled, release = (asyncio.Event() for _ in range(4))
     async def generation(*args, **kwargs):
