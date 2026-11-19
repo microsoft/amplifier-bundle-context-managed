@@ -142,7 +142,8 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
         # supplied recovery progress must not erase an already accepted checkpoint
         # or its failure latch in this caller-owned context.
         fields = ("summary", "summary_omitted_indices", "summary_identity", "summary_failure", "_summary_progress",
-                  "_restored_progress", "evidence_refs", "recovery", "checkpoint_status")
+                  "_restored_progress", "evidence_refs", "recovery", "checkpoint_status",
+                  "_checkpoint_legacy_foreground")
         prior = {key: copy.deepcopy(getattr(context, key)) for key in fields}
         try:
             state = context.restore_checkpoint(progress, identity)
@@ -309,7 +310,8 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
         provider_identity = (getattr(provider, "name", type(provider).__name__),
                              getattr(provider, "default_model", None))
         fields = ("summary", "summary_omitted_indices", "summary_identity", "summary_failure", "_summary_progress",
-                  "_restored_progress", "evidence_refs", "recovery", "checkpoint_status")
+                  "_restored_progress", "evidence_refs", "recovery", "checkpoint_status",
+                  "_checkpoint_legacy_foreground")
         originals = {key: copy.deepcopy(getattr(context, key)) for key in fields}
 
         def check():
@@ -327,6 +329,11 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
                 raise RuntimeError("Recovery source or request contract changed; active checkpoint was not replaced")
 
         check()
+        if any(originals[key] and originals[key].get("completed")
+               for key in ("_summary_progress", "_restored_progress")):
+            # This native-only route cannot resume a paid portable prefix.
+            # A completed-only snapshot would silently discard its binding.
+            context._refuse_progress()
         if not config.get("durable_checkpoints") or not callable(preserve):
             raise CompactionError("recovery_evidence_required", "Explicit recovery requires durable checkpoints and the host preserve_evidence callback.")
         if not isinstance(identity, dict) or not identity.get("provider") or not identity.get("model"):
@@ -369,7 +376,7 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
 
         active_record = None
         if originals["summary"] is not None:
-            for key in ("summary", "summary_omitted_indices", "summary_identity", "evidence_refs", "recovery"):
+            for key in fields:
                 setattr(baseline, key, copy.deepcopy(originals[key]))
             active_record = baseline.export_checkpoint(identity)
             baseline = validate(active_record)

@@ -11,7 +11,7 @@ from .measurement import RequestMeasurement
 # operation state and the host's authority never move between contexts.
 _FIELDS = ("summary", "summary_identity", "summary_omitted_indices", "evidence_refs",
            "_summary_progress", "_restored_progress", "summary_failure", "recovery",
-           "checkpoint_status", "_foreground_native_refusal")
+           "checkpoint_status", "_foreground_native_refusal", "_checkpoint_legacy_foreground")
 
 
 def schedule(context, provider, count_view, retain_contents):

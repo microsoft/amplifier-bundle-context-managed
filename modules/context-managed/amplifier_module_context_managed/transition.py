@@ -17,7 +17,7 @@ from .recovery import _check_guard, _guarded, recover_native, settled_boundaries
 
 FIELDS = ("summary", "summary_omitted_indices", "summary_identity", "summary_failure",
           "_summary_progress", "_restored_progress", "evidence_refs", "recovery",
-          "checkpoint_status")
+          "checkpoint_status", "_checkpoint_legacy_foreground")
 
 
 async def prepare_transition(context, *, provider, count_view, identity, save_progress,
