@@ -162,6 +162,24 @@ entry also refuses an active paid partial rather than snapshotting only its
 completed note; reconciliation of that paid work is not implicit recovery consent.
 These in-memory boundaries do not rewrite or delete the host's source checkpoint.
 
+### Returning to Unified 0.111.4
+
+Before upgrading, let active work settle and back up the conversation history,
+checkpoint files, settings and operation records together. Keep that backup if
+you may need to return to 0.111.4.
+
+An unchanged checkpoint imported from 0.111.4 can be read again by that release
+with its original model, history and settings. Once this version creates a
+fresh checkpoint, the standard 0.111.4 configuration rejects it. This affects
+both completed summaries and partially completed summary work. The original
+messages remain available. Reading the rejected checkpoint issues no model
+call and runs no tool. A later compaction can incur new charges.
+
+If you have done more work since upgrading, save the current state separately
+before downgrading. Use a copy of the pre-upgrade backup for 0.111.4. Keep the
+newer checkpoint for use with this version. Before resuming actions, reconcile
+any work completed after the backup with its recorded effects.
+
 Export may reuse a bounded, exact witness of unchanged covered history. If the
 whole witness exceeds its 8 MiB budget, only complete leading rows are retained;
 the remaining rows are still checked and canonically hashed on every export.
