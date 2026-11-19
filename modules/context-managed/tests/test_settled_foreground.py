@@ -8,6 +8,7 @@ from amplifier_core import ChatRequest, Message
 from amplifier_core.llm_errors import ContextLengthError
 
 from .test_autonomous_compaction import provider as native_provider
+from .test_ordinary_pressure_count import TokenCountError
 from .test_ordinary_settled_fitting import exchange, manager, measured, Provider
 
 
@@ -177,3 +178,27 @@ async def test_mac_native_oversized_preflight_is_independent_of_ordinary_dispatc
     model.compact_context.assert_not_awaited()
     assert ctx._foreground_native_refusal is not None
     assert (await ctx.get_messages()) == rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category,should_continue", [("timeout", True), ("authentication", False)])
+async def test_installed_openai_count_contract_remains_usable_after_turn(category, should_continue):
+    ctx = await manager(long_history(), compaction_schedule="after_turn")
+    failure = TokenCountError(category=category, retryable=should_continue)
+    counts = []
+
+    async def count(rows):
+        counts.append(len(rows))
+        if len(counts) == 1:
+            raise failure
+        return attempt(rows, 200)
+
+    request = ctx.get_measured_request_view(provider=Provider(), retain_contents=[], count_view=count)
+    if should_continue:
+        assert (await request)["final_attempt"]["budget_decision"]["estimated_input_tokens"] == 200
+        assert counts[0] > counts[1]
+    else:
+        with pytest.raises(TokenCountError) as raised:
+            await request
+        assert raised.value is failure
+        assert len(counts) == 1

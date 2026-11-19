@@ -20,7 +20,7 @@ from .interrupted import calls as tool_calls, project as project_interrupted, re
 from .working_history import reference_settled_results, select_window, settled_results
 from .checkpoint import digest
 from .prefix_digest import PrefixDigest
-from .measurement import RequestMeasurement, estimate_pressure
+from .measurement import RequestMeasurement, estimate_pressure, transient_count_unavailable
 from .summary import (SummaryInputTooLarge, add_usage, public_messages, request_fits,
                       source_fragments, summary_config, summary_prompt, summary_request)
 
@@ -1430,7 +1430,7 @@ class BoundaryContextManager:
             except Exception as error:
                 guard()
                 if not (isinstance(error, ContextLengthError) and hasattr(error, "context_input_limit")
-                        or select_first and getattr(error, "context_count_unavailable", False) is True):
+                        or select_first and transient_count_unavailable(error)):
                     raise
                 last_error = error
                 return None
@@ -1499,7 +1499,7 @@ class BoundaryContextManager:
             if result is not None:
                 return result
         if select_first and latest_results and (hasattr(last_error, "context_input_limit")
-                or getattr(last_error, "context_count_unavailable", False) is True):
+                or transient_count_unavailable(last_error)):
             # A single settled output can exceed the model's entire allowance.
             # Keep the real call and result id and address the full saved result.
             smaller = reference_settled_results(
@@ -1601,7 +1601,7 @@ class BoundaryContextManager:
                 try:
                     return await count_view(view)
                 except Exception as error:
-                    if self.requires_measured_foreground and getattr(error, "context_count_unavailable", False) is True:
+                    if self.requires_measured_foreground and transient_count_unavailable(error):
                         transient_count_error = error
                     raise
             measurement = RequestMeasurement(count)
