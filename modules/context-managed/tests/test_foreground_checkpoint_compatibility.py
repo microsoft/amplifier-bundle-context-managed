@@ -561,8 +561,18 @@ def same_model_recovery_case(kind, flag):
 async def test_same_model_native_recovery_cannot_drop_real_paid_partial(kind, flag, location):
     state = same_model_recovery_case(kind, flag)
     if location == "in-memory":
-        state.ctx._summary_progress = copy.deepcopy(state.ctx._restored_progress)
-        state.ctx._restored_progress = None
+        utility = SimpleNamespace(name="fixture", default_model="fixture-model",
+            complete=AsyncMock(return_value=SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="Next exact pending prefix piece.")],
+                usage={"input_tokens": 10, "output_tokens": 5})))
+        with pytest.raises(CompactionError, match="summary_work_paused"):
+            await state.ctx._prepare(utility, None, [])
+        utility.complete.assert_awaited_once()
+        assert state.ctx._summary_progress["completed"] == 2
+        assert state.ctx._restored_progress is None
+        state.before = state.ctx.export_checkpoint(state.identity)
+        state.ctx.preserve_evidence.assert_awaited_once()  # Ordinary prefix resume above.
+        state.ctx.preserve_evidence.reset_mock()
     with pytest.raises(CompactionError, match="summary_progress_incompatible"):
         await state.ctx.recover_request(**state.kwargs)
     assert state.ctx.export_checkpoint(state.identity) == state.before
@@ -571,6 +581,26 @@ async def test_same_model_native_recovery_cannot_drop_real_paid_partial(kind, fl
     state.ctx.preserve_evidence.assert_not_awaited()
     for key in ("count_view", "save_progress", "install"):
         state.kwargs[key].assert_not_awaited()
+    assert not state.ctx.lock.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", [False, True])
+@pytest.mark.parametrize("unpaid_draft", [False, True])
+async def test_completed_native_progress_is_not_permission_to_drop_active_paid_unit(flag, unpaid_draft):
+    state = same_model_recovery_case("partial-v5", flag)
+    if unpaid_draft:
+        state.ctx._summary_progress = {"completed": 0}  # Must not mask restored paid work.
+    before = copy.deepcopy(state.ctx._restored_progress)
+    native = boolean_fixture("native", flag)[1]["checkpoint"]
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await state.ctx.recover_request(**state.kwargs, progress=native)
+    assert state.ctx._restored_progress == before
+    state.model.compact_context.assert_not_awaited()
+    state.ctx.preserve_evidence.assert_not_awaited()
+    for key in ("count_view", "save_progress", "install"):
+        state.kwargs[key].assert_not_awaited()
+    assert not state.ctx.lock.locked()
 
 
 @pytest.mark.asyncio
