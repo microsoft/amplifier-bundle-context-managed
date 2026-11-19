@@ -20,10 +20,35 @@ FIELDS = ("summary", "summary_omitted_indices", "summary_identity", "summary_fai
           "checkpoint_status", "_checkpoint_legacy_foreground")
 
 
+def _remaining_allowance(configured, requested, grant, progress):
+    if type(configured) is not int or configured < 1:
+        raise ValueError("Invalid configured summary call allowance")
+    if grant is None:
+        cap = configured if requested is None else requested
+        if type(cap) is not int or not 0 <= cap <= configured:
+            raise ValueError("Transition max_calls must be nonnegative and within summary_max_calls")
+        return cap
+    # The host owns user authorization and every durable reservation. This
+    # opt-in contract only resumes confirmed progress within the stated total.
+    if (not isinstance(grant, dict)
+            or set(grant) != {"version", "additionalCalls", "originalMaxCalls", "confirmedCalls", "authorizationId"}
+            or type(grant["version"]) is not int or grant["version"] != 1
+            or not isinstance(grant["authorizationId"], str) or not grant["authorizationId"].strip()
+            or len(grant["authorizationId"]) > 200 or not isinstance(progress, dict)):
+        raise ValueError("Invalid additional transition call allowance")
+    extra, original, confirmed = grant["additionalCalls"], grant["originalMaxCalls"], grant["confirmedCalls"]
+    if (type(original) is not int or not 1 <= original <= configured
+            or type(extra) is not int or not 1 <= extra <= 32
+            or type(confirmed) is not int or not original <= confirmed <= original + extra
+            or type(requested) is not int or not 0 <= requested <= original + extra - confirmed):
+        raise ValueError("Transition max_calls exceeds the confirmed additional allowance")
+    return requested
+
+
 async def prepare_transition(context, *, provider, count_view, identity, save_progress,
                              install, guard, retain_contents, target_bytes, progress,
                              source_revision, source_checkpoint, admit_call, max_calls,
-                             transition_source, installed_candidate_sha256):
+                             transition_source, installed_candidate_sha256, additional_call_allowance=None):
     """Prepare originals or regenerate target state; activate only after fit.
 
     ``admit_call(report)`` must durably reserve the exact operation before returning
@@ -50,6 +75,7 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         record = copy.deepcopy(source_checkpoint)
         origin = copy.deepcopy(transition_source)
         progress_input, progress = progress, copy.deepcopy(progress)
+        authorized = copy.deepcopy(additional_call_allowance)
         readback_sha = installed_candidate_sha256
         originals = {key: copy.deepcopy(getattr(context, key)) for key in FIELDS}
         factory, operations = context.factory, context.active_operations
@@ -64,7 +90,7 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             if (context.revision != revision or digest(context.messages) != source_digest
                     or context.config != config or context.checkpoint_configuration() != configuration
                     or identity != target or source_checkpoint != record or transition_source != origin
-                    or progress_input != progress
+                    or additional_call_allowance != authorized or progress_input != progress
                     or installed_candidate_sha256 != readback_sha
                     or context.factory is not factory or context.active_operations is not operations
                     or context.preserve_evidence is not preserve or context.checkpoint_identity is not getter
@@ -141,11 +167,9 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 or not 0 < binding["messages"] <= len(source)
                 or binding.get("sha256") != digest(source[:binding["messages"]])):
             raise CompactionError("recovery_source_changed", "The transition's canonical source changed.")
-        configured_cap = config.get("summary_max_calls", 16)
-        cap = configured_cap if max_calls is None else max_calls
-        if (type(configured_cap) is not int or configured_cap < 1
-                or type(cap) is not int or not 0 <= cap <= configured_cap):
-            raise ValueError("Transition max_calls must be nonnegative and within summary_max_calls")
+        cap = _remaining_allowance(config.get("summary_max_calls", 16), max_calls,
+                                   additional_call_allowance, progress)
+
         if readback_sha is not None and (
                 not isinstance(progress, dict) or progress.get("sha256") != readback_sha
                 or progress.get("progress") is not None or progress.get("summary") is None):
@@ -381,10 +405,22 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 raise CompactionError("native_checkpoint_invalid", "The eligible prefix has an unresolved exchange.")
             compact_template = template.model_copy(deep=True, update={
                 "max_output_tokens": config.get("native_compaction_max_output_tokens", 4096)})
+            async def remainder_fits():
+                # A confirmed native prefix may already make the intact suffix
+                # fit. Measure the exact foreground envelope, including tools.
+                nonlocal count_calls
+                through = staged.summary[0]
+                if staged._boundary(staged.messages, retain, ceiling=through) != through:
+                    return False
+                count, envelope = await measure(view(staged))
+                count_calls += 1
+                return count < before and envelope["budget_decision"]["estimated_input_tokens"] <= limit
+
             candidate = await recover_native(staged, bounded, compact_template, target,
                 save_progress=save, target_bytes=target_bytes,
                 progress=staged.export_checkpoint(target) if staged.summary else None,
-                through_message=end, exclude_indices=excluded, guard=check)
+                through_message=end, exclude_indices=excluded, guard=check,
+                stop_when_fit=remainder_fits if authorized is not None else None)
         else:
             staged.evidence_refs = copy.deepcopy(refs)
             utility = summarizer() if summarizer else provider

@@ -101,7 +101,7 @@ def settled_boundaries(messages, start=0):
 
 async def recover_native(context, provider, template: ChatRequest, identity, *,
                          save_progress, target_bytes=1_500_000, progress=None,
-                         through_message=None, exclude_indices=(), guard=None):
+                         through_message=None, exclude_indices=(), guard=None, stop_when_fit=None):
     """Build a derived checkpoint, using a compatible saved prefix if supplied.
 
     Byte size chooses a tentative batch only. Authoritative provider preflight
@@ -163,6 +163,8 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
     if previous and not provider.validate_compacted_context(previous):
         raise CompactionError("native_checkpoint_invalid", "The provider rejected the recovery checkpoint.")
     while start < stop:
+        if previous is not None and stop_when_fit is not None and await _guarded(guard, stop_when_fit):
+            break
         candidates = [end for end in boundaries if end > start]
         if excluded:
             included = [i for i in range(start, stop) if i not in excluded]
@@ -239,7 +241,7 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
                           install, guard, retain_contents=(), target_bytes=1_500_000,
                           progress=None, source_revision=None, source_checkpoint=None,
                           admit_call=None, max_calls=None, transition_source=None,
-                          installed_candidate_sha256=None):
+                          installed_candidate_sha256=None, additional_call_allowance=None):
     """Explicitly recover, verify and install a native checkpoint under the lock.
 
     ``count_view`` must only rebuild/count the complete ordinary ChatRequest:
@@ -277,8 +279,10 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
             retain_contents=retain_contents, target_bytes=target_bytes, progress=progress,
             source_revision=source_revision, source_checkpoint=source_checkpoint,
             admit_call=admit_call, max_calls=max_calls, transition_source=transition_source,
-            installed_candidate_sha256=installed_candidate_sha256)
-    if admit_call is not None or max_calls is not None or installed_candidate_sha256 is not None:
+            installed_candidate_sha256=installed_candidate_sha256,
+            additional_call_allowance=additional_call_allowance)
+    if (admit_call is not None or max_calls is not None or installed_candidate_sha256 is not None
+            or additional_call_allowance is not None):
         raise ValueError("Transition call admission requires source_checkpoint")
 
     from .boundary import BoundaryContextManager

@@ -452,6 +452,20 @@ refusal. A host may admit a bounded transition on a genuine foreground input
 through the same `context.recovery.recover` entry, before ordinary preparation.
 This is not an automatic overflow fallback or permission to retry UNKNOWN work.
 
+
+A host that records a user's explicit allowance for one exhausted transition
+can test `context.recovery.additional_call_allowance() == 2` and pass
+`additional_call_allowance` to `context.recovery.recover`. The argument is a
+version-1 object with the host's `authorizationId`, `originalMaxCalls`,
+`confirmedCalls` and `additionalCalls` (1 through 32). The host must bind the
+grant to the existing session, source checkpoint, target selection and confirmed
+progress. Every historical reservation consumes the cumulative allowance. An
+unconfirmed reservation requires reconciliation. The component accepts at most
+`originalMaxCalls + additionalCalls - confirmedCalls` in `max_calls` and
+requires the restored progress. Native recovery can finish at a verified safe
+boundary once the saved prefix and complete original suffix fit the measured
+target request. Normal installation and exact checkpoint acknowledgement apply.
+
 `context.checkpoint.prepared_originals(identity)` is a pure synchronous bool
 attestation: the current identity getter must equal the exact target and summary,
 portable progress and provisional ordinary-transition state must all be empty.
