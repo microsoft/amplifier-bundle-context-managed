@@ -402,3 +402,27 @@ def test_fresh_restore_does_not_borrow_prior_unit_proof():
     assert ctx.restore_checkpoint(canonical, packet["identity"])["status"] == "restored"
     assert ctx._checkpoint_legacy_foreground is None
     assert ctx.export_checkpoint(packet["identity"]) == canonical
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["identity", "source", "generation", "utility"])
+async def test_boolean_paid_binding_mismatch_refuses_before_any_new_call_or_write(change):
+    packet, fixture = boolean_fixture("partial-v5", True)
+    ctx = BoundaryContextManager({**fixture["config"], "foreground_continuation": False})
+    ctx.messages = copy.deepcopy(packet["messages"])
+    identity = copy.deepcopy(packet["identity"])
+    ctx.checkpoint_identity = lambda: copy.deepcopy(identity)
+    assert ctx.restore_checkpoint(fixture["checkpoint"], identity)["status"] == "resuming"
+    paid = copy.deepcopy(ctx._restored_progress)
+    if change == "identity": identity["model"] = "other"
+    if change == "source": ctx.messages[0]["content"] += " changed"
+    if change == "generation": ctx.config["summary_reasoning_effort"] = "high"
+    provider = SimpleNamespace(name="other-utility" if change == "utility" else "fixture",
+        default_model="fixture-model", complete=AsyncMock(), compact_context=AsyncMock())
+    ctx.persist_checkpoint = AsyncMock()
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await ctx._prepare(provider, None, [])
+    provider.complete.assert_not_awaited()
+    provider.compact_context.assert_not_awaited()
+    ctx.persist_checkpoint.assert_not_awaited()
+    assert ctx._restored_progress == paid and ctx._summary_progress is None
