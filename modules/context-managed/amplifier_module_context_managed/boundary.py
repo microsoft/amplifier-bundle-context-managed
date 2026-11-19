@@ -227,7 +227,7 @@ class BoundaryContextManager:
                               install, guard, retain_contents=(), target_bytes=1_500_000,
                               progress=None, source_revision=None, source_checkpoint=None,
                               admit_call=None, max_calls=None, transition_source=None,
-                              installed_candidate_sha256=None):
+                              installed_candidate_sha256=None, additional_call_allowance=None):
         """Explicit verified recovery, never an automatic failure fallback.
 
         The host supplies a count-only ordinary-request callback, a synchronous
@@ -241,7 +241,8 @@ class BoundaryContextManager:
             retain_contents=retain_contents, target_bytes=target_bytes, progress=progress,
             source_revision=source_revision, source_checkpoint=source_checkpoint,
             admit_call=admit_call, max_calls=max_calls, transition_source=transition_source,
-            installed_candidate_sha256=installed_candidate_sha256)
+            installed_candidate_sha256=installed_candidate_sha256,
+            additional_call_allowance=additional_call_allowance)
 
     async def clear(self):
         await self.set_messages([])
@@ -1706,6 +1707,7 @@ async def mount_boundary(coordinator, config):
         coordinator.register_capability("context.checkpoint.transition", context.classify_checkpoint_transition)
         coordinator.register_capability("context.checkpoint.prepared_originals", context.prepared_originals)
         coordinator.register_capability("context.recovery.recover", context.recover_request)
+        coordinator.register_capability("context.recovery.additional_call_allowance", lambda: 2)
         async def run_pending(**kwargs):
             callback = coordinator.get_capability("context.recovery.run_pending")
             return await callback(**kwargs) if callback else None

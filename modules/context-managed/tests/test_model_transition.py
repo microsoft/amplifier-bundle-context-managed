@@ -839,3 +839,95 @@ async def test_ordinary_no_transition_host_returns_fitting_originals_without_pai
     assert ctx.export_checkpoint(SOURCE) == old
     model.compact_context.assert_not_awaited()
     model.complete.assert_not_awaited()
+
+def large_native_transition(exchanges):
+    state = transition_fixture(True)
+    state.limit = 15000
+    state.kwargs["target_bytes"] = 2550
+    old_tail = state.ctx.messages[-3:]
+    settled = [
+        {"role": role, "content": f"extra-unique-{i} " + ("settled evidence " * 70 if role == "assistant" else "continue")}
+        for i in range(exchanges) for role in ("user", "assistant")
+    ]
+    state.ctx.messages[-3:] = settled + old_tail
+    return state
+
+
+def allowance(*, additional=32, confirmed=16):
+    return {"version": 1, "authorizationId": "one-user-decision", "originalMaxCalls": 16,
+            "confirmedCalls": confirmed, "additionalCalls": additional}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exchanges,extra_needed", [(22, 0), (35, 8)])
+async def test_confirmed_native_grant_resumes_saved_prefix_and_stops_when_intact_suffix_fits(exchanges, extra_needed):
+    initial = large_native_transition(exchanges)
+    with pytest.raises(CompactionError, match="summary_work_paused"):
+        await initial.ctx.recover_request(**initial.kwargs)
+    assert len(initial.admitted) == len(initial.saved) == 16
+    assert not initial.installed
+    old_manifest = json.dumps(initial.saved[-1][0])
+
+    restored = large_native_transition(exchanges)
+    original = copy.deepcopy(restored.ctx.messages)
+    restored.kwargs.update(progress=json.loads(old_manifest), max_calls=32)
+    with pytest.raises(ValueError, match="within summary_max_calls"):
+        await restored.ctx.recover_request(**restored.kwargs)
+    assert not restored.admitted
+
+    restored.kwargs["additional_call_allowance"] = allowance()
+    result = await restored.ctx.recover_request(**restored.kwargs)
+    assert result["outcome"] == "transitioned"
+    assert len(restored.admitted) == len(restored.saved) == extra_needed
+    assert not {r["requestSha256"] for r in initial.admitted} & {r["requestSha256"] for r in restored.admitted}
+    covered = restored.ctx.summary[0]
+    assert covered < restored.ctx._boundary(original, [], ceiling=len(original))
+    assert result["recovery"]["after"] <= result["recovery"]["limit"]
+    assert any(message.content == original[-1]["content"] for message in result["final_attempt"]["dispatch"].messages)
+    assert restored.model.complete.await_count == 0 and restored.ctx.messages == original
+    assert len(restored.installed) == 1
+    # Lost host acknowledgement can reconcile the same early-stop candidate.
+    candidate = copy.deepcopy(restored.installed[0][0])
+    restored.initial = {k: copy.deepcopy(getattr(restored.ctx, k)) for k in restored.initial}
+    restored.kwargs.update(progress=candidate, installed_candidate_sha256=candidate["sha256"],
+                           max_calls=0, additional_call_allowance=allowance(confirmed=16 + extra_needed))
+    await restored.ctx.recover_request(**restored.kwargs)
+    assert len(restored.saved) == extra_needed
+    assert restored.installed[-1][0] == candidate
+
+
+@pytest.mark.asyncio
+async def test_exhausted_additional_allowance_remains_zero_after_cold_restart():
+    first = large_native_transition(35)
+    with pytest.raises(CompactionError, match="summary_work_paused"):
+        await first.ctx.recover_request(**first.kwargs)
+    resumed = large_native_transition(35)
+    resumed.kwargs.update(progress=copy.deepcopy(first.saved[-1][0]), max_calls=1,
+                          additional_call_allowance=allowance(additional=1))
+    with pytest.raises(CompactionError, match="summary_work_paused"):
+        await resumed.ctx.recover_request(**resumed.kwargs)
+    assert len(resumed.saved) == len(resumed.admitted) == 1
+    assert resumed.saved[0][1]["fromMessage"] == first.saved[-1][1]["throughMessage"]
+    again = large_native_transition(35)
+    again.kwargs.update(progress=copy.deepcopy(resumed.saved[-1][0]), max_calls=0,
+                        additional_call_allowance=allowance(additional=1, confirmed=17))
+    with pytest.raises(CompactionError, match="summary_work_paused"):
+        await again.ctx.recover_request(**again.kwargs)
+    assert again.saved == again.admitted == again.installed == []
+
+
+@pytest.mark.parametrize("patch,remaining", [
+    ({"additionalCalls": 33}, 32), ({"additionalCalls": True}, 1), ({"originalMaxCalls": 17}, 1),
+    ({"confirmedCalls": 15}, 32), ({"confirmedCalls": 49}, 0), ({"confirmedCalls": 48}, 1),
+    ({"version": True}, 1), ({"authorizationId": " "}, 1), ({"untrusted": True}, 1), ({}, 33),
+])
+def test_invalid_extra_call_grant_refused(patch, remaining):
+    from amplifier_module_context_managed.transition import _remaining_allowance
+    with pytest.raises(ValueError):
+        _remaining_allowance(16, remaining, {**allowance(), **patch}, {"sha256": "test"})
+
+
+def test_additional_calls_require_previous_progress():
+    from amplifier_module_context_managed.transition import _remaining_allowance
+    with pytest.raises(ValueError, match="Invalid additional"):
+        _remaining_allowance(16, 32, allowance(), None)
