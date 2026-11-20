@@ -86,6 +86,10 @@ def schedule(context, provider, count_view, retain_contents):
         except CompactionError as error:
             if error.code == "native_input_oversized" and current():
                 context._foreground_native_refusal = worker._foreground_native_refusal
+                # The foreground may have its own fit failure. Keep the last
+                # confirmed native refusal visible alongside the active checkpoint.
+                context.checkpoint_status = {**context.checkpoint_status,
+                    "lastNativeFailure": copy.deepcopy(worker.checkpoint_status["failure"])}
             raise
         if worker.summary != context.summary:
             await publish()

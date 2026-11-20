@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import time
+import weakref
 import inspect
 
 from amplifier_core import ChatRequest, Message
@@ -1106,7 +1107,9 @@ class BoundaryContextManager:
                     self._refuse_progress()
                 self._summary_progress = None
             failure = self.summary_failure
-            if failure and failure["fingerprint"] == fingerprint:
+            # A native budget refusal belongs to the actual dispatch, including
+            # its tools and instructions. The history fingerprint cannot bind it.
+            if failure and not failure.get("native_budget_refusal") and failure["fingerprint"] == fingerprint:
                 if not (failure["retryable"] and failure["attempts"] < 3 and time.monotonic() >= failure["retry_after"]):
                     raise CompactionError("previous_failure", "Compaction of this history previously failed. Correct the reported cause or wait for the retry cooldown; the conversation has not advanced.", retryable=failure["retryable"])
         if should_summarize:
@@ -1115,9 +1118,18 @@ class BoundaryContextManager:
                     raise CompactionError("summary_provider_unavailable",
                         "No separate utility provider is configured; optional compaction was not dispatched.")
                 raise RuntimeError("Native live providers require a separate context.summary_provider for compaction")
-            self.is_compacting = True
-            await self._emit("context:compaction_started", revision=revision, through_message=end,
-                             **({"recovery": recovery} if recovery else {}), **self.last_budget)
+            refusal = self._foreground_native_refusal
+            refusal_scope = (identity, configuration, budget, input_limit)
+            held = bool(use_native and refusal and refusal["provider"]() is provider
+                        and refusal["scope"] == refusal_scope and refusal["source_revision"]["messages"] <= end
+                        and refusal["checkpoint"] == digest(summary_state) and self._same_prefix(refusal, messages))
+
+            async def start_compaction():
+                self.is_compacting = True
+                await self._emit("context:compaction_started", revision=revision, through_message=end,
+                                 **({"recovery": recovery} if recovery else {}), **self.last_budget)
+                check_summary_contract()
+
             outcome = "failed"
             stats = {"calls": 0, "input_tokens_before": assembled_tokens, "measurement_kind": measurement_kind,
                      "native_selection": native_reason}
@@ -1125,6 +1137,8 @@ class BoundaryContextManager:
                 stats["recovery"] = recovery
             started = time.monotonic()
             try:
+                if not held:
+                    await start_compaction()
                 # Earlier notes are included so repeated compactions retain the
                 # same task. Canonical originals stay available to the host.
                 async def prepare_note():
@@ -1151,19 +1165,17 @@ class BoundaryContextManager:
                             # portable summaries on unsupported providers, never native compact.
                             # A healthy native response may take many minutes.
                             # Elapsed time must not cancel it or start a fallback.
-                            refusal_key = (input_key, id(provider), identity, configuration,
-                                fitter._calculate_budget(token_budget, provider),
-                                digest(request.model_dump(mode="json")))
-                            if ordinary and self._foreground_native_refusal == refusal_key:
-                                raise CompactionError("ordinary_compaction_deferred",
-                                    "Unchanged optional native input previously exceeded its allowance; no retry was made.")
+                            request_digest = digest(request.model_dump(mode="json"))
+                            if held and refusal["counted"] and refusal["request"] == request_digest:
+                                raise self._native_oversized()
                             try:
                                 fits, compact_budget = await request_fits(provider, request)
                                 check_summary_contract()
-                                if self._settled_maintenance and (not compact_budget
-                                        or compact_budget["measurement_kind"] != "provider_count"):
+                                counted = bool(compact_budget and compact_budget["measurement_kind"] == "provider_count")
+                                needs_count = self._settled_maintenance or (held and refusal["counted"])
+                                if (needs_count and not counted) or (held and compact_budget is None):
                                     raise CompactionError("native_measurement_unavailable",
-                                        "Deferred native compaction needs a verified native input budget.")
+                                        "Native compaction needs a verified input budget before it can resume.")
                                 if not fits:
                                     # Native compaction accepts one complete eligible
                                     # window, never fragments. Oversized legacy history
@@ -1171,9 +1183,21 @@ class BoundaryContextManager:
                                     # compaction methods or discard input to make it fit.
                                     stats["native_selection"] = "input_exceeds_native_allowance"
                                     stats["native_request_budget"] = compact_budget
-                                    if ordinary:
-                                        self._foreground_native_refusal = copy.deepcopy(refusal_key)
-                                    raise CompactionError("native_input_oversized", "Native input exceeds the provider allowance. Restore the last compatible checkpoint or explicitly recover this oversized history; it was not sent to native compaction.")
+                                    # Recheck estimates even on identical input. An exact,
+                                    # authoritative refusal can reuse its measured decision.
+                                    try:
+                                        owner = weakref.ref(provider)
+                                    except TypeError:  # Some mounted adapters lack weak references.
+                                        owner = lambda: provider
+                                    self._foreground_native_refusal = {
+                                        "provider": owner, "scope": copy.deepcopy(refusal_scope),
+                                        "checkpoint": digest(summary_state), "counted": counted,
+                                        "request": request_digest, "source_revision": source_revision,
+                                    }
+                                    raise self._native_oversized()
+                                if held:
+                                    await start_compaction()
+                                self._foreground_native_refusal = None
                                 stats["calls"] += 1
                                 result = await self._paid_compaction(lambda: provider.compact_context(request), input_key)
                             finally:
@@ -1297,6 +1321,19 @@ class BoundaryContextManager:
                 # Stop this request instead of hiding compaction failures with
                 # trimming. Keep canonical history and the last valid checkpoint.
                 outcome = "failed"
+                if held and not self.is_compacting:
+                    # A suffix-only replacement can reset checkpoint status while
+                    # the original paid work and refusal remain intact.
+                    if isinstance(exc, CompactionError) and exc.code == "native_input_oversized":
+                        self.checkpoint_status = {"status": "failed", "failure": {
+                            "type": "CompactionError", "code": exc.code, "retryable": False,
+                            "attempt": (self.summary_failure or {}).get("attempts", 1),
+                            "retry_suppressed": True}, "originalsAvailable": True}
+                    if isinstance(exc, CompactionError):
+                        raise
+                    raise CompactionError("native_failed",
+                        "The native input budget could not be checked before resuming compaction.",
+                        retryable=getattr(exc, "retryable", False) is True) from exc
                 previous = self.summary_failure
                 stalled = not stats.get("completed_fragments_this_pass", 0)
                 attempts = previous["attempts"] + 1 if stalled and previous and previous["fingerprint"] == fingerprint else 1
@@ -1310,6 +1347,7 @@ class BoundaryContextManager:
                     self._summary_progress = None
                 self.summary_failure = {"fingerprint": fingerprint, "source_revision": source_revision,
                     "attempts": attempts, "retryable": retryable,
+                    "native_budget_refusal": stats.get("native_selection") == "input_exceeds_native_allowance",
                     "retry_after": time.monotonic() + float(self.config.get("summary_retry_delay", 60)) * 2 ** (attempts - 1)}
                 # Raw SDK exceptions can contain request data or credentials.
                 # Preserve a safe category and budget evidence, not their repr.
@@ -1321,9 +1359,10 @@ class BoundaryContextManager:
                     raise
                 raise CompactionError(stats["failure"]["code"], "The compaction operation failed. Check provider availability and compaction diagnostics before retrying.", retryable=retryable) from exc
             finally:
-                self.is_compacting = False
-                await self._emit("context:compaction_finished", revision=revision, outcome=outcome,
-                                 elapsed_ms=round((time.monotonic() - started) * 1000), **stats)
+                if self.is_compacting:
+                    self.is_compacting = False
+                    await self._emit("context:compaction_finished", revision=revision, outcome=outcome,
+                                     elapsed_ms=round((time.monotonic() - started) * 1000), **stats)
         check_request_contract()
         protected = list(retain)
         if self.summary:
@@ -1340,6 +1379,12 @@ class BoundaryContextManager:
             await fitter.set_system_prompt_factory(captured_system_prompt)
         check_request_contract()
         return fitter, protected
+
+    @staticmethod
+    def _native_oversized():
+        return CompactionError("native_input_oversized",
+            "Native input exceeds the provider allowance. Restore the last compatible checkpoint or "
+            "explicitly recover this oversized history; it was not sent to native compaction.")
 
     async def _budget_failure(self, error):
         count = getattr(error, "context_input_tokens", None)
@@ -1548,6 +1593,9 @@ class BoundaryContextManager:
                 "model allowance. Canonical history was not truncated; no request was dispatched.")
             error.context_input_tokens = last_error.context_input_tokens
             error.context_input_limit = last_error.context_input_limit
+            if isinstance(first_error, CompactionError) and first_error.code == "native_input_oversized":
+                error.context_compaction_code = first_error.code
+                raise error from first_error
             raise error from last_error
         if last_error is None:
             raise ContextLengthError("The rejected view has no smaller complete foreground candidate.")
