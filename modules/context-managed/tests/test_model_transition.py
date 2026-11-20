@@ -381,6 +381,33 @@ def transition_fixture(native, *, archive=False):
 
 
 @pytest.mark.asyncio
+async def test_provider_qualified_transition_counts_only_the_reused_window():
+    state = transition_fixture(native=True)
+    state.model.rebind_compacted_context = lambda message, *, source_model, model: native_message(model)
+    original = copy.deepcopy(state.ctx.messages)
+    counted = []
+
+    async def count_view(rows):
+        counted.append(copy.deepcopy(rows))
+        assert any(row.get("metadata", {}).get("fixture:opaque", {}).get("model") == TARGET["model"]
+                   for row in rows)
+        assert original[2] not in rows
+        return {"dispatch": ChatRequest(model=TARGET["model"], messages=[Message(**row) for row in rows]),
+                "budget_decision": {"estimated_input_tokens": 100, "input_limit_tokens": 20000,
+                                    "measurement": {"kind": "provider_count", "input_tokens": 100,
+                                                    "source": "fixture"}}}
+
+    result = await state.ctx.recover_request(**{**state.kwargs, "count_view": count_view, "max_calls": 0})
+    assert result["outcome"] == "transitioned"
+    assert result["measured_before"] is None
+    assert len(counted) == len(state.installed) == 1
+    assert state.admitted == state.saved == []
+    state.model.compact_context.assert_not_awaited()
+    assert state.ctx.messages == original
+    assert state.ctx.export_checkpoint(TARGET) == state.installed[0][0]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
 @pytest.mark.parametrize("archive", [False, True], ids=["full-history", "archive-policy"])
 async def test_transition_batches_only_target_source_and_installs_exact_final_fit(native, archive):

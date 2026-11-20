@@ -55,7 +55,8 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
     True. The host enforces the total allowance across restarts, including unknown
     and failed operations. ``save_progress`` acknowledges the matching reservation
     only after storing its derived record. A callback must raise to reject a save.
-    Source-native provider envelopes are never validated by or sent to the target.
+    Only a same-connection handoff qualified by the mounted provider can reuse
+    a completed source-native window.
     Classification verifies record structure/history/configuration only; the host
     binds the previously accepted source bytes/provenance separately.
     """
@@ -247,10 +248,8 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                                           "Transition changed request options, instructions or allowance.")
             return count, envelope
 
-        before, initial = await measure(view(staged))
-        limit = min(policy_limit, hard_limit)
-        count_calls = 1
-        source_request_snapshot = copy.deepcopy(initial)
+        before = None
+        count_calls = 0
 
         def result_for(final_view, envelope, after, status, sha=None):
             verification = {"status": status, "sourceRevision": copy.deepcopy(binding),
@@ -272,6 +271,59 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 raise CompactionError("recovery_request_changed", "Measured request changed before activation.")
             for key, value in activation.items():
                 setattr(context, key, value)
+
+        async def install_fit(verified, candidate, final_view, envelope, after):
+            result = result_for(final_view, envelope, after, "installed", candidate["sha256"])
+            snapshot = copy.deepcopy(envelope)
+            check()
+            acknowledged = await _guarded(check, install, copy.deepcopy(candidate),
+                                          copy.deepcopy(result["recovery"]))
+            if isinstance(acknowledged, dict) and set(acknowledged) == {"sha256"}:
+                acknowledged = acknowledged["sha256"]
+            if type(acknowledged) is not str or acknowledged != candidate["sha256"]:
+                raise CompactionError("recovery_install_unconfirmed",
+                                      "Reconcile the host's checkpoint installation receipt.")
+            verified.checkpoint_status = {"status": "ready", "throughMessage": verified.summary[0],
+                                          "originalsAvailable": True}
+            activate(verified, envelope, snapshot)
+            return result
+
+        rebind = getattr(provider, "rebind_compacted_context", None)
+        summary = (record or {}).get("summary") or {}
+        if (progress is None and record and record["identity"]["provider"] == target["provider"]
+                and record.get("progress") is None and summary.get("kind") == "native"
+                and config.get("native_compaction", True) and callable(rebind)):
+            through = summary["throughMessage"]
+            reused = BoundaryContextManager(config)
+            reused.messages = copy.deepcopy(source)
+            restored = reused.restore_checkpoint(record, record["identity"])
+            required = {id(row) for row in carry}
+            if (restored["status"] == "restored"
+                    and through <= binding["messages"]
+                    and staged._boundary(staged.messages, retain, ceiling=through) == through
+                    and all(index in reused.summary_omitted_indices
+                            for index, row in enumerate(staged.messages[:through])
+                            if id(row) in required or staged._retained_reminder(row, retain))):
+                message = rebind(copy.deepcopy(reused.summary[1]),
+                                 source_model=record["identity"]["model"], model=target["model"])
+                if message is not None:
+                    reused.summary = (through, message)
+                    reused.summary_identity = copy.deepcopy(target)
+                    reused.evidence_refs = copy.deepcopy(refs)
+                    candidate = reused.export_checkpoint(target)
+                    if candidate is None or not provider.validate_compacted_context(message):
+                        raise CompactionError("native_checkpoint_invalid", "Reused native window did not verify.")
+                    final_view = view(reused)
+                    after, envelope = await measure(final_view)
+                    count_calls += 1
+                    limit = min(policy_limit, hard_limit)
+                    if envelope["budget_decision"]["estimated_input_tokens"] <= limit:
+                        return await install_fit(reused, candidate, final_view, envelope, after)
+
+        before, initial = await measure(view(staged))
+        limit = min(policy_limit, hard_limit)
+        count_calls += 1
+        source_request_snapshot = copy.deepcopy(initial)
 
         if progress is None and initial["budget_decision"]["estimated_input_tokens"] <= limit:
             final_view = view(staged)
@@ -466,18 +518,4 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             raise CompactionError("native_no_reduction", "Transition did not reduce the complete target request.")
         if final_envelope["budget_decision"]["estimated_input_tokens"] > limit:
             raise CompactionError("native_input_oversized", "Transition still exceeds the target allowance.")
-        verification = result_for(final_view, final_envelope, after, "installed", candidate["sha256"])
-        snapshot = copy.deepcopy(final_envelope)
-        check()
-        acknowledged = await _guarded(check, install, copy.deepcopy(candidate),
-                                      copy.deepcopy(verification["recovery"]))
-        if isinstance(acknowledged, dict) and set(acknowledged) == {"sha256"}:
-            acknowledged = acknowledged["sha256"]
-        if type(acknowledged) is not str or acknowledged != candidate["sha256"]:
-            raise CompactionError("recovery_install_unconfirmed", "Reconcile the host's checkpoint installation receipt.")
-        if snapshot != final_envelope:
-            raise CompactionError("recovery_request_changed", "Measured request changed during installation.")
-        verified.checkpoint_status = {"status": "ready", "throughMessage": verified.summary[0],
-                                      "originalsAvailable": True}
-        activate(verified, final_envelope, snapshot)
-        return verification
+        return await install_fit(verified, candidate, final_view, final_envelope, after)
