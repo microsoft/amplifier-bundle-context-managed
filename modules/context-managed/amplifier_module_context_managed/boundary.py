@@ -146,6 +146,9 @@ class BoundaryContextManager:
         self.evidence_refs = []
         if not self._same_prefix(self.summary_failure, replacement):
             self.summary_failure = None
+        if self._foreground_native_refusal and not self._same_prefix(self._foreground_native_refusal, replacement):
+            self._foreground_native_refusal = None
+            self.checkpoint_status.pop("lastNativeFailure", None)
         # A suffix replacement invalidates an in-flight result through the
         # revision guard, while already completed fragments still cover exactly
         # the same prefix. No result completed after replacement can be staged.
@@ -159,7 +162,10 @@ class BoundaryContextManager:
             self.summary_omitted_indices = []
             self.summary_identity = None
             self.recovery = None
+            previous_native_failure = self.checkpoint_status.get("lastNativeFailure")
             self.checkpoint_status = {"status": "invalidated", "reason": "Canonical history was replaced.", "originalsAvailable": True}
+            if self._foreground_native_refusal and previous_native_failure:
+                self.checkpoint_status["lastNativeFailure"] = previous_native_failure
             if not self._summary_progress and not self._restored_progress:
                 self._checkpoint_legacy_foreground = None
 
