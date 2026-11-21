@@ -9,8 +9,9 @@ import json
 
 from amplifier_core import ChatRequest
 
-from .checkpoint import classify_transition, digest
+from .checkpoint import classify_transition, digest, handoff_summary
 from .errors import CompactionError
+from .measurement import estimate_pressure, measured_limit, supports_native_for
 from .interrupted import project as project_interrupted, unanswered
 from .recovery import _check_guard, _guarded, recover_native, settled_boundaries
 
@@ -55,7 +56,8 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
     True. The host enforces the total allowance across restarts, including unknown
     and failed operations. ``save_progress`` acknowledges the matching reservation
     only after storing its derived record. A callback must raise to reject a save.
-    Source-native provider envelopes are never validated by or sent to the target.
+    Only a same-connection handoff qualified by the mounted provider can reuse
+    a completed source-native window.
     Classification verifies record structure/history/configuration only; the host
     binds the previously accepted source bytes/provenance separately.
     """
@@ -180,7 +182,6 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         staged.messages, staged.revision = copy.deepcopy(source), revision
         staged.checkpoint_identity = lambda: copy.deepcopy(target)
         fitter = staged._fitter()
-        policy_limit = fitter._calculate_budget(None, provider)
         prompt = await _guarded(check, factory) if factory else None
         check()
         pending = operations() if operations else None
@@ -212,10 +213,10 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             return fitter._strip_internal_metadata(rows)
 
         template = None
-        hard_limit = None
+        limit = None
 
         async def measure(rows):
-            nonlocal template, hard_limit
+            nonlocal template, limit
             envelope = await _guarded(check, count_view, copy.deepcopy(rows))
             if not isinstance(envelope, dict) or not isinstance(envelope.get("dispatch"), ChatRequest):
                 raise TypeError("Transition count_view must return an actual ChatRequest")
@@ -224,7 +225,8 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 raise CompactionError("native_measurement_unavailable",
                                       "Transitions require authoritative full-request measurement.")
             request = envelope["dispatch"]
-            count, _estimate, limit, _source = measured
+            count, _estimate, provider_limit, _source = measured
+            effective_limit = measured_limit(config, provider_limit, fitter._calculate_budget(None, provider))
             # Selected-provider adapters deliberately leave the loop's dispatch
             # unchanged while applying their bound model to cached wire requests.
             # Preserve that dispatch identity; only an absent model may use the
@@ -236,21 +238,18 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                         or getter is None or getter() != target)):
                 raise CompactionError("recovery_request_changed", "Target request model does not match selection.")
             if template is None:
-                template, hard_limit = request.model_copy(deep=True), limit
+                template, limit = request.model_copy(deep=True), effective_limit
             else:
                 instructions = lambda req: [row.model_dump() for row in req.messages
                                            if row.role in {"system", "developer"}]
                 if (template.model_dump(exclude={"messages"}) != request.model_dump(exclude={"messages"})
-                        or instructions(template) != instructions(request) or limit != hard_limit
-                        or fitter._calculate_budget(None, provider) != policy_limit):
+                        or instructions(template) != instructions(request) or effective_limit < limit):
                     raise CompactionError("recovery_request_changed",
                                           "Transition changed request options, instructions or allowance.")
             return count, envelope
 
-        before, initial = await measure(view(staged))
-        limit = min(policy_limit, hard_limit)
-        count_calls = 1
-        source_request_snapshot = copy.deepcopy(initial)
+        before = None
+        count_calls = 0
 
         def result_for(final_view, envelope, after, status, sha=None):
             verification = {"status": status, "sourceRevision": copy.deepcopy(binding),
@@ -273,6 +272,68 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             for key, value in activation.items():
                 setattr(context, key, value)
 
+        async def install_fit(verified, candidate, final_view, envelope, after):
+            result = result_for(final_view, envelope, after, "installed", candidate["sha256"])
+            snapshot = copy.deepcopy(envelope)
+            check()
+            acknowledged = await _guarded(check, install, copy.deepcopy(candidate),
+                                          copy.deepcopy(result["recovery"]))
+            if isinstance(acknowledged, dict) and set(acknowledged) == {"sha256"}:
+                acknowledged = acknowledged["sha256"]
+            if type(acknowledged) is not str or acknowledged != candidate["sha256"]:
+                raise CompactionError("recovery_install_unconfirmed",
+                                      "Reconcile the host's checkpoint installation receipt.")
+            verified.checkpoint_status = {"status": "ready", "throughMessage": verified.summary[0],
+                                          "originalsAvailable": True}
+            activate(verified, envelope, snapshot)
+            return result
+
+        rebind = getattr(provider, "rebind_compacted_context", None)
+        summary = (record or {}).get("summary") or {}
+        same_connection = record and record["identity"]["provider"] == target["provider"]
+        native = supports_native_for(provider, target["model"])
+        portable_base = None
+        reused = None
+        if progress is None and record and summary and record.get("progress") is None:
+            base = handoff_summary(staged, provider, target, source_identity=record["identity"],
+                summary=(summary["throughMessage"], summary.get("message") or summary.get("text")),
+                omitted=summary.get("omittedIndices", []), retain=retain, ceiling=binding["messages"])
+            if base is not None and isinstance(base[1], str):
+                portable_base = base
+            else:
+                reused = base
+
+        async def try_checkpoint(base):
+            nonlocal count_calls
+            existing = BoundaryContextManager(config)
+            existing.messages = copy.deepcopy(source)
+            if existing.restore_checkpoint(record, record["identity"])["status"] != "restored":
+                raise CompactionError("transition_source_invalid", "The source checkpoint could not be restored.")
+            existing._checkpoint_legacy_foreground = None
+            existing.summary = base
+            if isinstance(base[1], str) and summary.get("kind") == "native":
+                existing.summary_omitted_indices = []
+                if (existing.recovery or {}).get("kind") == "native-recovery":
+                    existing.recovery = None
+            existing.summary_identity = copy.deepcopy(target)
+            existing.evidence_refs = copy.deepcopy(refs)
+            candidate = existing.export_checkpoint(target)
+            rows = view(existing)
+            after, envelope = await measure(rows)
+            count_calls += 1
+            if envelope["budget_decision"]["estimated_input_tokens"] <= limit:
+                return await install_fit(existing, candidate, rows, envelope, after)
+            return None
+
+        if reused is not None:
+            result = await try_checkpoint(reused)
+            if result is not None:
+                return result
+
+        before, initial = await measure(view(staged))
+        count_calls += 1
+        source_request_snapshot = copy.deepcopy(initial)
+
         if progress is None and initial["budget_decision"]["estimated_input_tokens"] <= limit:
             final_view = view(staged)
             check()
@@ -288,8 +349,31 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         end = staged._boundary(staged.messages, retain, ceiling=binding["messages"])
         if not end:
             raise CompactionError("recovery_no_eligible_work", "No settled prefix can be transitioned.")
-        native = callable(getattr(provider, "supports_native_compaction", None)) and provider.supports_native_compaction()
+        # An incompatible native window cannot be sent to a foreign model.
+        # A fresh cross-connection handoff is plain text, even when that
+        # destination can create its own native checkpoints for later turns.
+        portable_handoff = origin is not None or not same_connection or (callable(rebind) and reused is None)
+        if progress is None and portable_base:
+            result = await try_checkpoint(portable_base)
+            if result is not None:
+                return result
+            staged.summary, staged.summary_identity = portable_base, copy.deepcopy(target)
+            if (record.get("recovery") or {}).get("kind") != "native-recovery":
+                staged.recovery = copy.deepcopy(record.get("recovery"))
+            native = False
+        elif progress is None and portable_handoff:
+            native = False
+        elif progress is None and reused is not None:
+            # The qualified window fits the destination protocol but its tail
+            # has grown. Extend that verified prefix instead of starting over.
+            staged.summary, staged.summary_identity = reused, copy.deepcopy(target)
+            staged.summary_omitted_indices = copy.deepcopy(summary.get("omittedIndices", []))
+            staged.recovery = copy.deepcopy(record.get("recovery"))
         if progress is not None:
+            # Resume the exact method recorded by the host. A provider gaining
+            # native support cannot invalidate an in-flight readable handoff.
+            if (progress.get("summary") or {}).get("text") or progress.get("progress"):
+                native = False
             restored = staged.restore_checkpoint(copy.deepcopy(progress), target)
             if restored["status"] not in {"restored", "resuming"}:
                 raise CompactionError("summary_progress_incompatible", "Target progress is incompatible.")
@@ -330,18 +414,43 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         required = {id(row) for row in carry}
         objective = next((i for i, row in enumerate(staged.messages)
                           if staged._human(row)), None) if not native else None
-        minimal = [row for i, row in enumerate(staged.messages)
-                   if i >= end or row.get("role") in {"system", "developer"}
-                   or i == objective or id(row) in required or staged._retained_reminder(row, retain)]
-        floor = BoundaryContextManager(config)
-        floor.messages = copy.deepcopy(minimal)
-        floor_view = project_interrupted(
-            view(floor), unanswered(staged.messages, staged._human))
-        _floor_count, floor_envelope = await measure(floor_view)
-        count_calls += 1
-        if floor_envelope["budget_decision"]["estimated_input_tokens"] > limit:
+        async def measure_tail(cut):
+            nonlocal count_calls
+            floor = BoundaryContextManager(config)
+            floor.messages = [copy.deepcopy(row) for i, row in enumerate(staged.messages)
+                              if i >= cut or row.get("role") in {"system", "developer"} or i == objective
+                              or id(row) in required or staged._retained_reminder(row, retain)]
+            rows = project_interrupted(view(floor), unanswered(staged.messages, staged._human))
+            _, envelope = await measure(rows)
+            count_calls += 1
+            return envelope["budget_decision"]["estimated_input_tokens"]
+
+        floor_count = await measure_tail(end)
+        if floor_count > limit:
             raise CompactionError("native_input_oversized",
                                   "Required target instructions, tools and recent history cannot fit.")
+        if progress is None and portable_handoff and not native:
+            # Plan a larger verbatim tail locally, then check it once. Do not
+            # binary search the remote tokenizer or split a protocol exchange.
+            # A final measurement below always verifies the real generated note.
+            reserve = config.get("summary_max_output_tokens") or 8192
+            room = limit - floor_count - reserve
+            base = staged.summary[0] if staged.summary else 0
+            if room > 0:
+                # Calibrate the cheap row estimate against the exact original
+                # request (including tool and provider serialization overhead).
+                scale = max(1, before / max(1, estimate_pressure(fitter, staged.messages)))
+                cuts = staged._boundaries(staged.messages, retain, ceiling=end)
+                proposed, added = end, 0
+                for cut in reversed(cuts):
+                    if cut <= base:
+                        break
+                    added += estimate_pressure(fitter, staged.messages[cut:proposed])
+                    if added * scale > room:
+                        break
+                    proposed = cut
+                if proposed < end and await measure_tail(proposed) <= limit - reserve:
+                    end = proposed
 
         calls, last_call = 0, None
 
@@ -388,9 +497,10 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             if ack is False:
                 raise CompactionError("checkpoint_persist_failed", "The host refused transition progress.")
 
+        fit_envelope = None
         complete_progress = (staged.summary is not None and staged.summary[0] == end
                              and not staged._restored_progress)
-        if complete_progress:
+        if complete_progress and progress is not None:
             # Exact bytes/digest matter for lost-ACK readback. Freshly preserved
             # references do not authorize rewriting an already installed record.
             candidate = copy.deepcopy(progress)
@@ -408,19 +518,25 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             async def remainder_fits():
                 # A confirmed native prefix may already make the intact suffix
                 # fit. Measure the exact foreground envelope, including tools.
-                nonlocal count_calls
+                nonlocal count_calls, fit_envelope
                 through = staged.summary[0]
                 if staged._boundary(staged.messages, retain, ceiling=through) != through:
                     return False
-                count, envelope = await measure(view(staged))
+                rows = view(staged)
+                count, envelope = await measure(rows)
                 count_calls += 1
-                return count < before and envelope["budget_decision"]["estimated_input_tokens"] <= limit
+                if count < before and envelope["budget_decision"]["estimated_input_tokens"] <= limit:
+                    fit_envelope = rows, count, envelope
+                    return True
+                return False
 
             candidate = await recover_native(staged, bounded, compact_template, target,
                 save_progress=save, target_bytes=target_bytes,
                 progress=staged.export_checkpoint(target) if staged.summary else None,
                 through_message=end, exclude_indices=excluded, guard=check,
-                stop_when_fit=remainder_fits if authorized is not None else None)
+                stop_when_fit=remainder_fits if progress is not None or reused is not None else None,
+                installable_boundaries=(staged._boundaries(staged.messages, retain, ceiling=end)
+                                        if progress is not None or reused is not None else None))
         else:
             staged.evidence_refs = copy.deepcopy(refs)
             utility = summarizer() if summarizer else provider
@@ -460,24 +576,16 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
         if native and not provider.validate_compacted_context(verified.summary[1]):
             raise CompactionError("native_checkpoint_invalid", "Target native envelope did not verify.")
         final_view = view(verified)
-        after, final_envelope = await measure(final_view)
-        count_calls += 1
+        if fit_envelope is not None and final_view == fit_envelope[0]:
+            # No intervening provider or host call since this exact final
+            # measurement. Retain its bound dispatch/options in the receipt.
+            check()
+            _, after, final_envelope = fit_envelope
+        else:
+            after, final_envelope = await measure(final_view)
+            count_calls += 1
         if after >= before:
             raise CompactionError("native_no_reduction", "Transition did not reduce the complete target request.")
         if final_envelope["budget_decision"]["estimated_input_tokens"] > limit:
             raise CompactionError("native_input_oversized", "Transition still exceeds the target allowance.")
-        verification = result_for(final_view, final_envelope, after, "installed", candidate["sha256"])
-        snapshot = copy.deepcopy(final_envelope)
-        check()
-        acknowledged = await _guarded(check, install, copy.deepcopy(candidate),
-                                      copy.deepcopy(verification["recovery"]))
-        if isinstance(acknowledged, dict) and set(acknowledged) == {"sha256"}:
-            acknowledged = acknowledged["sha256"]
-        if type(acknowledged) is not str or acknowledged != candidate["sha256"]:
-            raise CompactionError("recovery_install_unconfirmed", "Reconcile the host's checkpoint installation receipt.")
-        if snapshot != final_envelope:
-            raise CompactionError("recovery_request_changed", "Measured request changed during installation.")
-        verified.checkpoint_status = {"status": "ready", "throughMessage": verified.summary[0],
-                                      "originalsAvailable": True}
-        activate(verified, final_envelope, snapshot)
-        return verification
+        return await install_fit(verified, candidate, final_view, final_envelope, after)

@@ -20,7 +20,7 @@ from .interrupted import calls as tool_calls, project as project_interrupted, re
 from .working_history import reference_settled_results, select_window, settled_results
 from .checkpoint import digest
 from .prefix_digest import PrefixDigest
-from .measurement import RequestMeasurement, estimate_pressure, transient_count_unavailable
+from .measurement import RequestMeasurement, estimate_pressure, measured_limit, supports_native_for, transient_count_unavailable
 from .summary import (SummaryInputTooLarge, add_usage, public_messages, request_fits,
                       source_fragments, summary_config, summary_prompt, summary_request)
 
@@ -321,6 +321,9 @@ class BoundaryContextManager:
         return project_interrupted(rows, unknown)
 
     def _boundary(self, messages, retain, *, ceiling=None):
+        return max(self._boundaries(messages, retain, ceiling=ceiling), default=0)
+
+    def _boundaries(self, messages, retain, *, ceiling=None):
         turns = [i for i, row in enumerate(messages) if self._human(row)]
         end = turns[-2] if len(turns) >= 3 else 0
         calls, settled, safe = {}, [], set()
@@ -366,7 +369,7 @@ class BoundaryContextManager:
         if ceiling is not None:
             end = min(end, ceiling)
         candidates = set(turns) | {start for start, _ in settled}
-        return max((i for i in candidates if i <= end and i in safe), default=0)
+        return sorted(i for i in candidates if i <= end and i in safe)
 
     def _assembly_rows(self, messages, summary, retain, carry, omitted_indices):
         """Keep canonical offsets until native source selection is complete.
@@ -858,10 +861,9 @@ class BoundaryContextManager:
             self._checkpoint_legacy_foreground = None
             configuration = self.checkpoint_configuration()
         summary_state = copy.deepcopy(self._checkpoint_state())
-        native = getattr(provider, "supports_native_compaction", None)
         validate_native = getattr(provider, "validate_compacted_context", None)
         requires_context = getattr(provider, "native_compaction_requires_request_context", False)
-        native_supported = bool(callable(native) and native())
+        native_supported = supports_native_for(provider, (identity or {}).get("model"))
         native_reason = ("unsupported_by_provider" if not native_supported
                          else "disabled" if not self.config.get("native_compaction", True)
                          else "request_context_unavailable" if requires_context and measurement is None
@@ -964,7 +966,8 @@ class BoundaryContextManager:
         assembled_tokens = pressure_tokens if pressure_tokens is not None else estimate_pressure(fitter, pressure_view(assembled))
         budget = fitter._calculate_budget(token_budget, provider)
         if input_limit is not None:
-            budget = min(budget, input_limit)
+            budget = (measured_limit(self.config, input_limit, budget, token_budget)
+                      if measurement_kind == "provider_count" else min(budget, input_limit))
         threshold = self.config.get("summarize_trigger", 0.70)
         self.last_budget = {"semantic_input_tokens": assembled_tokens,
             "semantic_measurement_kind": measurement_kind, "semantic_policy_budget": budget,

@@ -4,7 +4,7 @@ import inspect
 
 from amplifier_core.llm_errors import ContextLengthError
 
-from .checkpoint import digest
+from .checkpoint import digest, handoff_summary
 from .errors import CompactionError
 
 
@@ -93,23 +93,61 @@ async def prepare(context, *, provider, token_budget, retain, measurement, reaso
         clone.active_operations = lambda: copy.deepcopy(operations)
         return clone
 
+    previous = context.summary_identity or {}
+    portable_handoff = (previous.get("provider") != identity["provider"]
+                        or callable(getattr(provider, "rebind_compacted_context", None)))
     if job is None:
         clone = fresh()
         fitted, protected = await clone._prepare(None, token_budget, retain)
         guard()
-        # Preserve zero-paid fitting for all hosts, without passing source-model
-        # opaque state to count or generation.
-        try:
-            if measurement is None:
-                await fitted.get_messages_for_request_retaining(
-                    retain_contents=protected, provider=provider, token_budget=token_budget)
-            else:
-                await fitted.get_measured_request_view(
-                    provider=provider, retain_contents=protected, count_view=measurement.count)
-        except ContextLengthError:
+
+        async def fits():
+            try:
+                if measurement is None:
+                    await fitted.get_messages_for_request_retaining(
+                        retain_contents=protected, provider=provider, token_budget=token_budget)
+                else:
+                    await fitted.get_measured_request_view(
+                        provider=provider, retain_contents=protected, count_view=measurement.count)
+            except ContextLengthError:
+                guard()
+                return False
             guard()
-        else:
-            guard()
+            return True
+
+        # Only the explicit transaction may install a durable replacement.
+        # In-memory hosts can reuse the same pure compatibility decision.
+        base = None
+        if (policy() is None and not context.config.get("durable_checkpoints")
+                and context.persist_checkpoint is None and portable_handoff):
+            base = handoff_summary(clone, provider, identity, source_identity=context.summary_identity,
+                summary=context.summary, omitted=context.summary_omitted_indices,
+                retain=retain, ceiling=len(messages))
+        original_view = fitted.messages
+        if base is not None:
+            if isinstance(base[1], str) and await fits():
+                fitted._transition_guard = guard
+                return fitted, protected
+            clone.summary, clone.summary_identity = base, copy.deepcopy(identity)
+            clone.evidence_refs = copy.deepcopy(context.evidence_refs)
+            clone.recovery = copy.deepcopy(context.recovery)
+            if isinstance(base[1], dict):
+                clone.summary_omitted_indices = copy.deepcopy(context.summary_omitted_indices)
+            elif (clone.recovery or {}).get("kind") == "native-recovery":
+                clone.recovery = None
+            rows = clone._assembled(clone.messages, base, retain)
+            if operations:
+                rows.append(original_view[-1])  # Immutable operation observation from _prepare.
+            await fitted.set_messages(rows)
+            if await fits():
+                def install_reused():
+                    guard()
+                    for key in UNIT:
+                        setattr(context, key, copy.deepcopy(getattr(clone, key)))
+                fitted._transition_guard, fitted._transition_commit = guard, install_reused
+                return fitted, protected
+            await fitted.set_messages(original_view)
+        if (base is None or isinstance(base[1], dict)) and await fits():
             fitted._transition_guard = guard
             return fitted, protected
         if policy() == "host-managed":
@@ -120,7 +158,9 @@ async def prepare(context, *, provider, token_budget, retain, measurement, reaso
                 "Ordinary model-switch regeneration cannot safely stage target progress with a legacy "
                 "checkpoint writer. Keep the existing checkpoint and integrate the host transition "
                 "source_checkpoint/save_progress/install callbacks before buying replacement work.")
-        job = {"binding": binding, "clone": fresh(), "uncertain": False,
+        if base is not None and isinstance(base[1], dict):
+            clone = fresh()
+        job = {"binding": binding, "clone": clone, "uncertain": False,
                "last_response": None, "prepared": None, "paid_calls": 0}
         context._ordinary_transition = job
     clone = job["clone"]
@@ -130,8 +170,10 @@ async def prepare(context, *, provider, token_budget, retain, measurement, reaso
             self.original = original
 
         def __getattr__(self, key):
+            if key == "supports_native_compaction" and portable_handoff:
+                return lambda: False
             value = getattr(self.original, key)
-            if not callable(value) or key in {"get_info", "supports_native_compaction",
+            if not callable(value) or key in {"get_info", "supports_native_compaction", "rebind_compacted_context",
                                               "validate_compacted_context"}:
                 return value
             async def call(*args, **kwargs):

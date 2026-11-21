@@ -14,6 +14,7 @@ from amplifier_core import ChatRequest, Message
 
 from .checkpoint import digest
 from .errors import CompactionError
+from .measurement import measured_limit, supports_native_for
 from .summary import request_fits
 
 
@@ -101,7 +102,7 @@ def settled_boundaries(messages, start=0):
 
 async def recover_native(context, provider, template: ChatRequest, identity, *,
                          save_progress, target_bytes=1_500_000, progress=None,
-                         through_message=None, exclude_indices=(), guard=None, stop_when_fit=None):
+                         through_message=None, exclude_indices=(), guard=None, stop_when_fit=None, installable_boundaries=None):
     """Build a derived checkpoint, using a compatible saved prefix if supplied.
 
     Byte size chooses a tentative batch only. Authoritative provider preflight
@@ -119,7 +120,7 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
     ``guard`` fences every count, compact and save.
     """
     _check_guard(guard)
-    if not provider.supports_native_compaction():
+    if not supports_native_for(provider, identity.get("model")):
         raise CompactionError("native_checkpoint_invalid", "Explicit native recovery requires native support.")
     if type(target_bytes) is not int or target_bytes < 1:
         raise ValueError("target_bytes must be positive")
@@ -162,6 +163,13 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
     start, previous = context.summary if context.summary else (0, None)
     if previous and not provider.validate_compacted_context(previous):
         raise CompactionError("native_checkpoint_invalid", "The provider rejected the recovery checkpoint.")
+    # Old checkpoints may end between a user message and its reply. They can
+    # seed the next batch, but newly produced cuts must also be installable.
+    if installable_boundaries is not None:
+        eligible = set(installable_boundaries)
+        boundaries = [end for end in boundaries if end in eligible]
+        if stop and (not boundaries or boundaries[-1] != stop):
+            raise CompactionError("native_checkpoint_invalid", "No installable final boundary.")
     while start < stop:
         if previous is not None and stop_when_fit is not None and await _guarded(guard, stop_when_fit):
             break
@@ -176,14 +184,17 @@ async def recover_native(context, provider, template: ChatRequest, identity, *,
                           and (end == stop or end <= included[-1])]
         total = 0
         end = candidates[0]
+        previous_size = 0
         allowed = set(candidates)
         for index in range(start, stop):
             if index not in excluded:
                 total += len(json.dumps(source[index], ensure_ascii=False).encode())
             if index + 1 in allowed:
                 if total > target_bytes and index + 1 != candidates[0]:
+                    if installable_boundaries is not None and total - target_bytes < target_bytes - previous_size:
+                        end = index + 1
                     break
-                end = index + 1
+                end, previous_size = index + 1, total
         candidate_index = candidates.index(end)
         while True:
             rows = ([copy.deepcopy(previous)] if previous else []) + [
@@ -343,8 +354,7 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
         if not isinstance(identity, dict) or not identity.get("provider") or not identity.get("model"):
             raise ValueError("Recovery identity needs an explicit provider and model")
         if (not config.get("native_compaction", True)
-                or not callable(getattr(provider, "supports_native_compaction", None))
-                or not provider.supports_native_compaction()
+                or not supports_native_for(provider, identity["model"])
                 or not callable(getattr(provider, "validate_compacted_context", None))
                 or not callable(getattr(provider, "compact_context", None))):
             raise CompactionError("native_checkpoint_invalid", "Explicit recovery requires enabled native compaction and checkpoint validation.")
@@ -440,7 +450,7 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
         before, hard_limit, before_envelope = await _guarded(check, measure, view(baseline))
         template = before_envelope["dispatch"].model_copy(deep=True)
         before_decision = copy.deepcopy(before_envelope["budget_decision"])
-        limit = min(policy_limit, hard_limit)
+        limit = measured_limit(config, hard_limit, policy_limit)
         # Seed with freshly preserved references, never with a caller's stale refs.
         seed = staged.export_checkpoint(identity) if staged.summary else None
         start = staged.summary[0] if staged.summary else 0
@@ -463,7 +473,7 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
         if (template.model_dump(exclude={"messages"}) != final_request.model_dump(exclude={"messages"})
                 or instructions(template) != instructions(final_request)
                 or before_decision.get("max_output_tokens") != after_decision.get("max_output_tokens")
-                or final_limit != hard_limit or fitter._calculate_budget(None, provider) != policy_limit):
+                or measured_limit(config, final_limit, fitter._calculate_budget(None, provider)) < limit):
             raise CompactionError("recovery_request_changed", "Recovery verification changed the request envelope, output reservation or hard allowance.")
         if after >= before:
             raise CompactionError("native_no_reduction", "The recovered ordinary request did not strictly reduce the effective prior request.")
