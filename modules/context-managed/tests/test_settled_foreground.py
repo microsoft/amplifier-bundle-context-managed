@@ -196,8 +196,23 @@ async def test_mac_native_oversized_preflight_is_independent_of_ordinary_dispatc
     assert len(native_counts) == 1
     model.compact_context.assert_not_awaited()
     assert (ctx._foreground_native_refusal is not None) == (native_decision == "oversized")
+    if native_decision == "oversized":
+        assert ctx.checkpoint_status["lastNativeFailure"]["code"] == "native_input_oversized"
+        await ctx.add_message({"role": "user", "content": "Fresh input."})
+        await ctx.set_messages([*await ctx.get_messages(), {"role": "user", "content": "This input cannot fit."}])
+
+        async def too_large(view):
+            return attempt(view, 20000)
+
+        with pytest.raises(ContextLengthError):
+            await ctx.get_measured_request_view(provider=model, retain_contents=[], count_view=too_large)
+        assert ctx.checkpoint_status["lastNativeFailure"]["code"] == "native_input_oversized"
+        assert (await ctx.get_messages())[:-2] == rows
     model.release_media_request.assert_called_once_with(native_counts[0], request_options=None)
-    assert (await ctx.get_messages()) == rows
+    assert (await ctx.get_messages())[:len(rows)] == rows
+    if native_decision == "oversized":
+        await ctx.set_messages([{"role": "user", "content": "Different history."}])
+        assert "lastNativeFailure" not in ctx.checkpoint_status
 
 
 @pytest.mark.asyncio
