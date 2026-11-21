@@ -557,7 +557,7 @@ async def test_portable_prepay_floor_includes_all_canonical_unknown_observations
     state.kwargs["count_view"] = count_view
     with pytest.raises(CompactionError, match="native_input_oversized"):
         await state.ctx.recover_request(**state.kwargs)
-    assert floor_unknown_counts == [40, 40]
+    assert floor_unknown_counts == [40, 40, 40]
     assert state.admitted == state.saved == state.installed == []
     assert state.ctx.messages == before
 
@@ -801,7 +801,7 @@ async def test_portable_paid_prefix_resumes_after_eligible_boundary_advances():
     with pytest.raises(CompactionError, match="summary_work_paused"):
         await state.ctx.recover_request(**state.kwargs)
     accepted = copy.deepcopy(state.saved[-1][0])
-    saved_end = accepted["sourceRevision"]["messages"]
+    saved_end = accepted["progress"]["source_revision"]["messages"]
     # This appended normal input advances the eligible boundary within the
     # original admitted ceiling; finish only the old paid job first.
     state.ctx.messages.extend([
@@ -886,7 +886,7 @@ def allowance(*, additional=32, confirmed=16):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("exchanges,extra_needed", [(22, 0), (35, 8)])
+@pytest.mark.parametrize("exchanges,extra_needed", [(22, 0), (35, 5)])
 async def test_confirmed_native_grant_resumes_saved_prefix_and_stops_when_intact_suffix_fits(exchanges, extra_needed):
     initial = large_native_transition(exchanges)
     with pytest.raises(CompactionError, match="summary_work_paused"):
@@ -958,3 +958,104 @@ def test_additional_calls_require_previous_progress():
     from amplifier_module_context_managed.transition import _remaining_allowance
     with pytest.raises(ValueError, match="Invalid additional"):
         _remaining_allowance(16, 32, allowance(), None)
+
+
+@pytest.mark.asyncio
+async def test_cross_provider_handoff_is_readable_keeps_recent_turns_and_is_reusable():
+    state = transition_fixture(True)
+    ctx = state.ctx
+    ctx.config.pop("summary_max_source_chars")  # One exactly measured prefix.
+    state.kwargs["source_checkpoint"] = ctx.export_checkpoint(SOURCE)
+    target = {**TARGET, "provider": "second-connection"}
+    state.kwargs["identity"] = state.target = state.effective_identity = target
+    ctx.checkpoint_identity = lambda: target
+    original = copy.deepcopy(ctx.messages)
+    # A target offering native compaction cannot interpret a foreign window.
+    state.model.supports_native_compaction = lambda *, model: model == target["model"]
+    state.model.rebind_compacted_context = lambda *a, **kw: pytest.fail("foreign opaque payload")
+    state.model.compact_context.side_effect = AssertionError("no native attempt")
+    state.limit = 11000
+    result = await ctx.recover_request(**state.kwargs)
+    assert result["outcome"] == "transitioned" and ctx.messages == original
+    assert [call["method"] for call in state.admitted] == ["semantic"]
+    end, note = ctx.summary
+    assert isinstance(note, str) and end in ctx._boundaries(ctx.messages, ())
+    assert end < ctx._boundary(ctx.messages, ())
+    request = state.model.complete.await_args.args[0]
+    assert "source-private-state" not in str(request)
+    assert original[-1]["content"] not in str(request)
+    assert result["base_view"][-len(original[end:]):] == original[end:]
+    assert all("fixture:opaque" not in str(row) for row in result["base_view"])
+    assert ctx.export_checkpoint(target)["summary"]["text"] == note
+
+    # A third provider can receive the saved text and exact untouched tail on
+    # a subsequent Send. No new model work or confirmation is required.
+    state.kwargs["source_checkpoint"] = ctx.export_checkpoint(target)
+    third = {**target, "provider": "third-connection"}
+    state.kwargs["identity"] = state.target = state.effective_identity = third
+    ctx.checkpoint_identity = lambda: third
+    state.initial = {k: copy.deepcopy(getattr(ctx, k)) for k in state.initial}
+    state.admitted.clear()
+    state.kwargs["max_calls"] = 0
+    continued = await ctx.recover_request(**state.kwargs)
+    assert ctx.summary == (end, note) and ctx.summary_identity == third
+    assert continued["base_view"][-len(original[end:]):] == original[end:]
+    assert not state.admitted and ctx.messages == original
+
+
+@pytest.mark.asyncio
+async def test_marc_interrupted_native_grant_stops_at_first_installable_fitting_prefix():
+    state = large_native_transition(22)
+    state.kwargs["max_calls"] = 9
+    with pytest.raises(CompactionError, match="summary_work_paused"):
+        await state.ctx.recover_request(**state.kwargs)
+    confirmed = state.saved[-1][0]
+    state.admitted.clear()
+    state.saved.clear()
+    # Unified charges one unknown reservation elsewhere. This invocation
+    # receives only the residual budget and the last confirmed native window.
+    state.kwargs.update(progress=confirmed, max_calls=6)
+    state.limit = 26000
+    state.ctx.config["max_tokens"] = 20000  # Existing explicit policy still binds.
+    result = await state.ctx.recover_request(**state.kwargs)
+    assert result["outcome"] == "transitioned"
+    assert len(state.admitted) <= 6 and state.ctx.summary[0] < state.ctx._boundary(state.ctx.messages, ())
+    assert state.model.complete.await_count == 0 and state.ctx.messages[-1]["content"] in str(result["base_view"])
+
+
+def test_measured_target_limit_honors_only_deliberate_local_limits():
+    from amplifier_module_context_managed.measurement import measured_limit
+    assert measured_limit({}, 267904, 203904) == 267904
+    assert measured_limit({"max_tokens": 8500}, 1000000, 8500) == 8500
+    assert measured_limit({"output_reserve_fraction": .8}, 267904, 170000) == 170000
+    assert measured_limit({}, 267904, 5000, 5000) == 5000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("omitted_settled_row", [False, True])
+async def test_signed_native_readable_companion_only_carries_a_complete_prefix(omitted_settled_row):
+    state = transition_fixture(True)
+    ctx = state.ctx
+    end = ctx._boundary(ctx.messages, ())
+    message = native_message(SOURCE["model"])
+    message["content"] = "Saved verified action. Operation op1 is still UNKNOWN."
+    message["metadata"]["context-managed:portable-summary"] = True
+    ctx.summary = end, message
+    ctx.summary_omitted_indices = [0, 2] if omitted_settled_row else [0]
+    state.initial = {k: copy.deepcopy(getattr(ctx, k)) for k in state.initial}
+    state.kwargs["source_checkpoint"] = ctx.export_checkpoint(SOURCE)
+    target = {**TARGET, "provider": "different-account"}
+    state.kwargs["identity"] = state.target = state.effective_identity = target
+    ctx.checkpoint_identity = lambda: target
+    state.kwargs["max_calls"] = 0
+    if omitted_settled_row:
+        with pytest.raises(CompactionError, match="summary_work_paused"):
+            await ctx.recover_request(**state.kwargs)
+        state.unchanged()
+    else:
+        result = await ctx.recover_request(**state.kwargs)
+        assert result["outcome"] == "transitioned"
+        assert ctx.summary == (end, message["content"])
+        assert ctx.summary_omitted_indices == []
+        assert all("fixture:opaque" not in str(row) for row in result["base_view"])
+    assert state.admitted == []
