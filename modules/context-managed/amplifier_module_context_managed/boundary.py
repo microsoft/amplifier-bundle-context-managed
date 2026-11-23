@@ -1015,7 +1015,7 @@ class BoundaryContextManager:
                 if saved and saved.get("completed"):
                     from .single_pass import portable_draft_for_native
                     native_draft = portable_draft_for_native(self, saved, provider, identity,
-                        messages, end, retain, carry, unknown, budget // 2)
+                        messages, end, retain, carry, unknown)
                 else:
                     self._summary_progress = None
                     self._restored_progress = None
@@ -1125,7 +1125,7 @@ class BoundaryContextManager:
                     | {i for i in excluded if i >= previous_end})
                 if native_draft is not None:
                     indexed = [(i, row) for i, row in indexed if row.get("role") in {"system", "developer"}]
-                    indexed.append((None, native_draft))
+                    indexed.append((None, {"role": "user", "content": ""}))
                 native_source = project_interrupted([row for _, row in indexed], covered_unknown)
             fingerprint = self._summary_fingerprint(source, identity, summarizer, native=use_native)
             source_revision = {"messages": end, "sha256": digest(messages[:end])}
@@ -1170,8 +1170,12 @@ class BoundaryContextManager:
                                 request = template.model_copy(deep=True, update={"messages": rows})
                             else:
                                 request = ChatRequest(messages=[Message(**row) for row in native_source])
+                            from .native_budget import native_output_limit
+                            decision = measurement.cached[1].get("budget_decision") if measurement and measurement.cached else None
+                            output = await native_output_limit(provider, request.model, self.config, decision)
+                            check_summary_contract()
                             request = request.model_copy(update={
-                                "max_output_tokens": self.config.get("native_compaction_max_output_tokens", 4096),
+                                "max_output_tokens": output,
                                 "metadata": {**(request.metadata or {}), "purpose": "context-compaction", "stream": False,
                                              "native_compaction_request_context": isinstance(template, ChatRequest)}})
                             # The continuation provider owns opaque state. A
@@ -1179,6 +1183,8 @@ class BoundaryContextManager:
                             # portable summaries on unsupported providers, never native compact.
                             # A healthy native response may take many minutes.
                             # Elapsed time must not cancel it or start a fallback.
+                            if native_draft is not None:
+                                request = await native_draft.fit(request, provider, 2 * budget, check_summary_contract)
                             refusal_key = (input_key, id(provider), identity, configuration,
                                 fitter._calculate_budget(token_budget, provider),
                                 digest(request.model_dump(mode="json")))
