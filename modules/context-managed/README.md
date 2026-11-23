@@ -61,6 +61,20 @@ supersedes the task. Only validated results for the same source revision and
 selection can advance the checkpoint. Observers can distinguish these events
 using `context_work: settled_maintenance`.
 
+When the full foreground history no longer fits, the selector leaves room for
+new steps and keeps the same earlier exchanges while the growing request fits.
+Settled maintenance uses at most one model generation. It prefers the selected
+provider's qualified native operation and measures the request before dispatch.
+An unsupported provider can produce one portable continuation note. Token counts
+are separate from model generations.
+
+With archive recovery enabled, an oversized history can use an excerpt if the
+host has preserved the originals. A compatible paid partial note can enter the
+native request alongside still-unprocessed evidence. Its source and fragment
+digests must match. The prior checkpoint remains available until the replacement
+is validated and stored. Large new inputs or required instructions can consume
+the available room sooner.
+
 `foreground_continuation: true` makes measured ordinary requests (and explicit
 `hard_fit` requests) independent of optional compaction success. It reuses the
 existing whole-exchange selector and exact request fitter; it does not install a
