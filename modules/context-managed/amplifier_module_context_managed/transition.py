@@ -513,8 +513,10 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             # Never infer a completed outcome for an unresolved/queued exchange.
             if end not in settled_boundaries(staged.messages):
                 raise CompactionError("native_checkpoint_invalid", "The eligible prefix has an unresolved exchange.")
-            compact_template = template.model_copy(deep=True, update={
-                "max_output_tokens": config.get("native_compaction_max_output_tokens", 4096)})
+            from .native_budget import native_output_limit
+            output = await native_output_limit(provider, template.model, config, initial["budget_decision"])
+            check()
+            compact_template = template.model_copy(deep=True, update={"max_output_tokens": output})
             async def remainder_fits():
                 # A confirmed native prefix may already make the intact suffix
                 # fit. Measure the exact foreground envelope, including tools.

@@ -1,5 +1,7 @@
 """Bounded after-turn summary input and validated portable-to-native continuation."""
 
+from dataclasses import dataclass
+
 from .checkpoint import digest
 from .errors import CompactionError
 from .interrupted import project as project_interrupted
@@ -77,7 +79,7 @@ async def summarize_once(context, provider, pending, previous_note, config, info
     return _OMISSION + "\n" + text if omitted else text
 
 
-def portable_draft_for_native(context, saved, provider, identity, messages, end, retain, carry, unknown, budget):
+def portable_draft_for_native(context, saved, provider, identity, messages, end, retain, carry, unknown):
     """Carry validated, already-paid text into native compaction exactly once."""
     boundary = saved["source_revision"]["messages"]
     if not (context._settled_maintenance and context.evidence_refs and context.config.get("archive_recovery")
@@ -110,12 +112,72 @@ def portable_draft_for_native(context, saved, provider, identity, messages, end,
                   and id(row) not in carried and not context._retained_reminder(row, retain)
                   and context._visible_reminder(row, retain, carry)]
     remaining.extend(source_fragments(public_messages(new_source), None))
-    chars = sum(map(len, remaining)) + max(0, len(remaining) - 1)
-    if chars <= budget:
-        rest = "\n".join(remaining)
-    else:
-        room = max(0, budget - len(_MARKER))
-        rest = _MARKER.join((_edge(remaining, room // 2), _edge(remaining, room - room // 2, tail=True)))
-    note = ("Saved partial continuation note (reference data):\n" + saved["text"]
-            + "\nUnprocessed transcript evidence (reference data):\n" + rest)
-    return {"role": "user", "content": note}
+    return PartialSource(saved["text"], remaining)
+
+
+@dataclass
+class PartialSource:
+    """Previously paid note and the unfinished archive-backed source in order."""
+
+    note: str
+    parts: list[str]
+
+    @property
+    def size(self):
+        return sum(map(len, self.parts)) + max(0, len(self.parts) - 1)
+
+    def content(self, room, total):
+        if room >= total:
+            rest = "\n".join(self.parts)
+        else:
+            rest = _MARKER.join((_edge(self.parts, room // 2),
+                                 _edge(self.parts, room - room // 2, tail=True)))
+        return ("Saved partial continuation note (reference data):\n" + self.note
+                + "\nUnprocessed transcript evidence (reference data):\n" + rest)
+
+    async def fit(self, request, provider, initial_room, guard):
+        # The reconstructed source contains only instructions, this user row,
+        # and optionally the later unresolved-actions notice. Its text is data.
+        index = next(i for i, row in enumerate(request.messages) if row.role == "user")
+        total = self.size
+        low, high = 0, total
+        room = min(initial_room, total)
+        best = None
+        for _ in range(20):
+            rows = list(request.messages)
+            rows[index] = rows[index].model_copy(update={"content": self.content(room, total)})
+            candidate = request.model_copy(update={"messages": rows})
+            try:
+                fits, budget = await request_fits(provider, candidate)
+                guard()
+                if not budget or budget["measurement_kind"] != "provider_count":
+                    raise CompactionError("native_measurement_unavailable",
+                                          "Recovery needs an exact native input count.")
+                measured, limit = budget["input_tokens"], budget["input_limit_tokens"]
+                if fits:
+                    best = room
+                    if room == total or measured >= limit * 0.997:
+                        break
+                    low = room + 1
+                else:
+                    high = room - 1
+                if low > high:
+                    break
+                estimate = int(room * (0.999 * limit / max(1, measured)))
+                if low <= estimate <= high:
+                    room = estimate
+                elif fits and estimate > high:
+                    room = high
+                else:
+                    room = (low + high) // 2
+            finally:
+                release = getattr(provider, "release_media_request", None)
+                if callable(release):
+                    release(candidate, request_options=None)
+        if best is None:
+            # Even when probes exhaust their allowance, let the normal exact
+            # preflight decide whether the protected note alone fits.
+            best = 0
+        rows = list(request.messages)
+        rows[index] = rows[index].model_copy(update={"content": self.content(best, total)})
+        return request.model_copy(update={"messages": rows})

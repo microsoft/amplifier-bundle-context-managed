@@ -172,7 +172,7 @@ The allowance includes reasoning where the provider accounts for reasoning there
 An output-limit finish raises `summary_output_limit`, rather than accepting an
 incomplete note. Configure the allowance for the provider/model; no default is a
 claim of summary quality or a universal model limit. Native requests retain their
-separate `native_compaction_max_output_tokens` setting (default 4096).
+model-aware output allowance, with an optional positive `native_compaction_max_output_tokens` override. Recovering a partial portable note preserves its paid text and uses exact counts of the full native request to size the remaining archived evidence.
 
 Neither compaction method has a context-owned elapsed-time deadline. Healthy calls
 can complete; caller cancellation stops preparation. History or contract changes
