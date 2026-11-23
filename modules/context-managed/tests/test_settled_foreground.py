@@ -21,6 +21,16 @@ def long_history():
     return rows
 
 
+@pytest.mark.asyncio
+async def test_short_followup_keeps_previous_tool_run_eligible_for_settled_compaction():
+    rows = long_history()
+    ctx = await manager(rows, compaction_schedule="after_turn", archive_recovery=True)
+    ctx._settled_maintenance = True
+    boundary = ctx._boundary(rows, [])
+    assert rows[boundary:] == [row for i in range(116, 120) for row in exchange(str(i), size=800)] + rows[-1:]
+    assert ctx._carry(rows) == [rows[1], rows[-1]]
+
+
 def attempt(rows, size, limit=16000):
     return {"dispatch": ChatRequest(messages=[Message(**row) for row in rows]),
             "budget_decision": {"estimated_input_tokens": size, "input_limit_tokens": limit,

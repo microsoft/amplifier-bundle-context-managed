@@ -363,7 +363,13 @@ class BoundaryContextManager:
                 barrier = min(barrier, i)
         # Human input is not a prerequisite for making progress. Leave four
         # complete recent exchanges verbatim; never cut an unresolved batch.
-        recent = [pair for pair in settled if turns and pair[0] > turns[-1]]
+        # A short follow-up must not make the preceding long tool run
+        # ineligible again. Both human instructions are carried verbatim.
+        # Keep the latest four complete exchanges across these adjacent turns.
+        recent_turns = turns[-1:]
+        if self._settled_maintenance and self.config.get("archive_recovery"):
+            recent_turns = turns[-2:]
+        recent = [pair for pair in settled if recent_turns and pair[0] > recent_turns[0]]
         if len(recent) > 4:
             end = max(end, recent[-4][0])
         if calls:
