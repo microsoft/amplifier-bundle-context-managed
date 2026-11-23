@@ -457,9 +457,10 @@ async def recover_request(context, *, provider, count_view, identity, save_progr
         expected_omissions = sorted(set(staged.summary_omitted_indices)
             | {i for i in excluded if start <= i < end})
         from .native_budget import native_output_limit
-        output = await _guarded(check, native_output_limit, provider, template.model, config, before_decision)
-        template = template.model_copy(update={"max_output_tokens": output})
-        record = await _guarded(check, recover_native, staged, provider, template, identity,
+        output = await _guarded(check, native_output_limit, provider, template.model, config, before_decision,
+                                fallback=template.max_output_tokens)
+        compact_template = template.model_copy(update={"max_output_tokens": output})
+        record = await _guarded(check, recover_native, staged, provider, compact_template, identity,
             save_progress=save_progress, target_bytes=target_bytes, progress=seed,
             through_message=end, exclude_indices=excluded, guard=check)
         # Restore the exact export against full originals on a disposable context.

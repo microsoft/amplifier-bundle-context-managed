@@ -12,7 +12,7 @@ def _positive(value):
     return type(value) is int and value > 0
 
 
-async def native_output_limit(provider, model, config, decision):
+async def native_output_limit(provider, model, config, decision, *, fallback=4096):
     explicit = config.get("native_compaction_max_output_tokens")
     if "native_compaction_max_output_tokens" in config:
         if not _positive(explicit):
@@ -41,7 +41,7 @@ async def native_output_limit(provider, model, config, decision):
     output = _field(record, "max_output_tokens")
     window = _field(record, "context_window")
     if not _positive(output):
-        return 4096
+        return fallback
     if (decision or {}).get("input_limit_independent_of_output") is True or not _positive(window):
         return output
     # Shared or unspecified windows must leave capacity for the source.
