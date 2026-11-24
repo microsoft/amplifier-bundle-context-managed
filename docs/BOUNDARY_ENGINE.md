@@ -237,3 +237,16 @@ It waits only for the already-dispatched single-prefix call, including its save.
 Foreground fitting then proceeds with the available checkpoint. Direct history
 changes and Stop still cancel pending maintenance, and changed selection prevents
 a stale result from being published.
+
+If a paid single-prefix summary is already in flight, a loop that uses
+`context.begin_settled_foreground` can append a fresh turn and ask whether
+the whole prepared ordinary text request fits the current planning allowance.
+The provider must support keeping that exact projection bound through dispatch.
+The loop checks the returned guard immediately before transport. Unknown media,
+options or size fall back to ordinary fitting after the pending checkpoint.
+
+Only append-only growth can share the pending summary. The original source
+digest, selected identity, writer, configuration and operation guards still
+govern publication. Explicit Stop and history replacement cancel it. The saved
+note covers only its original prefix; later messages and refreshed evidence
+remain available on reopening. No turn waits in the history append operation.
