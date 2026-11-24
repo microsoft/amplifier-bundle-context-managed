@@ -173,3 +173,71 @@ async def test_predispatch_guard_allows_its_own_save_and_rejects_changed_request
                 grant["validate"]()
     c.release.set()
     await asyncio.gather(c.task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", [False, True], ids=["removed", "replaced"])
+@pytest.mark.parametrize("phase", ["settle", "pending", "predispatch"])
+async def test_mounted_writer_stays_bound_from_offer_to_dispatch_and_save(phase, replacement):
+    from amplifier_module_context_managed.boundary import mount_boundary
+
+    template, model, rows = await setup()
+    original, other = AsyncMock(return_value=True), AsyncMock(return_value=True)
+    caps = {"context.preserve_evidence": AsyncMock(return_value=[]),
+            "context.checkpoint_identity": lambda: IDENTITY}
+    coordinator = SimpleNamespace(mount=AsyncMock(), get_capability=caps.get,
+        register_capability=caps.__setitem__, register_contributor=lambda *args: None)
+    await mount_boundary(coordinator, template.config)
+    ctx = coordinator.mount.await_args.args[1]
+    await ctx.set_messages(rows)
+    caps["context.persist_checkpoint"] = original
+    settle = offer(ctx, model)
+    assert callable(settle)
+
+    def change_owner():
+        if replacement:
+            caps["context.persist_checkpoint"] = other
+        else:
+            del caps["context.persist_checkpoint"]
+
+    if phase == "settle":
+        change_owner()
+        assert settle() is False and ctx._maintenance_task is None
+        model.complete.assert_not_called()
+        return
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed(_request):
+        entered.set()
+        await release.wait()
+        return response("Original note")
+
+    model.complete = AsyncMock(side_effect=delayed)
+
+    @asynccontextmanager
+    async def prepared(logical, *, request_options):
+        yield logical
+    model.prepared_foreground = prepared
+
+    assert settle()
+    task = ctx._maintenance_task
+    await asyncio.wait_for(entered.wait(), 2)
+    if phase == "predispatch":
+        ticket = ctx.begin_settled_foreground(provider=model)
+        await ctx.add_message({"role":"user","content":"New input"})
+        def project(messages):
+            return ChatRequest(messages=[Message(**row) for row in messages])
+        async with ticket(retain_contents=[], project_view=project, request_options={}) as choice:
+            assert choice is not None
+            change_owner()
+            with pytest.raises(RuntimeError, match="changed before dispatch"):
+                choice["validate"]()
+    else:
+        change_owner()  # No new foreground request has modified the history revision.
+    release.set()
+    await asyncio.gather(task, return_exceptions=True)
+    original.assert_not_called()
+    other.assert_not_called()
+    assert ctx.summary is None
+    caps.pop("context.persist_checkpoint", None)
+    assert offer(ctx, model) is None  # An absent host writer cannot admit another paid attempt.

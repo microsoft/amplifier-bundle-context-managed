@@ -35,11 +35,12 @@ def text_request_fits(request, fitter, provider):
 
 
 class PaidPrefix:
-    def __init__(self, task, provider, source_revision, current):
+    def __init__(self, task, provider, source_revision, current, writer_current):
         self.task = task
         self.provider = provider
         self.source_revision = source_revision
         self.current = current
+        self.writer_current = writer_current
         self.allow_append = False
         self.committed_checkpoint = None
 
@@ -62,14 +63,13 @@ class PaidPrefix:
                         config = copy.deepcopy(context.config)
                         identity = copy.deepcopy(context.checkpoint_identity()) if context.checkpoint_identity else None
                         checkpoint = copy.deepcopy(context._checkpoint_state())
-                        writer = context.persist_checkpoint
                         operations = context._operations_guard(context.active_operations() if context.active_operations else None)
 
                         def validate():
                             context._check_stop()
                             observed = context._checkpoint_state()
                             if (context.revision != current_revision or context.config != config
-                                    or context.persist_checkpoint is not writer or not operations()
+                                    or not self.writer_current() or not operations()
                                     or context.checkpoint_identity and context.checkpoint_identity() != identity
                                     or observed != checkpoint and observed != self.committed_checkpoint
                                     or self.task.cancelling()):
