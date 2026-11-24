@@ -25,7 +25,12 @@ def complete_prefix(context, messages, retain, carry, unknown, limit):
         rows = project_interrupted(rows, [call for call in unknown if call["source_message"] < end])
         return len(next(source_fragments(public_messages(rows), None), ""))
 
-    count = bisect_right(eligible, limit, key=size)
+    # Bracket from the saved boundary: a chat with years of history can
+    # exceed one request within its first few still-uncovered exchanges.
+    count, probe = 0, 1
+    while probe <= len(eligible) and size(eligible[probe - 1]) <= limit:
+        count, probe = probe, probe * 2
+    count = bisect_right(eligible, limit, lo=count, hi=min(probe - 1, len(eligible)), key=size)
     if not count:
         raise CompactionError("summary_no_fitting_prefix", "No whole settled exchange fits one maintenance request.")
     return eligible[count - 1]

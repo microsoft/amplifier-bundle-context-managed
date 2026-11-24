@@ -183,3 +183,25 @@ async def test_cancelled_after_turn_answer_cannot_publish_a_late_summary(interru
     assert ctx.summary is None and await ctx.get_messages() == rows
     ctx.persist_checkpoint.assert_not_called()
     model.complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_prefix_search_sizes_nearby_exchanges_before_probing_distant_history(monkeypatch):
+    from amplifier_module_context_managed import single_pass
+
+    ctx, _, _ = await setup()
+    rows = [{"role": role, "content": text} for _ in range(250)
+            for role, text in (("user", "x" * 1000), ("assistant", "Received."))]
+    await ctx.set_messages(rows)
+    observed = []
+    fragments = single_pass.source_fragments
+
+    def observe(messages, limit):
+        for part in fragments(messages, limit):
+            observed.append(len(part))
+            yield part
+
+    monkeypatch.setattr(single_pass, "source_fragments", observe)
+    end = single_pass.complete_prefix(ctx, rows, [], ctx._carry(rows), [], 3500)
+    assert end == 6  # All of the first three exchanges and no part of the fourth.
+    assert max(observed) < 5_000
