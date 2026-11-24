@@ -202,3 +202,16 @@ Provider contracts: [OpenAI compaction](https://developers.openai.com/api/docs/g
 and [Anthropic compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand).
 A provider adapter must implement its own native capability; provider documentation
 alone does not mean a particular installed adapter supports it.
+
+For an ordinary target request without provider counting, a durable host may offer
+a completed plain-text checkpoint through `context.portable_handoff.source`.
+The host binds the creating connection, explicit target selection and foreground
+input. Context verifies the saved record, configuration, canonical prefix and
+legal boundary. It stages the target candidate and the exact rendered note after
+fitting. The host keeps the source checkpoint until this ordinary request has
+succeeded with that note and the supplied guard still accepts the source and
+selection. This path does no model work during handoff. Paid partials and native
+state retain their existing recovery path. The optional synchronous
+`context.portable_handoff.generated` callback identifies the summarizer and
+the completed record only for newly generated portable work. A restored note
+and a note assembled from previously paid parts do not establish a new origin.

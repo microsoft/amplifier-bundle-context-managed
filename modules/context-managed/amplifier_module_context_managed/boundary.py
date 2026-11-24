@@ -79,6 +79,7 @@ class BoundaryContextManager:
         self.recovery = None
         self.run_pending_recovery = None
         self.transition_policy = None
+        self._host_capability = None
         self._ordinary_transition = None
         self._foreground_paid_input = None
         self._foreground_unconfirmed = False
@@ -745,7 +746,8 @@ class BoundaryContextManager:
         return unchanged
 
     async def _prepare(self, provider, token_budget, retain, measurement=None, *, reason=None,
-                       ordinary=False, snapshot=None, on_preserved=None, operations_guard=None, foreground_select=None):
+                       ordinary=False, snapshot=None, on_preserved=None, operations_guard=None, foreground_select=None,
+                       portable_offer=None):
         messages, revision = copy.deepcopy(self.messages), self.revision
         self._check_stop()
         input_key = next(((i, digest(row)) for i, row in reversed(list(enumerate(messages)))
@@ -801,7 +803,8 @@ class BoundaryContextManager:
                 revision=revision, identity=identity, system_prompt=system_prompt,
                 operations=operations)
         prior_identity = selected_identity()
-        if not ordinary and (self._ordinary_transition is not None or check_transition(prior_identity)):
+        if not ordinary and (self._ordinary_transition is not None
+                or (check_transition(prior_identity) and portable_offer is None)):
             return await originals_fitter(prior_identity)
         evidence_refs = self.evidence_refs
         if self.config.get("durable_checkpoints") and self.preserve_evidence:
@@ -816,6 +819,17 @@ class BoundaryContextManager:
         identity = selected_identity()
         if prior_identity is not None and prior_identity != identity:
             raise RuntimeError("Request contract changed during evidence preservation")
+        if portable_offer is not None and not (self._ordinary_transition or self._summary_progress or self._restored_progress):
+            from .portable_handoff import prepare
+            offered = await portable_offer(messages, identity)
+            self._check_stop()
+            if revision != self.revision or identity != selected_identity():
+                raise RuntimeError("Request changed during portable checkpoint admission")
+            if offered is not None:
+                projected = await prepare(self, offered, identity, provider, messages, revision,
+                                          token_budget, retain, system_prompt, operations)
+                if projected is not None:
+                    return projected
         if ordinary:
             source_identities = [self.summary_identity] if self.summary else []
             source_identities += [part["identity"] for part in
@@ -1295,6 +1309,11 @@ class BoundaryContextManager:
                 # checkpoint behind an unchanged canonical history revision.
                 summary_state = copy.deepcopy(self._checkpoint_state())
                 assembled, outcome = candidate, "completed"
+                if (self._host_capability and stats.get("method") == "semantic" and stats["calls"] > 0
+                        and isinstance(text, str) and not self.recovery and not stats.get("resumed_fragments")):
+                    generated = self._host_capability("context.portable_handoff.generated")
+                    if generated is not None:
+                        generated(summarizer, self.export_checkpoint(identity))
             except asyncio.CancelledError:
                 outcome = "cancelled"
                 # Only completed, source-validated pieces survive cancellation.
@@ -1644,7 +1663,13 @@ class BoundaryContextManager:
         async with self.lock:
             revision = self.revision
             try:
-                fitter, retain = await self._prepare(provider, token_budget, retain_contents)
+                offer = None
+                if not hard_fit and self._host_capability and provider is not None:
+                    if not callable(getattr(provider, "request_budget", None)):
+                        offer = self._host_capability("context.portable_handoff.source")
+                    if offer and supports_native_for(provider, getattr(provider, "default_model", None)):
+                        offer = None
+                fitter, retain = await self._prepare(provider, token_budget, retain_contents, portable_offer=offer)
                 summary_state = copy.deepcopy(self._checkpoint_state())
                 result = await fitter.get_messages_for_request_retaining(retain_contents=retain, provider=provider,
                     token_budget=token_budget, hard_fit=hard_fit)
@@ -1751,6 +1776,7 @@ async def mount_boundary(coordinator, config):
     context.transition_policy = lambda: (coordinator.get_capability(
         "context.transition_policy") or (lambda: None))()
     if config.get("durable_checkpoints"):
+        context._host_capability = coordinator.get_capability
         context.checkpoint_identity = lambda: (coordinator.get_capability("context.checkpoint_identity") or (lambda: None))()
         async def preserve(messages):
             callback = coordinator.get_capability("context.preserve_evidence")
