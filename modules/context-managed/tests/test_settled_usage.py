@@ -205,3 +205,40 @@ async def test_prefix_search_sizes_nearby_exchanges_before_probing_distant_histo
     end = single_pass.complete_prefix(ctx, rows, [], ctx._carry(rows), [], 3500)
     assert end == 6  # All of the first three exchanges and no part of the fourth.
     assert max(observed) < 5_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt", [False, True])
+async def test_user_turn_joins_dispatched_prefix_until_save_or_stop(interrupt):
+    ctx, model, rows = await setup()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def summary(_request):
+        entered.set()
+        await release.wait()
+        return response("ORBIT grounded note")
+
+    ctx.persist_checkpoint = AsyncMock()
+    model.complete = AsyncMock(side_effect=summary)
+    assert offer(ctx, model)()
+    await asyncio.wait_for(entered.wait(), 2)
+    waiter = asyncio.create_task(ctx.wait_for_settled_checkpoint())
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    if interrupt:
+        ctx._is_cancelled = lambda: True
+        ctx.cancel_settled_compaction()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(waiter, 2)
+        ctx.persist_checkpoint.assert_not_called()
+        assert ctx.summary is None
+    else:
+        release.set()
+        await asyncio.wait_for(waiter, 2)
+        ctx.persist_checkpoint.assert_awaited_once()
+        await ctx.add_message({"role": "user", "content": "Continue."})
+        view = await ctx.get_messages_for_request(provider=model)
+        assert any("ORBIT grounded note" in row["content"] for row in view)
+    assert (await ctx.get_messages())[:len(rows)] == rows
+    model.complete.assert_awaited_once()

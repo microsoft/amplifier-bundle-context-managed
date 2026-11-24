@@ -87,6 +87,7 @@ class BoundaryContextManager:
         self._is_cancelled = None
         self._settled_maintenance = False
         self._maintenance_task = None
+        self._paid_settled_prefix = None
         self._maintenance_revision = None
         self._maintenance_requested = False
         self._continuation_ranges = ()
@@ -1649,6 +1650,15 @@ class BoundaryContextManager:
         return bool(self.config.get("foreground_continuation")
                     and self.config.get("compaction_schedule") == "after_turn")
 
+    async def wait_for_settled_checkpoint(self):
+        """Give an already-dispatched single-prefix summary its original save boundary."""
+        pending = self._paid_settled_prefix
+        if pending is not None and pending is self._maintenance_task:
+            # A failed or stopped optional task does not decide foreground admission.
+            # Cancelling the waiting turn must still interrupt this await.
+            await asyncio.wait({pending})
+            self._check_stop()
+
     async def close_settled_compaction(self):
         task = self._maintenance_task
         if task is not None:
@@ -1830,6 +1840,7 @@ async def mount_boundary(coordinator, config):
     if config.get("foreground_continuation") and config.get("compaction_schedule") == "after_turn":
         coordinator.register_capability("context.ordinary_settled_response", context.ordinary_settled_response)
         coordinator.register_capability("context.schedule_settled_compaction", context.schedule_settled_compaction)
+        coordinator.register_capability("context.wait_for_settled_checkpoint", context.wait_for_settled_checkpoint)
         coordinator.register_capability("context.cancel_settled_compaction", context.cancel_settled_compaction)
         register_cleanup = getattr(coordinator, "register_cleanup", None)
         if register_cleanup:

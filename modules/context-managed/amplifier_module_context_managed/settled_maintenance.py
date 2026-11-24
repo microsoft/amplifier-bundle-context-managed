@@ -110,7 +110,13 @@ def schedule(context, provider, count_view, retain_contents, *, anticipated_prom
         worker._is_cancelled = lambda: not current()
         for name in _FIELDS:
             setattr(worker, name, copy.deepcopy(getattr(context, name)))
-        worker._paid_compaction = context._paid_compaction
+
+        async def pay(invoke, input_key):
+            if anticipated_prompt_tokens:
+                context._paid_settled_prefix = task
+            return await context._paid_compaction(invoke, input_key)
+
+        worker._paid_compaction = pay
 
         async def publish():
             async with context.lock:
@@ -148,6 +154,8 @@ def schedule(context, provider, count_view, retain_contents, *, anticipated_prom
             await publish()
 
     def finished(done):
+        if context._paid_settled_prefix is done:
+            context._paid_settled_prefix = None
         if context._maintenance_task is done:
             context._maintenance_task = None
         if not done.cancelled() and (error := done.exception()) is not None:
