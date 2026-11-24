@@ -215,3 +215,25 @@ state retain their existing recovery path. The optional synchronous
 `context.portable_handoff.generated` callback identifies the summarizer and
 the completed record only for newly generated portable work. A restored note
 and a note assembled from previously paid parts do not establish a new origin.
+
+### After-turn checkpoints for uncounted text completions
+
+A loop can offer `context.ordinary_settled_response` the provider and reported
+input/output usage from a confirmed ordinary text reply, the character count of
+the current prompt, and the required retained text. Call it after recording the
+assistant reply. If one more prompt like this one would reach the configured
+soft trigger, it returns a callback for successful execution end. It uses the
+same configured input budget and output reserve as ordinary planning. The
+forecast only schedules work and supplies no measurement for foreground fitting.
+
+The existing settled worker checks that growing conversation content also
+approaches the trigger. Large fixed instructions or tools alone do not justify
+summarizing. The worker can issue one summary call for a whole prefix of
+completed exchanges that fits. It commits the exact covered boundary. Remaining
+rows stay verbatim, including when no transcript archive references are available.
+If no whole eligible exchange fits, maintenance leaves the checkpoint alone.
+Before writing a fresh turn, a loop can await `context.wait_for_settled_checkpoint`.
+It waits only for the already-dispatched single-prefix call, including its save.
+Foreground fitting then proceeds with the available checkpoint. Direct history
+changes and Stop still cancel pending maintenance, and changed selection prevents
+a stale result from being published.
