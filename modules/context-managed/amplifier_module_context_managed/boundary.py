@@ -105,7 +105,8 @@ class BoundaryContextManager:
             return False
 
     async def add_message(self, message):
-        self.cancel_settled_compaction()
+        if self._paid_settled_prefix is None or not self._paid_settled_prefix.allow_append:
+            self.cancel_settled_compaction()
         self.messages.append(copy.deepcopy(message))
         self.revision += 1
 
@@ -751,7 +752,7 @@ class BoundaryContextManager:
 
     async def _prepare(self, provider, token_budget, retain, measurement=None, *, reason=None,
                        ordinary=False, snapshot=None, on_preserved=None, operations_guard=None, foreground_select=None,
-                       portable_offer=None, anticipated_prompt_tokens=0):
+                       portable_offer=None, anticipated_prompt_tokens=0, skip_optional_summary=False):
         messages, revision = copy.deepcopy(self.messages), self.revision
         self._check_stop()
         input_key = next(((i, digest(row)) for i, row in reversed(list(enumerate(messages)))
@@ -1021,7 +1022,7 @@ class BoundaryContextManager:
         should_summarize = (provider is not None and end > (self.summary[0] if self.summary else 0)
                             and (reason == "provider_overflow" or recovery is not None
                                  or assembled_tokens + anticipated_prompt_tokens >= budget * threshold))
-        if ordinary and (self._foreground_unconfirmed or self._foreground_paid_input == input_key):
+        if skip_optional_summary or ordinary and (self._foreground_unconfirmed or self._foreground_paid_input == input_key):
             should_summarize = False
         if (should_summarize and reason != "provider_overflow" and use_native
                 and self.summary and isinstance(self.summary[1], dict)):
@@ -1650,13 +1651,17 @@ class BoundaryContextManager:
         return bool(self.config.get("foreground_continuation")
                     and self.config.get("compaction_schedule") == "after_turn")
 
+    def begin_settled_foreground(self, *, provider):
+        prefix = self._paid_settled_prefix
+        return prefix.begin(self, provider) if prefix is not None else None
+
     async def wait_for_settled_checkpoint(self):
         """Give an already-dispatched single-prefix summary its original save boundary."""
         pending = self._paid_settled_prefix
-        if pending is not None and pending is self._maintenance_task:
+        if pending is not None and pending.task is self._maintenance_task:
             # A failed or stopped optional task does not decide foreground admission.
             # Cancelling the waiting turn must still interrupt this await.
-            await asyncio.wait({pending})
+            await asyncio.wait({pending.task})
             self._check_stop()
 
     async def close_settled_compaction(self):
@@ -1840,6 +1845,7 @@ async def mount_boundary(coordinator, config):
     if config.get("foreground_continuation") and config.get("compaction_schedule") == "after_turn":
         coordinator.register_capability("context.ordinary_settled_response", context.ordinary_settled_response)
         coordinator.register_capability("context.schedule_settled_compaction", context.schedule_settled_compaction)
+        coordinator.register_capability("context.begin_settled_foreground", context.begin_settled_foreground)
         coordinator.register_capability("context.wait_for_settled_checkpoint", context.wait_for_settled_checkpoint)
         coordinator.register_capability("context.cancel_settled_compaction", context.cancel_settled_compaction)
         register_cleanup = getattr(coordinator, "register_cleanup", None)
