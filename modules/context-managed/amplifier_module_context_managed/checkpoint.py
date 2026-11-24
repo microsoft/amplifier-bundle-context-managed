@@ -14,10 +14,22 @@ def digest(value):
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def native_handoff_eligible(context, provider, target, source_identity, through, omitted, retain, ceiling):
+    from .measurement import supports_native_for
+
+    if (source_identity["provider"] != target["provider"] or through > ceiling
+            or context._boundary(context.messages, retain, ceiling=through) != through
+            or not context.config.get("native_compaction", True)
+            or not supports_native_for(provider, target["model"])):
+        return False
+    required = {id(row) for row in context._carry(context.messages)}
+    return all(i in omitted for i, row in enumerate(context.messages[:through])
+               if id(row) in required or context._retained_reminder(row, retain))
+
+
 def handoff_summary(context, provider, target, *, source_identity, summary, omitted, retain, ceiling):
     """Qualify a known source prefix locally. Only the provider interprets opaque payloads."""
     from .errors import CompactionError
-    from .measurement import supports_native_for
 
     if not summary or not source_identity:
         return None
@@ -27,12 +39,8 @@ def handoff_summary(context, provider, target, *, source_identity, summary, omit
     if isinstance(value, str):
         return through, value
     rebind = getattr(provider, "rebind_compacted_context", None)
-    carry = context._carry(context.messages)
-    required = {id(row) for row in carry}
-    if (source_identity["provider"] == target["provider"] and callable(rebind)
-            and context.config.get("native_compaction", True) and supports_native_for(provider, target["model"])
-            and all(i in omitted for i, row in enumerate(context.messages[:through])
-                    if id(row) in required or context._retained_reminder(row, retain))):
+    if callable(rebind) and native_handoff_eligible(
+            context, provider, target, source_identity, through, omitted, retain, ceiling):
         rebound = rebind(copy.deepcopy(value), source_model=source_identity["model"], model=target["model"])
         if rebound is not None:
             if not provider.validate_compacted_context(rebound):
@@ -48,7 +56,7 @@ def handoff_summary(context, provider, target, *, source_identity, summary, omit
     if omitted:
         # Text checkpoints do not store an omission map. Only convert if their
         # normal projection carries every omitted source row outside the note.
-        projected = context._assembly_rows(context.messages, (through, content), retain, carry, ())
+        projected = context._assembly_rows(context.messages, (through, content), retain, context._carry(context.messages), ())
         carried = {i for i, _ in projected if i is not None and i < through}
         if not set(omitted).issubset(carried):
             return None
