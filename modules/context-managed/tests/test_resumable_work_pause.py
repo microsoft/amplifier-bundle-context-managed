@@ -328,7 +328,12 @@ async def test_frozen_accepted_v4_v5_progress_resumes_without_replaying_baseline
     carry = manager._carry(fixture["messages"])
     source = manager._assembled(fixture["messages"][:record["progress"]["source_revision"]["messages"]],
                                previous, [], carry)
-    parts = list(source_fragments(public_messages(source), fixture["config"]["summary_max_source_chars"]))
+    public_source = public_messages(source)
+    cap = fixture["config"]["summary_max_source_chars"]
+    # All four accepted records contain a split row written before labels fit
+    # inside the cap. Only the original layout may locate its unpaid suffix.
+    assert digest(list(source_fragments(public_source, cap))) != record["progress"]["parts_digest"]
+    parts = list(source_fragments(public_source, cap, legacy_labels=True))
     assert digest(parts) == record["progress"]["parts_digest"]
     expected = "".join(parts[i][a:z] for i, a, z in record["progress"]["segments"])
     actual = "".join(call.args[0].messages[-1].content.split(

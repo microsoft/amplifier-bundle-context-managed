@@ -2,11 +2,10 @@
 
 from dataclasses import dataclass
 
-from .checkpoint import digest
 from .errors import CompactionError
 from .interrupted import project as project_interrupted
 from .request_context import RequestContext
-from .summary import add_usage, public_messages, request_fits, source_fragments, summary_request
+from .summary import add_usage, public_messages, request_fits, source_fragments, summary_parts, summary_request
 
 
 _OMISSION = "Some earlier material is only in the saved transcript. Consult the originals for omitted details."
@@ -98,8 +97,8 @@ def portable_draft_for_native(context, saved, provider, identity, messages, end,
     limit = min(int(context.config.get("summary_max_source_chars", 512000)),
                 max(256, RequestContext()._calculate_budget(None, provider) // 2))
     for partition in (None, limit):
-        parts = list(source_fragments(public_messages(original), partition))
-        if saved["parts_digest"] == digest(parts) and context._valid_segments(saved, parts):
+        parts = summary_parts(public_messages(original), partition, saved)
+        if parts is not None and context._valid_segments(saved, parts):
             break
     else:
         context._refuse_progress()

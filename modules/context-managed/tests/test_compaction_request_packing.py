@@ -1,5 +1,6 @@
 """Native windows stay whole; portable notes split only when their budget requires it."""
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,7 +9,7 @@ from amplifier_module_context_managed.errors import CompactionError
 from amplifier_core import ChatRequest, Message, ToolSpec
 from amplifier_module_context_managed.boundary import BoundaryContextManager
 from amplifier_module_context_managed.checkpoint import digest
-from amplifier_module_context_managed.summary import request_fits
+from amplifier_module_context_managed.summary import request_fits, source_fragments
 
 
 def originals(size=600_000):
@@ -42,6 +43,47 @@ async def context(**config):
 def finished(manager):
     return [call.args[1] for call in manager.hooks.emit.call_args_list
             if call.args[0] == "context:compaction_finished"][-1]
+
+
+@pytest.mark.parametrize("size", [2200, 2230, 23_000])
+def test_labeled_fragments_fit_cap_and_reconstruct_large_unicode_record(size):
+    cap = 256
+    row = {"role": "tool", "tool_call_id": "result", "content": "樹" * size}
+    small = [{"role": "user", "content": "a"}] * 13
+    parts = list(source_fragments([*small, row], cap))
+    originals = [json.loads(line) for part in parts if part.startswith("{") for line in part.splitlines()]
+    labeled = [part for part in parts if part.startswith("Source record ")]
+    assert originals == small
+    assert all(len(part) <= cap for part in parts)
+    for i, part in enumerate(labeled, 1):
+        assert part.split("\n", 1)[0] == f"Source record 13, fragment {i}/{len(labeled)}:"
+    assert "".join(part.split("\n", 1)[1] for part in labeled) == json.dumps(
+        row, ensure_ascii=False, separators=(",", ":")
+    )
+
+
+@pytest.mark.asyncio
+async def test_unmeasured_large_tool_result_sends_each_labeled_fragment_once():
+    cap = 1200
+    manager = await context(summary_max_source_chars=cap)
+    messages = originals(0)
+    messages[2:3] = [
+        {"role": "assistant", "content": [{"type": "tool_call", "id": "tool-1",
+                                         "name": "read_file", "input": {}}]},
+        {"role": "tool", "tool_call_id": "tool-1", "content": "λ" * 8500},
+    ]
+    await manager.set_messages(messages)
+    model = SimpleNamespace(complete=AsyncMock(return_value=reply()))
+    await manager._prepare(model, None, [])
+    # One request for the short records and eight for the tool result.
+    sources = [call.args[0].messages[-1].content.split(
+        "Next ordered conversation data. Incorporate this evidence into the continuation note:\n", 1)[1]
+        for call in model.complete.call_args_list]
+    assert len(sources) == 9
+    assert all(len(source) <= cap for source in sources)
+    assert all(source.startswith("Source record ") for source in sources[1:])
+    assert json.loads("".join(source.split("\n", 1)[1] for source in sources[1:])) == messages[3]
+    assert manager.summary is not None and await manager.get_messages() == messages
 
 
 @pytest.mark.asyncio
