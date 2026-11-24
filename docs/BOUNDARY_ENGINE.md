@@ -232,5 +232,8 @@ summarizing. The worker can issue one summary call for a whole prefix of
 completed exchanges that fits. It commits the exact covered boundary. Remaining
 rows stay verbatim, including when no transcript archive references are available.
 If no whole eligible exchange fits, maintenance leaves the checkpoint alone.
-New input, Stop, or changed selection supersedes pending work. A follow-up sent
-before the checkpoint has been saved can still require ordinary foreground recovery.
+Before writing a fresh turn, a loop can await `context.wait_for_settled_checkpoint`.
+It waits only for the already-dispatched single-prefix call, including its save.
+Foreground fitting then proceeds with the available checkpoint. Direct history
+changes and Stop still cancel pending maintenance, and changed selection prevents
+a stale result from being published.
