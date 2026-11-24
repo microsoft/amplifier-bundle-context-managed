@@ -22,7 +22,7 @@ from .checkpoint import digest
 from .prefix_digest import PrefixDigest
 from .measurement import RequestMeasurement, estimate_pressure, measured_limit, supports_native_for, transient_count_unavailable
 from .summary import (SummaryInputTooLarge, add_usage, public_messages, request_fits,
-                      source_fragments, summary_config, summary_prompt, summary_request)
+                      summary_parts, summary_config, summary_prompt, summary_request)
 
 
 SUMMARY_PROMPT = """Prepare a factual continuation note from the supplied conversation data.
@@ -531,16 +531,15 @@ class BoundaryContextManager:
             raise RuntimeError("Summary contract changed during compaction; stale summary was discarded")
         generation_contract = self._generation_contract(summarizer, resolved_config)
         saved = self._summary_progress or self._restored_progress
-        parts = list(source_fragments(public_messages(source), None if preflight_whole else limit))
-        if saved and saved["completed"]:
-            if not (saved["fingerprint"] == fingerprint
+        if saved and not saved["completed"]:
+            saved = None
+        parts = summary_parts(public_messages(source), None if preflight_whole else limit, saved)
+        if saved:
+            if not (parts is not None and saved["fingerprint"] == fingerprint
                     and list(saved["provider"]) == list(provider_identity)
                     and saved.get("generation_contract") == generation_contract
-                    and saved["parts_digest"] == digest(parts)
                     and self._valid_segments(saved, parts)):
                 self._refuse_progress()
-        else:
-            saved = None
         progress = self._summary_progress
         if not progress or not saved:
             segments = saved["segments"] if saved else [[i, 0, len(part)] for i, part in enumerate(parts)]
@@ -1079,12 +1078,11 @@ class BoundaryContextManager:
                             RequestContext()._calculate_budget(None, summarizer) // 2))
                         whole = ("summary_max_source_chars" not in self.config
                                  and callable(getattr(summarizer, "request_budget", None)))
-                        parts = list(source_fragments(public_messages(old_source), None if whole else source_limit))
+                        parts = summary_parts(public_messages(old_source), None if whole else source_limit, saved)
                         compatible = (
-                            saved["fingerprint"] == self._summary_fingerprint(old_source, identity, summarizer)
+                            parts is not None and saved["fingerprint"] == self._summary_fingerprint(old_source, identity, summarizer)
                             and list(saved["provider"]) == list(summary_provider_identity)
                             and saved.get("generation_contract") == self._generation_contract(summarizer, resolved_options[0])
-                            and saved["parts_digest"] == digest(parts)
                             and self._valid_segments(saved, parts))
                     if not compatible:
                         self._refuse_progress()

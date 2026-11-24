@@ -11,6 +11,8 @@ from decimal import Decimal, InvalidOperation
 
 from amplifier_core import ChatRequest, Message
 
+from .checkpoint import digest
+
 
 class SummaryInputTooLarge(Exception):
     """Only a local input-fit refusal authorizes splitting summary source."""
@@ -129,7 +131,7 @@ def public_messages(messages):
     return result
 
 
-def source_fragments(messages, max_chars):
+def source_fragments(messages, max_chars, *, legacy_labels=False):
     """Yield ordered, bounded fragments, without changing canonical messages.
 
     Fragments are *quoted source data*, not tool protocol messages. A large
@@ -151,11 +153,23 @@ def source_fragments(messages, max_chars):
             if pending:
                 yield "\n".join(pending)
                 pending, size = [], 0
-            total = (len(text) + max_chars - 1) // max_chars
-            for part, start in enumerate(range(0, len(text), max_chars), 1):
+            # Reserve the longest label before slicing. Older saved partitions
+            # added the label afterward, overfilling every full part.
+            width = max_chars
+            total = (len(text) + width - 1) // width
+            if not legacy_labels:
+                while True:
+                    width = max_chars - len(f"Source record {index}, fragment {total}/{total}:\n")
+                    if width <= 0:
+                        raise ValueError("Summary fragment limit cannot hold its source label")
+                    required = (len(text) + width - 1) // width
+                    if required == total:
+                        break
+                    total = required
+            for part, start in enumerate(range(0, len(text), width), 1):
                 yield (
                     f"Source record {index}, fragment {part}/{total}:\n"
-                    + text[start : start + max_chars]
+                    + text[start : start + width]
                 )
         else:
             if pending and size + len(text) + 1 > max_chars:
@@ -165,6 +179,19 @@ def source_fragments(messages, max_chars):
             size += len(text) + 1
     if pending:
         yield "\n".join(pending)
+
+
+def summary_parts(messages, limit, saved=None):
+    """A saved note can resume only its exact original partition."""
+    parts = list(source_fragments(messages, limit))
+    if saved is None or digest(parts) == saved["parts_digest"]:
+        return parts
+    if limit is not None and any(part.startswith("Source record ") for part in parts):
+        del parts
+        parts = list(source_fragments(messages, limit, legacy_labels=True))
+        if digest(parts) == saved["parts_digest"]:
+            return parts
+    return None
 
 
 def summary_prompt(prompt, config):

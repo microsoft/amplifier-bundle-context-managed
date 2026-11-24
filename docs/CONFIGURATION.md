@@ -29,7 +29,7 @@ or writes a private transcript. See [Boundary policy](BOUNDARY_ENGINE.md) and
 | `summary_target_tokens` | unset | Positive integer soft prompt target for the entire visible cumulative continuation note (bundle: 1500), not an additional allowance per fragment. Does not change `summary_max_output_tokens`, count reasoning tokens, truncate text or guarantee model adherence/quality. Omitted keeps the legacy prompt; malformed configured values fail before dispatch. |
 | `summarization_model` | provider default | Model for portable summaries, not opaque native state. |
 | `summary_reasoning_effort` | `low` | Portable summary reasoning setting. |
-| `summary_max_source_chars` | automatic | Explicit cap for portable source fragments; no authoritative count uses a conservative 512000-character cap, also bounded by provider context. Does not fragment native requests. |
+| `summary_max_source_chars` | automatic | Explicit cap for portable source fragments, including labels on split records; no authoritative count uses a conservative 512000-character cap, also bounded by provider context. Does not fragment native requests. |
 | `summary_max_calls` | 16 | Logical portable-call allowance per preparation pass, including failed calls. Cumulative calls across resumed progress are tracked separately; this is not a lifetime allowance for an unchanged prefix. Completed pieces can resume. |
 | `summary_retry_delay` | 60 seconds | Initial transient-failure cooldown with exponential backoff and bounded attempts. Not a generation deadline. |
 | `separate_summary_provider` | `false` | Require the host's `context.summary_provider` for portable notes. |
