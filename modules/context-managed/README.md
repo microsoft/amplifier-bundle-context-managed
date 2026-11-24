@@ -533,6 +533,15 @@ artifacts whose complete summary is portable, the source adapter can set
 carrier's text is exactly that summary. An account switch transfers only the
 readable text when all omitted rows still fit the portable projection.
 
+For eligible older native checkpoints on the same provider instance, the adapter
+can offer a source-model request through `checkpoint_renewal_request`. Managed
+Context reserves that call under the normal transition allowance, then invokes
+`renew_compacted_context`. It saves the returned target checkpoint before
+measuring the checkpoint and recent messages together. If that measurement
+fails, a new attempt can reuse confirmed progress with zero additional paid
+compaction calls. The provider determines which model pairs and connections
+support renewal.
+
 For a new cross-provider handoff, the destination's complete input allowance and
 explicit local limits determine how many whole recent exchanges fit alongside
 the note. The summarizer receives the earlier eligible prefix, using previous

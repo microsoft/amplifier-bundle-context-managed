@@ -9,7 +9,7 @@ import json
 
 from amplifier_core import ChatRequest
 
-from .checkpoint import classify_transition, digest, handoff_summary
+from .checkpoint import classify_transition, digest, handoff_summary, native_handoff_eligible
 from .errors import CompactionError
 from .measurement import estimate_pressure, measured_limit, supports_native_for
 from .interrupted import project as project_interrupted, unanswered
@@ -288,6 +288,33 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             activate(verified, envelope, snapshot)
             return result
 
+        calls, last_call = 0, None
+
+        async def paid(method, request, callback, **kwargs):
+            nonlocal calls, last_call
+            check()
+            if calls >= cap:
+                raise CompactionError("summary_work_paused", "The transition's call allowance is exhausted.")
+            report = {"method": method, "sourceCheckpointSha256": source_sha,
+                      "targetIdentity": copy.deepcopy(target), "sequence": calls + 1,
+                      "requestSha256": digest(request.model_dump(mode="json")),
+                      "maxOutputTokens": request.max_output_tokens}
+            if request.model and request.model != target["model"]:
+                report["requestModel"] = request.model
+            accepted = await _guarded(check, admit_call, copy.deepcopy(report))
+            if accepted is not True:
+                raise CompactionError("transition_call_unconfirmed", "The host did not reserve this exact call.")
+            calls += 1
+            last_call = report
+            return await _guarded(check, callback, request, **kwargs)
+
+        async def save(record, report):
+            check()
+            report = {**report, "call": copy.deepcopy(last_call), "disposition": "completed"}
+            ack = await _guarded(check, save_progress, copy.deepcopy(record), report)
+            if ack is False:
+                raise CompactionError("checkpoint_persist_failed", "The host refused transition progress.")
+
         rebind = getattr(provider, "rebind_compacted_context", None)
         summary = (record or {}).get("summary") or {}
         same_connection = record and record["identity"]["provider"] == target["provider"]
@@ -303,11 +330,12 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
             else:
                 reused = base
 
-        async def try_checkpoint(base):
-            nonlocal count_calls
+        async def try_checkpoint(base, *, renewed=False, saved=None):
+            nonlocal count_calls, before, initial
             existing = BoundaryContextManager(config)
             existing.messages = copy.deepcopy(source)
-            if existing.restore_checkpoint(record, record["identity"])["status"] != "restored":
+            previous = saved if saved is not None else record
+            if existing.restore_checkpoint(previous, previous["identity"])["status"] != "restored":
                 raise CompactionError("transition_source_invalid", "The source checkpoint could not be restored.")
             existing._checkpoint_legacy_foreground = None
             existing.summary = base
@@ -316,22 +344,53 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 if (existing.recovery or {}).get("kind") == "native-recovery":
                     existing.recovery = None
             existing.summary_identity = copy.deepcopy(target)
-            existing.evidence_refs = copy.deepcopy(refs)
-            candidate = existing.export_checkpoint(target)
+            if saved is None:
+                existing.evidence_refs = copy.deepcopy(refs)
+            candidate = saved if saved is not None else existing.export_checkpoint(target)
+            if renewed:
+                await save(candidate, {"throughMessage": base[0]})
             rows = view(existing)
             after, envelope = await measure(rows)
             count_calls += 1
             if envelope["budget_decision"]["estimated_input_tokens"] <= limit:
                 return await install_fit(existing, candidate, rows, envelope, after)
+            if not isinstance(base[1], str):
+                before, initial = after, envelope
             return None
 
+        initial = None
+        if (record and not record.get("progress") and summary.get("kind") == "native"
+                and progress is None and not (portable_base or reused)):
+            planner = getattr(provider, "checkpoint_renewal_request", None)
+            renew = getattr(provider, "renew_compacted_context", None)
+            through = summary["throughMessage"]
+            if callable(planner) and callable(renew) and native_handoff_eligible(
+                    staged, provider, target, record["identity"], through, summary.get("omittedIndices", []),
+                    retain, binding["messages"]):
+                request = planner(summary["message"], source_model=record["identity"]["model"], model=target["model"])
+                if request is not None:
+                    window = await paid("native", request, renew, model=target["model"])
+                    if not provider.validate_compacted_context(window):
+                        raise CompactionError("native_checkpoint_invalid", "Renewed checkpoint did not verify.")
+                    reused = through, window
+        saved = None
+        if progress and not progress.get("progress") and (progress.get("summary") or {}).get("kind") == "native":
+            summary_progress = progress["summary"]
+            if (progress.get("identity") == target and native_handoff_eligible(
+                    staged, provider, target, target, summary_progress["throughMessage"],
+                    summary_progress.get("omittedIndices", []), retain, binding["messages"])
+                    and provider.validate_compacted_context(summary_progress["message"])):
+                saved = progress
+                reused = summary_progress["throughMessage"], summary_progress["message"]
+
         if reused is not None:
-            result = await try_checkpoint(reused)
+            result = await try_checkpoint(reused, renewed=last_call is not None, saved=saved)
             if result is not None:
                 return result
 
-        before, initial = await measure(view(staged))
-        count_calls += 1
+        if initial is None:
+            before, initial = await measure(view(staged))
+            count_calls += 1
         source_request_snapshot = copy.deepcopy(initial)
 
         if progress is None and initial["budget_decision"]["estimated_input_tokens"] <= limit:
@@ -452,24 +511,6 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 if proposed < end and await measure_tail(proposed) <= limit - reserve:
                     end = proposed
 
-        calls, last_call = 0, None
-
-        async def paid(method, request, callback, **kwargs):
-            nonlocal calls, last_call
-            check()
-            if calls >= cap:
-                raise CompactionError("summary_work_paused", "The transition's call allowance is exhausted.")
-            report = {"method": method, "sourceCheckpointSha256": source_sha,
-                      "targetIdentity": copy.deepcopy(target), "sequence": calls + 1,
-                      "requestSha256": digest(request.model_dump(mode="json")),
-                      "maxOutputTokens": request.max_output_tokens}
-            accepted = await _guarded(check, admit_call, copy.deepcopy(report))
-            if accepted is not True:
-                raise CompactionError("transition_call_unconfirmed", "The host did not reserve this exact call.")
-            calls += 1
-            last_call = report
-            return await _guarded(check, callback, request, **kwargs)
-
         class BoundedProvider:
             def __init__(self, original):
                 self.original = original
@@ -489,13 +530,6 @@ async def prepare_transition(context, *, provider, count_view, identity, save_pr
                 return await paid("native", request, self.original.compact_context)
 
         bounded = BoundedProvider(provider)
-
-        async def save(record, report):
-            check()
-            report = {**report, "call": copy.deepcopy(last_call), "disposition": "completed"}
-            ack = await _guarded(check, save_progress, copy.deepcopy(record), report)
-            if ack is False:
-                raise CompactionError("checkpoint_persist_failed", "The host refused transition progress.")
 
         fit_envelope = None
         complete_progress = (staged.summary is not None and staged.summary[0] == end

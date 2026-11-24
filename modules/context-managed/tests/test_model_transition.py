@@ -1059,3 +1059,35 @@ async def test_signed_native_readable_companion_only_carries_a_complete_prefix(o
         assert ctx.summary_omitted_indices == []
         assert all("fixture:opaque" not in str(row) for row in result["base_view"])
     assert state.admitted == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_window_renewal_is_reserved_and_resumes_after_target_count_failure():
+    state = transition_fixture(True)
+    state.limit = 10**8
+    src = state.old["summary"]["message"]
+    req = ChatRequest(model=SOURCE["model"], messages=[Message(**src)], max_output_tokens=2000)
+    state.model.checkpoint_renewal_request = lambda message, **kwargs: req if message == src else None
+    window = native_message(TARGET["model"])
+    window["metadata"]["fixture:opaque"]["payload"] = "renewed-on-source"
+    state.model.renew_compacted_context = AsyncMock(return_value=window)
+    with pytest.raises(CompactionError, match="call allowance is exhausted"):
+        await state.ctx.recover_request(**{**state.kwargs, "max_calls": 0})
+    assert not state.counts and not state.admitted
+    state.model.renew_compacted_context.assert_not_awaited()
+    state.fail = "count"
+    with pytest.raises(RuntimeError, match="count outage"):
+        await state.ctx.recover_request(**state.kwargs)
+    state.unchanged()
+    assert len(state.saved) == len(state.admitted) == 1 and not state.installed
+    receipt = state.admitted[0]
+    assert receipt["requestModel"] == SOURCE["model"]
+    assert receipt["targetIdentity"] == TARGET and receipt["requestSha256"] == digest(req.model_dump(mode="json"))
+    state.fail = None
+    state.kwargs.update(progress=state.saved[0][0], max_calls=0)
+    result = await state.ctx.recover_request(**state.kwargs)
+    assert result["outcome"] == "transitioned" and len(state.counts) == 1
+    assert any((m.metadata or {}).get("fixture:opaque", {}).get("payload") == "renewed-on-source"
+               for m in state.counts[0].messages)
+    assert len(state.saved) == len(state.admitted) == len(state.installed) == 1
+    state.model.renew_compacted_context.assert_awaited_once_with(req, model=TARGET["model"])
