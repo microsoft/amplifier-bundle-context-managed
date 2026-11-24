@@ -496,16 +496,20 @@ class BoundaryContextManager:
         self._check_stop()
         return response
 
+    def _summary_source_limit(self, summarizer):
+        """Conservative source-character allowance for one uncounted summary call."""
+        return min(int(self.config.get("summary_max_source_chars", 512000)),
+                   max(256, RequestContext()._calculate_budget(None, summarizer) // 2))
+
     async def _summarize(self, summarizer, source, revision, stats, *, fingerprint, source_revision, identity,
                          resolved_options=None, input_key=None, guard=None):
         """Prefer one measured request; commit only after the entire prefix."""
         from amplifier_core.llm_errors import ContextLengthError
 
-        limit = int(self.config.get("summary_max_source_chars", 512000))
         # Providers without exact preflight still advertise a context budget.
         # One source character per token is deliberately conservative; an
         # authoritative overflow below causes further splitting, never replay.
-        limit = min(limit, max(256, RequestContext()._calculate_budget(None, summarizer) // 2))
+        limit = self._summary_source_limit(summarizer)
         max_calls = int(self.config.get("summary_max_calls", 16))
         if limit < 256 or max_calls < 1:
             raise ValueError("Summary source limit and call limit must be positive")
@@ -746,7 +750,7 @@ class BoundaryContextManager:
 
     async def _prepare(self, provider, token_budget, retain, measurement=None, *, reason=None,
                        ordinary=False, snapshot=None, on_preserved=None, operations_guard=None, foreground_select=None,
-                       portable_offer=None):
+                       portable_offer=None, anticipated_prompt_tokens=0):
         messages, revision = copy.deepcopy(self.messages), self.revision
         self._check_stop()
         input_key = next(((i, digest(row)) for i, row in reversed(list(enumerate(messages)))
@@ -760,6 +764,14 @@ class BoundaryContextManager:
         manifest = ("Pending operations (observations, not authorization):\n" + json.dumps(operations)) if operations else None
 
         def pressure_view(rows):
+            if anticipated_prompt_tokens:
+                # Only growing transcript content can be relieved by portable
+                # maintenance. Permanent instructions and host overlays remain.
+                first_input = next((row for row in rows if self._human(row)), None)
+                return [row for row in rows if row is not first_input
+                        and row.get("role") not in {"system", "developer"}
+                        and (row.get("metadata") or {}).get("source") != "context-managed"
+                        and not self._retained_reminder(row, retain)]
             view = copy.deepcopy(rows)
             if self.factory:
                 view = [{"role": "system", "content": system_prompt}] + [row for row in view
@@ -1007,7 +1019,7 @@ class BoundaryContextManager:
             "unanswered_historical_calls": len(unknown)}
         should_summarize = (provider is not None and end > (self.summary[0] if self.summary else 0)
                             and (reason == "provider_overflow" or recovery is not None
-                                 or assembled_tokens >= budget * threshold))
+                                 or assembled_tokens + anticipated_prompt_tokens >= budget * threshold))
         if ordinary and (self._foreground_unconfirmed or self._foreground_paid_input == input_key):
             should_summarize = False
         if (should_summarize and reason != "provider_overflow" and use_native
@@ -1087,9 +1099,7 @@ class BoundaryContextManager:
                         old_unknown = [call for call in unknown if call["source_message"] < saved_end]
                         old_source = project_interrupted(
                             self._assembled(messages[:saved_end], self.summary, retain, carry), old_unknown)
-                        source_limit = int(self.config.get("summary_max_source_chars", 512000))
-                        source_limit = min(source_limit, max(256,
-                            RequestContext()._calculate_budget(None, summarizer) // 2))
+                        source_limit = self._summary_source_limit(summarizer)
                         whole = ("summary_max_source_chars" not in self.config
                                  and callable(getattr(summarizer, "request_budget", None)))
                         parts = summary_parts(public_messages(old_source), None if whole else source_limit, saved)
@@ -1104,6 +1114,12 @@ class BoundaryContextManager:
                     covered_unknown = old_unknown
                     self.last_budget["summary_source_through_message"] = end
                     self.last_budget["deferred_tail_messages"] = len(messages) - end
+
+            if anticipated_prompt_tokens:
+                from .single_pass import complete_prefix
+                end = complete_prefix(self, messages, retain, carry, unknown, self._summary_source_limit(summarizer))
+                covered_unknown = [call for call in unknown if call["source_message"] < end]
+                self.last_budget["summary_source_through_message"] = end
 
             # Current-turn tool results change the revision but not the covered
             # prefix. A failed unchanged prefix must not create a retry storm.
@@ -1643,6 +1659,10 @@ class BoundaryContextManager:
         if self._maintenance_task is not None:
             self._maintenance_task.cancel()
 
+    def ordinary_settled_response(self, *, provider, retain_contents, input_tokens, output_tokens, prompt_characters):
+        from .settled_maintenance import after_response
+        return after_response(self, provider, retain_contents, input_tokens, output_tokens, prompt_characters)
+
     def schedule_settled_compaction(self, *, provider, count_view, retain_contents):
         from .settled_maintenance import schedule
         return schedule(self, provider, count_view, retain_contents)
@@ -1808,6 +1828,7 @@ async def mount_boundary(coordinator, config):
     if context.config["token_meter"] == "actual":
         coordinator.register_capability("context.measured_request_view", context.get_measured_request_view)
     if config.get("foreground_continuation") and config.get("compaction_schedule") == "after_turn":
+        coordinator.register_capability("context.ordinary_settled_response", context.ordinary_settled_response)
         coordinator.register_capability("context.schedule_settled_compaction", context.schedule_settled_compaction)
         coordinator.register_capability("context.cancel_settled_compaction", context.cancel_settled_compaction)
         register_cleanup = getattr(coordinator, "register_cleanup", None)

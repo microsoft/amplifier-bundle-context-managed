@@ -1,5 +1,6 @@
 """Bounded after-turn summary input and validated portable-to-native continuation."""
 
+from bisect import bisect_right
 from dataclasses import dataclass
 
 from .errors import CompactionError
@@ -10,6 +11,24 @@ from .summary import add_usage, public_messages, request_fits, source_fragments,
 
 _OMISSION = "Some earlier material is only in the saved transcript. Consult the originals for omitted details."
 _MARKER = f"\n[{_OMISSION}]\n"
+
+
+def complete_prefix(context, messages, retain, carry, unknown, limit):
+    """Advance only over whole settled exchanges that fit one uncounted call."""
+    start = context.summary[0] if context.summary else 0
+    first_reply = next((i for i in range(start, len(messages))
+                        if messages[i].get("role") in {"assistant", "tool"}), len(messages))
+    eligible = [end for end in context._boundaries(messages, retain) if end > first_reply]
+
+    def size(end):
+        rows = context._assembled(messages[:end], context.summary, retain, carry)
+        rows = project_interrupted(rows, [call for call in unknown if call["source_message"] < end])
+        return len(next(source_fragments(public_messages(rows), None), ""))
+
+    count = bisect_right(eligible, limit, key=size)
+    if not count:
+        raise CompactionError("summary_no_fitting_prefix", "No whole settled exchange fits one maintenance request.")
+    return eligible[count - 1]
 
 
 def _edge(parts, remaining, *, tail=False):
