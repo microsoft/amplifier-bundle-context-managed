@@ -599,7 +599,7 @@ def request_recovery_fixture(*, prior=True, rows=None):
         if state.measurement_failure == ("after" if candidate else "before"):
             decision.pop("measurement")
         if candidate and state.change_contract == "allowance":
-            decision["input_limit_tokens"] += 1
+            decision["input_limit_tokens"] = 1
         envelope = {"dispatch": request, "budget_decision": decision}
         state.views.append(copy.deepcopy(view))
         state.envelopes.append(copy.deepcopy(envelope))

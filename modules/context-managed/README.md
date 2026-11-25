@@ -61,6 +61,20 @@ supersedes the task. Only validated results for the same source revision and
 selection can advance the checkpoint. Observers can distinguish these events
 using `context_work: settled_maintenance`.
 
+When the full foreground history no longer fits, the selector leaves room for
+new steps and keeps the same earlier exchanges while the growing request fits.
+Settled maintenance uses at most one model generation. It prefers the selected
+provider's qualified native operation and measures the request before dispatch.
+An unsupported provider can produce one portable continuation note. Token counts
+are separate from model generations.
+
+With archive recovery enabled, an oversized history can use an excerpt if the
+host has preserved the originals. A compatible paid partial note can enter the
+native request alongside still-unprocessed evidence. Its source and fragment
+digests must match. The prior checkpoint remains available until the replacement
+is validated and stored. Large new inputs or required instructions can consume
+the available room sooner.
+
 `foreground_continuation: true` makes measured ordinary requests (and explicit
 `hard_fit` requests) independent of optional compaction success. It reuses the
 existing whole-exchange selector and exact request fitter; it does not install a
@@ -421,8 +435,10 @@ or persisting a replacement. Hosts explicitly implementing the journal admission
 protocol register `context.transition_policy()` returning `host-managed`; the
 presence of a mounted `run_pending` wrapper alone is not participation.
 For other **non-durable hosts without a persistence callback**, ordinary preparation
-can regenerate from originals using the existing portable or single-window native
-compaction policy. Trigger, output allowance and per-preparation call caps are
+can reuse a locally qualified checkpoint, or create a readable handoff from
+the older prefix and retain recent exchanges verbatim. A provider may declare
+`supports_native_compaction(*, model)` synchronously. The older no-argument
+declaration remains supported. Trigger, output allowance and per-preparation call caps are
 unchanged; it does not invoke chronological native recovery, archive-omission
 migration or a native-error portable fallback.
 
@@ -508,15 +524,34 @@ across restarts and repeated preparations using `summary_max_calls` (default 16)
 configured limit; zero permits only no-generation fitting/reconciliation. Existing
 bounded provider transport retries are not additional logical calls.
 
-Transitions preserve originals and derive fresh target state on a detached
-context. Before generation they count the full irreducible current
-instructions/tools/options and required recent tail. Native targets reuse
-chronological whole-exchange batching; archive-recent selection does not stand in
-for full eligible-prefix coverage. Portable targets reuse the existing public
-projection, summary prompt/output policy and exact partial-progress validation.
-Native errors never fall back to portable summaries. The final full target request
-must fit the unchanged conservative allowance and authoritatively reduce its
-originals-only baseline before checkpoint installation. Guards fence callbacks,
+On the first real turn after a selection change, Managed Context verifies a
+qualified native checkpoint, fitting originals, or a verified readable checkpoint
+and tail before generating anything. An adapter authorizes same-connection native
+reuse through its synchronous `rebind_compacted_context` method. For native
+artifacts whose complete summary is portable, the source adapter can set
+`metadata["context-managed:portable-summary"] = True` and validate that the
+carrier's text is exactly that summary. An account switch transfers only the
+readable text when all omitted rows still fit the portable projection.
+
+For eligible older native checkpoints on the same provider instance, the adapter
+can offer a source-model request through `checkpoint_renewal_request`. Managed
+Context reserves that call under the normal transition allowance, then invokes
+`renew_compacted_context`. It saves the returned target checkpoint before
+measuring the checkpoint and recent messages together. If that measurement
+fails, a new attempt can reuse confirmed progress with zero additional paid
+compaction calls. The provider determines which model pairs and connections
+support renewal.
+
+For a new cross-provider handoff, the destination's complete input allowance and
+explicit local limits determine how many whole recent exchanges fit alongside
+the note. The summarizer receives the earlier eligible prefix, using previous
+readable progress where available. The portable result is reference data.
+Authoritative counts verify the full assembled target request before installation.
+Discovery of additional context capacity retains completed work. An unconfirmed
+native reservation retains its existing method and budget on recovery. From the
+last verified prefix, continuation checks the untouched suffix at installable
+batch ends and stops once it fits. Durable admission remains required for paid
+work. Guards fence callbacks,
 paid operations and final activation; source state survives failures/cancellation.
 
 When originals already fit, the result is `outcome: transition_fitted` with

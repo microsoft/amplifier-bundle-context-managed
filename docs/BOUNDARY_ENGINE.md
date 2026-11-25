@@ -172,7 +172,7 @@ The allowance includes reasoning where the provider accounts for reasoning there
 An output-limit finish raises `summary_output_limit`, rather than accepting an
 incomplete note. Configure the allowance for the provider/model; no default is a
 claim of summary quality or a universal model limit. Native requests retain their
-separate `native_compaction_max_output_tokens` setting (default 4096).
+model-aware output allowance, with an optional positive `native_compaction_max_output_tokens` override. Recovering a partial portable note preserves its paid text and uses exact counts of the full native request to size the remaining archived evidence.
 
 Neither compaction method has a context-owned elapsed-time deadline. Healthy calls
 can complete; caller cancellation stops preparation. History or contract changes
@@ -202,3 +202,51 @@ Provider contracts: [OpenAI compaction](https://developers.openai.com/api/docs/g
 and [Anthropic compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand).
 A provider adapter must implement its own native capability; provider documentation
 alone does not mean a particular installed adapter supports it.
+
+For an ordinary target request without provider counting, a durable host may offer
+a completed plain-text checkpoint through `context.portable_handoff.source`.
+The host binds the creating connection, explicit target selection and foreground
+input. Context verifies the saved record, configuration, canonical prefix and
+legal boundary. It stages the target candidate and the exact rendered note after
+fitting. The host keeps the source checkpoint until this ordinary request has
+succeeded with that note and the supplied guard still accepts the source and
+selection. This path does no model work during handoff. Paid partials and native
+state retain their existing recovery path. The optional synchronous
+`context.portable_handoff.generated` callback identifies the summarizer and
+the completed record only for newly generated portable work. A restored note
+and a note assembled from previously paid parts do not establish a new origin.
+
+### After-turn checkpoints for uncounted text completions
+
+A loop can offer `context.ordinary_settled_response` the provider and reported
+input/output usage from a confirmed ordinary text reply, the character count of
+the current prompt, and the required retained text. Call it after recording the
+assistant reply. If one more prompt like this one would reach the configured
+soft trigger, it returns a callback for successful execution end. It uses the
+same configured input budget and output reserve as ordinary planning. The
+forecast only schedules work and supplies no measurement for foreground fitting.
+
+The existing settled worker checks that growing conversation content also
+approaches the trigger. Large fixed instructions or tools alone do not justify
+summarizing. The worker can issue one summary call for a whole prefix of
+completed exchanges that fits. It commits the exact covered boundary. Remaining
+rows stay verbatim, including when no transcript archive references are available.
+If no whole eligible exchange fits, maintenance leaves the checkpoint alone.
+Before writing a fresh turn, a loop can await `context.wait_for_settled_checkpoint`.
+It waits only for the already-dispatched single-prefix call, including its save.
+Foreground fitting then proceeds with the available checkpoint. Direct history
+changes and Stop still cancel pending maintenance, and changed selection prevents
+a stale result from being published.
+
+If a paid single-prefix summary is already in flight, a loop that uses
+`context.begin_settled_foreground` can append a fresh turn and ask whether
+the whole prepared ordinary text request fits the current planning allowance.
+The provider must support keeping that exact projection bound through dispatch.
+The loop checks the returned guard immediately before transport. Unknown media,
+options or size fall back to ordinary fitting after the pending checkpoint.
+
+Only append-only growth can share the pending summary. The original source
+digest, selected identity, writer, configuration and operation guards still
+govern publication. Explicit Stop and history replacement cancel it. The saved
+note covers only its original prefix; later messages and refreshed evidence
+remain available on reopening. No turn waits in the history append operation.

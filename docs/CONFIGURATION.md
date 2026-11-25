@@ -24,17 +24,17 @@ or writes a private transcript. See [Boundary policy](BOUNDARY_ENGINE.md) and
 | `token_meter` | `actual` | Advertise the measured-request capability. `estimate` does not advertise it. Estimates do not validate opaque native state. |
 | `native_compaction` | `true` | Use the continuation provider's native contract when advertised. Disabling an advertised native contract stops preparation; it does not select portable fallback. |
 | `native_min_new_tokens` | 500 | Avoid tiny native recompactions unless fitting is required. |
-| `native_compaction_max_output_tokens` | 4096 | Separate native operation output allowance. |
-| `summary_max_output_tokens` | profile policy | Explicit positive integer wins. When absent, advertised matching-model profiles with context >=131072 and output >=32768 use 32768; other profiles use 8192, lowered by smaller advertised output. Metadata is advisory; selected-provider ceilings and whole-request admission still apply. Includes reasoning when the provider counts it there. |
+| `native_compaction_max_output_tokens` | automatic | Native output allowance based on the selected model and input budget. See [Compaction acceptance](COMPACTION_ACCEPTANCE.md). |
+| `summary_max_output_tokens` | profile policy | Explicit positive integer wins. When absent, advertised matching-model profiles with context >=131072 and output >=32768 use 32768; other profiles use 8192, lowered by smaller advertised output. Metadata is advisory; selected-provider ceilings and whole-request admission still apply. Includes reasoning when the provider counts it there. For providers advertising `output_limit:service_default_only`, an absent setting keeps the local planning reserve and lets the service choose its output limit. An explicit setting is always sent to the provider for enforcement or rejection. |
 | `summary_target_tokens` | unset | Positive integer soft prompt target for the entire visible cumulative continuation note (bundle: 1500), not an additional allowance per fragment. Does not change `summary_max_output_tokens`, count reasoning tokens, truncate text or guarantee model adherence/quality. Omitted keeps the legacy prompt; malformed configured values fail before dispatch. |
 | `summarization_model` | provider default | Model for portable summaries, not opaque native state. |
 | `summary_reasoning_effort` | `low` | Portable summary reasoning setting. |
-| `summary_max_source_chars` | automatic | Explicit cap for portable source fragments; no authoritative count uses a conservative 512000-character cap, also bounded by provider context. Does not fragment native requests. |
+| `summary_max_source_chars` | automatic | Explicit cap for portable source fragments, including labels on split records; no authoritative count uses a conservative 512000-character cap, also bounded by provider context. Does not fragment native requests. |
 | `summary_max_calls` | 16 | Logical portable-call allowance per preparation pass, including failed calls. Cumulative calls across resumed progress are tracked separately; this is not a lifetime allowance for an unchanged prefix. Completed pieces can resume. |
 | `summary_retry_delay` | 60 seconds | Initial transient-failure cooldown with exponential backoff and bounded attempts. Not a generation deadline. |
 | `separate_summary_provider` | `false` | Require the host's `context.summary_provider` for portable notes. |
 | `durable_checkpoints` | `false` | Opt into host evidence preservation and checkpoint capabilities. Storage is host-owned. |
-| `compaction_schedule` | foreground | With `foreground_continuation`, select `after_turn` to fit ordinary requests before scheduling independent checkpoint maintenance on a successful turn. |
+| `compaction_schedule` | foreground | With `foreground_continuation`, select `after_turn` to fit ordinary requests before scheduling independent checkpoint maintenance on a successful turn. For uncounted text completions, confirmed usage and recent prompt size can trigger one after-turn checkpoint before the next turn reaches the soft threshold. |
 | `archive_recovery` | `false` | Opt-in bounded working-view selection from host-retained originals, with durable checkpoints; not automatic Legacy import. |
 
 Shared request settings such as `max_tokens_fallback`, `output_reserve_fraction`,

@@ -1,11 +1,30 @@
 """Request-scoped semantic pressure, separate from canonical evidence size."""
 
 import copy
+import inspect
 
 from amplifier_core import ChatRequest
 
 from .checkpoint import digest
 from .summary import public_messages
+
+
+def supports_native_for(provider, model):
+    """A local provider declaration; never discover support with an API request."""
+    supports = getattr(provider, "supports_native_compaction", None)
+    if not callable(supports):
+        return False
+    if "model" in inspect.signature(supports).parameters:
+        return supports(model=model)
+    return supports()
+
+
+def measured_limit(config, provider_limit, fallback_budget, token_budget=None):
+    """The endpoint has already reserved output for this exact request."""
+    if token_budget is not None or config.get("output_reserve_fraction") is not None:
+        return min(provider_limit, fallback_budget)
+    cap = config.get("max_tokens")
+    return min(provider_limit, cap) if cap is not None else provider_limit
 
 
 def estimate_pressure(fitter, messages):

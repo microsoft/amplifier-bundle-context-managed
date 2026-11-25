@@ -438,3 +438,14 @@ async def test_changed_contract_after_paid_generation_never_publishes_target(gua
     assert job["uncertain"] is True
     assert job["last_response"] is not None
     state.model.complete.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_in_memory_caller_uses_locally_qualified_native_checkpoint():
+    state = await ordinary_case(True)
+    state.model.rebind_compacted_context = lambda value, *, source_model, model: native_note(model)
+    result = await state.run()
+    assert state.ctx.summary_identity == TARGET
+    assert state.ctx.summary == (3, native_note(TARGET["model"]))
+    assert "opaque-new-model" in str(result["base_view"])
+    assert "opaque-old-model" not in str(result["base_view"])
+    assert state.model.compact_context.await_count == state.model.complete.await_count == 0

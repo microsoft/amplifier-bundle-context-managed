@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from amplifier_core import ChatRequest, Message
 from amplifier_core.llm_errors import ContextLengthError
+from amplifier_module_context_managed.errors import CompactionError
 
 from .test_autonomous_compaction import provider as native_provider
 from .test_ordinary_pressure_count import TokenCountError
@@ -19,6 +20,16 @@ def long_history():
         rows.extend(exchange(str(index), size=800))
     rows.append({"role": "user", "content": "Give me a short readiness report."})
     return rows
+
+
+@pytest.mark.asyncio
+async def test_short_followup_keeps_previous_tool_run_eligible_for_settled_compaction():
+    rows = long_history()
+    ctx = await manager(rows, compaction_schedule="after_turn", archive_recovery=True)
+    ctx._settled_maintenance = True
+    boundary = ctx._boundary(rows, [])
+    assert rows[boundary:] == [row for i in range(116, 120) for row in exchange(str(i), size=800)] + rows[-1:]
+    assert ctx._carry(rows) == [rows[1], rows[-1]]
 
 
 def attempt(rows, size, limit=16000):
@@ -196,7 +207,19 @@ async def test_mac_native_oversized_preflight_is_independent_of_ordinary_dispatc
     assert len(native_counts) == 1
     model.compact_context.assert_not_awaited()
     assert (ctx._foreground_native_refusal is not None) == (native_decision == "oversized")
+    model.release_media_request.assert_called_once_with(native_counts[0], request_options=None)
     if native_decision == "oversized":
+        # Rebuilding the same revision's contents can schedule another check.
+        # The unchanged dispatch keeps the verified refusal and releases its request.
+        await ctx.set_messages(rows)
+        ctx.hooks = SimpleNamespace(emit=AsyncMock())
+        await ctx.get_measured_request_view(provider=model, retain_contents=[], count_view=count)
+        assert ctx.schedule_settled_compaction(provider=model, count_view=count, retain_contents=[])
+        with pytest.raises(CompactionError, match="native_input_oversized"):
+            await ctx._maintenance_task
+        assert len(native_counts) == 1
+        assert model.release_media_request.call_count == 2
+        assert not any(call.args[0] == "context:compaction_started" for call in ctx.hooks.emit.call_args_list)
         assert ctx.checkpoint_status["lastNativeFailure"]["code"] == "native_input_oversized"
         await ctx.add_message({"role": "user", "content": "Fresh input."})
         await ctx.set_messages([*await ctx.get_messages(), {"role": "user", "content": "This input cannot fit."}])
@@ -208,7 +231,6 @@ async def test_mac_native_oversized_preflight_is_independent_of_ordinary_dispatc
             await ctx.get_measured_request_view(provider=model, retain_contents=[], count_view=too_large)
         assert ctx.checkpoint_status["lastNativeFailure"]["code"] == "native_input_oversized"
         assert (await ctx.get_messages())[:-2] == rows
-    model.release_media_request.assert_called_once_with(native_counts[0], request_options=None)
     assert (await ctx.get_messages())[:len(rows)] == rows
     if native_decision == "oversized":
         await ctx.set_messages([{"role": "user", "content": "Different history."}])
@@ -237,3 +259,111 @@ async def test_installed_openai_count_contract_remains_usable_after_turn(categor
             await request
         assert raised.value is failure
         assert len(counts) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True], ids=["portable", "native"])
+async def test_single_checkpoint_leaves_room_for_followup_turns_and_reload(native):
+    # This archive exceeds the summarizer's input limit. The two recent user
+    # turns and every tool receipt still have their originals after compaction.
+    rows = long_history() + [
+        {"role": "assistant", "content": "I checked the receipts."},
+        {"role": "user", "content": "What should we do next?"},
+        {"role": "assistant", "content": "Continue with the saved work."},
+        {"role": "user", "content": "Proceed."},
+    ]
+    ctx = await manager(rows, compaction_schedule="after_turn", archive_recovery=True,
+                        durable_checkpoints=True, summary_max_output_tokens=1024)
+    ctx.preserve_evidence = AsyncMock(return_value=["fixture://saved-transcript"])
+    ctx.persist_checkpoint = AsyncMock(return_value=True)
+    model = native_provider() if native else Provider()
+    identity = {"provider": model.name, "model": model.default_model}
+    ctx.checkpoint_identity = lambda: identity
+    model.complete = AsyncMock(return_value=SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="Checked receipts. Continue with the saved work.")]))
+    def size(request):
+        return len(request.model_dump_json().encode()) // 4
+    def budget(request, **kwargs):
+        return attempt([], size(request))["budget_decision"]
+    model.request_budget = budget
+    async def count(view):
+        result = attempt(view, 0)
+        result["budget_decision"] = budget(result["dispatch"])
+        return result
+    async def foreground():
+        return await ctx.get_measured_request_view(provider=model, count_view=count, retain_contents=[])
+    result = await foreground()
+    assert result["continuation"] == "incomplete_history"
+    previous = result["base_view"]
+    for step in range(3):
+        for row in exchange(f"live-{step}", size=240):
+            await ctx.add_message(row)
+        result = await foreground()
+        assert result["base_view"][:len(previous)] == previous
+        previous = result["base_view"]
+    assert ctx.schedule_settled_compaction(provider=model, count_view=count, retain_contents=[])
+    await ctx._maintenance_task
+    assert ctx.summary
+    if native:
+        assert model.compact_context.await_count == 1
+        model.complete.assert_not_awaited()
+    else:
+        model.complete.assert_awaited_once()
+    record = ctx.export_checkpoint(identity)
+    original = await ctx.get_messages()
+    ctx = await manager(original, **{k: v for k, v in ctx.config.items() if k != "foreground_continuation"})
+    ctx.checkpoint_identity = lambda: identity
+    assert ctx.restore_checkpoint(record, identity)["status"] == "restored"
+    for turn in range(12):
+        await ctx.add_message({"role": "user", "content": f"Follow-up {turn}"})
+        await ctx.add_message({"role": "assistant", "content": "Acknowledged."})
+        result = await foreground()
+        assert result["final_attempt"]["budget_decision"]["estimated_input_tokens"] < 8000
+        assert not ctx.schedule_settled_compaction(provider=model, count_view=count, retain_contents=[])
+    assert (model.compact_context if native else model.complete).await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "failed", "changed-parts"])
+async def test_settled_native_carries_saved_portable_work(outcome):
+    from amplifier_module_context_managed.errors import CompactionError
+    from .test_foreground_checkpoint_compatibility import same_model_recovery_case
+
+    state = same_model_recovery_case("partial-v5", True)
+    ctx, model = state.ctx, state.model
+    ctx.config.update(compaction_schedule="after_turn", archive_recovery=True)
+    ctx.evidence_refs = ["fixture://saved-transcript"]
+    ctx.preserve_evidence = AsyncMock(return_value=ctx.evidence_refs)
+    original = await ctx.get_messages()
+    old = ctx._restored_progress
+    if outcome == "changed-parts":
+        old["parts_digest"] = "incompatible"
+    before = ctx.export_checkpoint(state.identity)
+    native_message = {"role": "user", "content": "New derived note.", "metadata": {
+        "source": "context-managed", "ephemeral": True, "persisted": True,
+        "fixture:opaque": {"model": state.identity["model"], "state": "replacement"}}}
+
+    async def compact(request):
+        assert ctx.export_checkpoint(state.identity) == before
+        assert old["text"] in str(request.messages)
+        if outcome == "failed":
+            raise RuntimeError("Simulated provider failure")
+        return {"kind": "native", "message": native_message}
+
+    model.compact_context = AsyncMock(side_effect=compact)
+    async def count(view):
+        return attempt(view, 500 if native_message in view else 7000, 10000)
+
+    await ctx.get_measured_request_view(provider=model, count_view=count, retain_contents=[])
+    assert ctx.schedule_settled_compaction(provider=model, count_view=count, retain_contents=[])
+    if outcome == "success":
+        await ctx._maintenance_task
+        assert ctx.summary[1] == native_message
+        assert ctx.export_checkpoint(state.identity)["progress"] is None
+    else:
+        with pytest.raises(CompactionError):
+            await ctx._maintenance_task
+        assert ctx.export_checkpoint(state.identity) == before
+    assert model.compact_context.await_count == (0 if outcome == "changed-parts" else 1)
+    model.complete.assert_not_awaited()
+    assert await ctx.get_messages() == original

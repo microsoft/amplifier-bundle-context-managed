@@ -125,7 +125,7 @@ Optional boundary-engine settings (existing trigger/output settings still apply)
 | `native_compaction` | `true` | Prefer the continuation provider's optional native contract. |
 | `native_min_new_tokens` | `500` | Avoid costly recompaction of a tiny eligible prefix, except when fitting is required. |
 | `summary_max_source_chars` | automatic | An explicit value caps portable source fragments. Otherwise an authoritative full-request count allows one fitting prefix; unavailable counts use a conservative 512000-character cap, also bounded by provider context. Never applies to native compaction. |
-| `native_compaction_max_output_tokens` | `4096` | Request reservation for the native operation, separate from portable note output. |
+| `native_compaction_max_output_tokens` | automatic | Uses the selected model’s output ceiling for independent input limits. Shared windows reserve up to 5% (at least 4,096 when supported). Unknown ceilings fall back to 4,096. A positive override sets the requested allowance. |
 | `summary_max_calls` | `16` | Bound portable logical provider calls across all retries of one exact prefix/identity/configuration. Failed calls consume this allowance; exhaustion suppresses retries until source or contract changes. Native attempts do not consume it. |
 | `summary_reasoning_effort` | `low` | Avoid spending the continuation model's high reasoning setting on routine notes. |
 | `summary_retry_delay` | `60` | Initial transient-failure cooldown in seconds; exponential backoff and three stalled attempts. Successful fragment progress resets the stalled-attempt count; the total call limit still applies. |

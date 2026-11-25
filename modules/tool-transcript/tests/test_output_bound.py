@@ -131,13 +131,14 @@ async def test_exact_encoded_boundary_includes_headers_and_notice(delta):
 
 
 @pytest.mark.asyncio
-async def test_search_tail_match_can_be_omitted_but_is_not_claimed_complete():
+async def test_search_tail_match_is_returned_before_bounded_turn_rendering():
     messages = large_messages("giant")
     messages[-2]["content"] += " only_at_end"
     result = await host_tool(messages).execute({"search": "only_at_end"})
     assert_bounded(result.output)
     assert result.output.startswith("--- Turn 1 ---")
-    assert "only_at_end" not in result.output
+    assert "Search match in message" in result.output
+    assert "only_at_end" in result.output
     assert "matching text may be omitted" in result.output
 
 

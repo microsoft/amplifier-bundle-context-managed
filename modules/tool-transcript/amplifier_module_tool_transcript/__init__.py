@@ -28,7 +28,7 @@ TOOL_DESCRIPTION = (
     "history is formatted and may be incomplete: long text or tool arguments may "
     "be truncated, and the output string is limited to 100,000 JSON-encoded ASCII "
     "bytes (including escaping, quotes and omission notice; excluding the host "
-    "receipt wrapper). Search selects whole turns, but matching text may be omitted. "
+    "receipt wrapper). Search selects whole turns and includes a short excerpt for text matches deep in a message. "
     "When archive IDs are configured, explicit archive requests instead return "
     "bounded complete raw records or original tool-result byte pages."
 )
@@ -254,6 +254,7 @@ class ReadTranscriptTool:
         range_indices = list(range(start, end + 1))  # 1-indexed turn numbers
 
         # Search filter (optional)
+        excerpts = {}
         search = input.get("search")
         if search:
             # Compile as regex (IGNORECASE); fall back to literal match on invalid regex
@@ -270,9 +271,24 @@ class ReadTranscriptTool:
                     for msg in turn_msgs
                     if isinstance(msg.get("content"), str)
                 )
-                if pattern.search(combined):
+                match = pattern.search(combined)
+                if match:
                     filtered_turns.append(turn_msgs)
                     filtered_indices.append(idx)
+                    # Locate the hit in the same plain-text fields already
+                    # searched. Keep regex matches across messages compatible.
+                    offset = 0
+                    for number, row in enumerate(turn_msgs, 1):
+                        text = row.get("content")
+                        if not isinstance(text, str):
+                            continue
+                        start = match.start() - offset
+                        if 0 <= start < len(text):
+                            if (start >= self._MAX_CONTENT_LENGTH
+                                    and row.get("role") in {"user", "assistant", "tool"}):
+                                excerpts[idx] = number, start
+                            break
+                        offset += len(text) + 1
 
             if not filtered_turns:
                 return ToolResult(success=True, output="No matches found.")
@@ -286,7 +302,14 @@ class ReadTranscriptTool:
             for position, (idx, messages) in enumerate(zip(filtered_indices, filtered_turns)):
                 if position:
                     yield "\n\n"
-                yield from self._iter_turn_parts(messages, idx)
+                rendered = self._iter_turn_parts(messages, idx)
+                yield next(rendered)  # Turn heading precedes the optional match excerpt.
+                if idx in excerpts:
+                    number, start = excerpts[idx]
+                    text = messages[number - 1]["content"]
+                    excerpt = text[max(0, start - 80):start + 320]
+                    yield f"\n[Search match in message {number}, character {start}] {excerpt}"
+                yield from rendered
 
         return ToolResult(success=True, output=self._bounded_output(parts()))
 
