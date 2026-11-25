@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from amplifier_core import ChatRequest, Message
 from amplifier_core.llm_errors import ContextLengthError
+from amplifier_module_context_managed.errors import CompactionError
 
 from .test_autonomous_compaction import provider as native_provider
 from .test_ordinary_pressure_count import TokenCountError
@@ -207,7 +208,33 @@ async def test_mac_native_oversized_preflight_is_independent_of_ordinary_dispatc
     model.compact_context.assert_not_awaited()
     assert (ctx._foreground_native_refusal is not None) == (native_decision == "oversized")
     model.release_media_request.assert_called_once_with(native_counts[0], request_options=None)
-    assert (await ctx.get_messages()) == rows
+    if native_decision == "oversized":
+        # Rebuilding the same revision's contents can schedule another check.
+        # The unchanged dispatch keeps the verified refusal and releases its request.
+        await ctx.set_messages(rows)
+        ctx.hooks = SimpleNamespace(emit=AsyncMock())
+        await ctx.get_measured_request_view(provider=model, retain_contents=[], count_view=count)
+        assert ctx.schedule_settled_compaction(provider=model, count_view=count, retain_contents=[])
+        with pytest.raises(CompactionError, match="native_input_oversized"):
+            await ctx._maintenance_task
+        assert len(native_counts) == 1
+        assert model.release_media_request.call_count == 2
+        assert not any(call.args[0] == "context:compaction_started" for call in ctx.hooks.emit.call_args_list)
+        assert ctx.checkpoint_status["lastNativeFailure"]["code"] == "native_input_oversized"
+        await ctx.add_message({"role": "user", "content": "Fresh input."})
+        await ctx.set_messages([*await ctx.get_messages(), {"role": "user", "content": "This input cannot fit."}])
+
+        async def too_large(view):
+            return attempt(view, 20000)
+
+        with pytest.raises(ContextLengthError):
+            await ctx.get_measured_request_view(provider=model, retain_contents=[], count_view=too_large)
+        assert ctx.checkpoint_status["lastNativeFailure"]["code"] == "native_input_oversized"
+        assert (await ctx.get_messages())[:-2] == rows
+    assert (await ctx.get_messages())[:len(rows)] == rows
+    if native_decision == "oversized":
+        await ctx.set_messages([{"role": "user", "content": "Different history."}])
+        assert "lastNativeFailure" not in ctx.checkpoint_status
 
 
 @pytest.mark.asyncio
