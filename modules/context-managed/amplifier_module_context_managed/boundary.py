@@ -609,7 +609,8 @@ class BoundaryContextManager:
                 request = summary_request(SUMMARY_PROMPT, fragment, progress["text"], progress["config"])
 
                 async def complete_fragment():
-                    fits, budget = await request_fits(summarizer, request)
+                    fits, budget = await request_fits(summarizer, request,
+                        output_reserve=resolved_config["summary_output_reserve"])
                     check_source()
                     if budget:
                         stats["last_request_budget"] = budget
@@ -644,7 +645,10 @@ class BoundaryContextManager:
                     continue
                 add_usage(stats, getattr(response, "usage", None))
                 if getattr(response, "finish_reason", None) in {"length", "max_tokens", "incomplete"}:
-                    raise CompactionError("summary_output_limit", "The summary exhausted its output allowance. Increase summary_max_output_tokens and retry; no incomplete note was committed.")
+                    message = "The summary exhausted its output allowance. No incomplete note was committed."
+                    if request.max_output_tokens is not None:
+                        message += " Increase summary_max_output_tokens to retry with a larger allowance."
+                    raise CompactionError("summary_output_limit", message)
                 text = "\n".join(block.text for block in response.content
                     if getattr(block, "type", None) == "text" and getattr(block, "text", None))
                 if not text.strip():

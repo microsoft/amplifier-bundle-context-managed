@@ -36,7 +36,7 @@ def provider(window=1000000, output=128000, *, finish=None, reject=False):
         if reject:
             raise ContextLengthError("Output allowance exceeds the selected model ceiling")
         # Simulates a provider-owned assembly clamp, including its reservation.
-        cap = min(request.max_output_tokens, output)
+        cap = output if request.max_output_tokens is None else min(request.max_output_tokens, output)
         tokens = sum(len(str(row.content)) for row in request.messages) // 4
         return {"estimated_input_tokens": tokens, "input_limit_tokens": window - cap - 4096,
                 "context_token_budget": kwargs["context_estimate"], "max_output_tokens": cap,
@@ -47,11 +47,11 @@ def provider(window=1000000, output=128000, *, finish=None, reject=False):
         calls.append(request.model_dump())
         # The real incident's needed output is censored above8192. This finite
         # fixture requires12000 combined thinking/text tokens, not12000 text.
-        reason = finish or ("max_tokens" if request.max_output_tokens < 12000 else "end_turn")
+        reason = finish or ("max_tokens" if request.max_output_tokens is not None and request.max_output_tokens < 12000 else "end_turn")
         return SimpleNamespace(finish_reason=reason, content=[
             SimpleNamespace(type="thinking", text="not-summary-evidence"),
             SimpleNamespace(type="text", text="ORBIT; RECEIPT-completed; originals retained.")],
-            usage={"input_tokens": 100, "output_tokens": min(12000, request.max_output_tokens)})
+            usage={"input_tokens": 100, "output_tokens": min(12000, request.max_output_tokens or output)})
 
     obj = SimpleNamespace(name="fixture", default_model="large", complete=complete,
         request_budget=count, get_info=lambda: SimpleNamespace(defaults={
@@ -107,6 +107,67 @@ async def test_unknown_profile_does_not_gain_larger_default():
     model.get_info = lambda: SimpleNamespace(defaults={}, capabilities=[])
     await context._prepare(model, None, [])
     assert {row["max_output_tokens"] for row in model.calls} == {8192}
+
+
+def service_limited_provider():
+    model = provider()
+    info = model.get_info()
+    info.capabilities = ["output_limit:service_default_only"]
+    model.get_info = lambda: info
+    return model
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config,wire_limit", [({}, None), ({"summary_max_output_tokens": 16384}, 16384)])
+async def test_service_managed_default_applies_only_to_an_implicit_limit(config, wire_limit):
+    context, model = await manager(**config), service_limited_provider()
+    await context._prepare(model, None, [])
+    assert model.calls and {req["max_output_tokens"] for req in model.calls} == {wire_limit}
+
+
+@pytest.mark.asyncio
+async def test_service_default_keeps_room_for_output_without_adding_a_wire_limit():
+    model = service_limited_provider()
+    config, _ = await summary_config(model, {})
+    request = summary_request("system", "source", "", config)
+    async def count(counted, **kwargs):
+        assert counted is request and counted.max_output_tokens is None
+        return {"estimated_input_tokens": 30000, "input_limit_tokens": 60000, "max_output_tokens": 4096}
+    model.request_budget = count
+    fits, budget = await request_fits(model, request, output_reserve=config["summary_output_reserve"])
+    assert not fits and budget["output_reserve"] == 32768
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config", [{}, {"summary_target_tokens": 1500}])
+async def test_resume_with_service_default_requires_same_generation_contract(config):
+    context = await manager(summary_max_calls=1, **config)
+    with pytest.raises(CompactionError):
+        await context._prepare(service_limited_provider(), None, [])
+    record = context.export_checkpoint(IDENTITY)
+    assert record["configurationVersion"] == 6
+    contract = record["progress"]["generation_contract"]
+    assert contract["max_output_tokens"] is None
+    assert ("prompt_sha256" in contract) == bool(config)
+
+    cold = await manager(**config)
+    assert cold.restore_checkpoint(record, IDENTITY)["status"] == "resuming"
+    replacement = provider()
+    with pytest.raises(CompactionError, match="summary_progress_incompatible"):
+        await cold._prepare(replacement, None, [])
+    assert not replacement.counts and not replacement.calls
+
+    assert cold.restore_checkpoint(record, IDENTITY)["status"] == "resuming"
+    await cold._prepare(service_limited_provider(), None, [])
+    assert cold.summary is not None
+    downgraded = copy.deepcopy(record)
+    downgraded["configurationVersion"] = 2
+    downgraded["sha256"] = digest({k: v for k, v in downgraded.items() if k != "sha256"})
+    assert cold.restore_checkpoint(downgraded, IDENTITY)["status"] != "resuming"
+
+    contract["max_output_tokens"] = 8192
+    record["sha256"] = digest({k: v for k, v in record.items() if k != "sha256"})
+    assert cold.restore_checkpoint(record, IDENTITY)["status"] != "resuming"
 
 
 @pytest.mark.asyncio

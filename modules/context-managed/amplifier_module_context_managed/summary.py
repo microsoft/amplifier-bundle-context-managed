@@ -50,7 +50,10 @@ async def summary_config(provider, config):
     allowance = explicit if explicit is not None else (32768 if large else 8192)
     if explicit is None and output is not None:
         allowance = min(allowance, output)
-    resolved["summary_max_output_tokens"] = allowance
+    capabilities = info.get("capabilities", ()) if isinstance(info, dict) else getattr(info, "capabilities", ())
+    service_default = explicit is None and "output_limit:service_default_only" in (capabilities or ())
+    resolved["summary_output_reserve"] = allowance
+    resolved["summary_max_output_tokens"] = None if service_default else allowance
     return resolved, info
 
 
@@ -239,7 +242,7 @@ def summary_request(prompt, source, previous, config):
     )
 
 
-async def request_fits(provider, request):
+async def request_fits(provider, request, *, output_reserve=None):
     """Use the provider's assembled-request budget when it supports one."""
     check = getattr(provider, "request_budget", None)
     if not callable(check):
@@ -264,7 +267,7 @@ async def request_fits(provider, request):
     metadata = request.metadata or {}
     portable = (metadata.get("purpose") == "context-compaction"
                 and "native_compaction_request_context" not in metadata)
-    reserve = request.max_output_tokens
+    reserve = request.max_output_tokens if request.max_output_tokens is not None else output_reserve
     reserve = reserve if type(reserve) is int and reserve > 0 else 0
     effective = decision.get("max_output_tokens")
     if portable and "max_output_tokens" in decision:
@@ -275,7 +278,7 @@ async def request_fits(provider, request):
         # advertisement is inconsistent with the caller cap: reserve all of it
         # rather than lowering it to manufacture admission. Never change the
         # request or increase its caller-owned generation allowance.
-        reserve = effective
+        reserve = max(reserve, effective) if request.max_output_tokens is None else effective
     # Portable summaries conservatively reserve output even when a provider's
     # input allowance is independent (Anthropic) or already output-subtracted.
     # The latter can split earlier, never admit a larger request. Native
