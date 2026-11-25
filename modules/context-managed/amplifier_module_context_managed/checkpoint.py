@@ -135,6 +135,12 @@ def export_checkpoint(context, identity):
         partial["provider"] = list(partial["provider"])
         if "generation_contract" in progress:
             partial["generation_contract"] = copy.deepcopy(progress["generation_contract"])
+    version = 3 if isinstance(text, dict) else 2
+    if partial and "generation_contract" in partial:
+        contract = partial["generation_contract"]
+        version = 5 if "prompt_sha256" in contract else 4
+        if contract["max_output_tokens"] is None:
+            version = 6  # The service chose the output limit for these fragments.
     record = {"format": FORMAT, "identity": copy.deepcopy(identity),
               # Version 3 fences older readers that would silently discard the
               # native summary's omission offsets. The configuration hash is
@@ -142,9 +148,7 @@ def export_checkpoint(context, identity):
               "configuration": context.checkpoint_configuration(),
               # Older readers must not resume new output-contract progress as
               # though it had been generated under their implicit 8192 default.
-              "configurationVersion": (5 if partial and "prompt_sha256" in partial.get("generation_contract", {})
-                                       else 4 if partial and "generation_contract" in partial
-                                       else 3 if isinstance(text, dict) else 2),
+              "configurationVersion": version,
               "sourceRevision": {"messages": through, "sha256": context._checkpoint_prefix_digest.digest(context.messages[:through], digest, canonical_bytes)},
               "summary": ({"throughMessage": through, **({"message": copy.deepcopy(text), "kind": "native",
                           "version": 2, "omittedIndices": copy.deepcopy(context.summary_omitted_indices)}
@@ -180,13 +184,13 @@ def restore_checkpoint(context, record, identity):
         if record.get("configurationVersion", 1) == 1:
             from .boundary import SUMMARY_PROMPT
             configuration = digest({"config": context.config, "prompt": SUMMARY_PROMPT})
-        elif record.get("configurationVersion") not in {2, 3, 4, 5}:
+        elif record.get("configurationVersion") not in {2, 3, 4, 5, 6}:
             raise ValueError("Checkpoint configuration contract is unsupported")
         elif ("foreground_continuation" in context.config
                 and type(context.config["foreground_continuation"]) is not bool):
             raise ValueError("Foreground continuation policy must be boolean")
         if record.get("configuration") != configuration:
-            if record.get("configurationVersion") not in {2, 3, 4, 5}:
+            if record.get("configurationVersion") not in {2, 3, 4, 5, 6}:
                 raise ValueError("Summary configuration or prompt changed")
             for flag in (False, True):
                 if record.get("configuration") == context._checkpoint_configuration(flag):
@@ -200,18 +204,23 @@ def restore_checkpoint(context, record, identity):
                 or summary.get("version") != 2):
             raise ValueError("Checkpoint requires the native omission contract")
         partial = record.get("progress")
-        if record.get("configurationVersion") in {4, 5}:
+        version = record.get("configurationVersion")
+        if version not in {4, 5, 6} and isinstance(partial, dict) and "generation_contract" in partial:
+            raise ValueError("Saved summary generation contract requires checkpoint version 4 or newer")
+        if version in {4, 5, 6}:
             contract = partial.get("generation_contract") if isinstance(partial, dict) else None
             keys = {"model", "max_output_tokens", "reasoning_effort"}
-            if record["configurationVersion"] == 5:
+            if not isinstance(contract, dict):
+                raise ValueError("Saved summary generation contract is invalid")
+            if version == 5 or (version == 6 and "prompt_sha256" in contract):
                 keys.add("prompt_sha256")
-            if (not isinstance(contract, dict) or set(contract) != keys
-                    or type(contract.get("max_output_tokens")) is not int
-                    or contract["max_output_tokens"] <= 0
+            cap = contract.get("max_output_tokens")
+            valid_cap = (cap is None) if version == 6 else (type(cap) is int and cap > 0)
+            if (set(contract) != keys or not valid_cap
                     or contract["model"] is not None and not isinstance(contract["model"], str)
                     or contract["reasoning_effort"] is not None and not isinstance(contract["reasoning_effort"], str)):
                 raise ValueError("Saved summary generation contract is invalid")
-            if record["configurationVersion"] == 5:
+            if "prompt_sha256" in keys:
                 prompt_digest = contract["prompt_sha256"]
                 if (not isinstance(prompt_digest, str) or len(prompt_digest) != 64
                         or any(c not in "0123456789abcdef" for c in prompt_digest)):
@@ -236,7 +245,7 @@ def restore_checkpoint(context, record, identity):
             recovery = record.get("recovery")
             allowed = {"throughMessage", "message", "kind", "version"}
             if version == 2:
-                if record.get("configurationVersion") not in {3, 4, 5}:
+                if record.get("configurationVersion") not in {3, 4, 5, 6}:
                     raise ValueError("Native omission contract requires checkpoint version 3")
                 allowed.add("omittedIndices")
                 # The only reconstructible hash-only provenance is known empty.

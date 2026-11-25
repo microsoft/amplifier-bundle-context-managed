@@ -70,7 +70,7 @@ async def summarize_once(context, provider, pending, previous_note, config, info
         else:
             excerpt = "\n".join(pending)
         request = summary_request(prompt, excerpt, prior, config)
-        fits, budget = await request_fits(provider, request)
+        fits, budget = await request_fits(provider, request, output_reserve=config["summary_output_reserve"])
         guard()
         counted = budget and budget["measurement_kind"] == "provider_count"
         if fits and (len(excerpt) <= limit or (preflight_whole and counted)):
